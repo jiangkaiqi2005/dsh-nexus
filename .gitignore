@@ -1,0 +1,9 @@
+.scratch/
+.agents/
+.codebase-memory/
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+*.log
