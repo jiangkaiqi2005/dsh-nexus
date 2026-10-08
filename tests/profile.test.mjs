@@ -1,0 +1,100 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile, mkdir, writeFile, symlink, copyFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { resolve } from 'node:path'
+import { WebSocketServer } from 'ws'
+
+const root = resolve('.')
+const cli = resolve('node_modules/@deepseek-ai/dsh/lib/bin.js')
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+async function profileTurn(scenario) {
+  const home = resolve('.scratch/nexus-v1', scenario + '-' + Date.now())
+  const profile = resolve(home, 'profiles/nexus-test')
+  const report = resolve(home, 'result.json')
+  const fixture = resolve(home, 'probe')
+  const real = scenario === 'real'
+  const prompt = real ? '请只回复“Nexus 已接入”，不要输出其他文字。' : 'Hello Nexus'
+  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+  await new Promise(resolve => server.once('listening', resolve))
+  const wire = []
+  server.on('connection', socket => {
+    if (scenario === 'closed') return socket.close()
+    if (scenario === 'timeout') return
+    socket.send(JSON.stringify({ type: 'session.created' }))
+    socket.on('message', bytes => {
+      const event = JSON.parse(bytes.toString()); wire.push(event)
+      if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
+      if (event.type === 'response.create') {
+        socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Nexus profile reply' }))
+        socket.send(JSON.stringify({ type: 'response.done', response: { status: scenario === 'failed' ? 'failed' : 'completed' } }))
+      }
+    })
+  })
+  await mkdir(fixture, { recursive: true })
+  await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-verification-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
+  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-verification-probe\n      name: nexus-verification-probe\n      config:\n        report: ${JSON.stringify(report)}\n        prompt: ${JSON.stringify(prompt)}\n`)
+  await copyFile(resolve('tests/probe.js'), resolve(fixture, 'index.js'))
+  await mkdir(resolve(profile, 'node_modules'), { recursive: true })
+  await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
+  await symlink(fixture, resolve(profile, 'node_modules/nexus-verification-probe'), 'junction')
+  await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-verification-probe'] } } }))
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'Qiyu_API_KEY' : scenario === 'missing' ? 'NEXUS_MISSING_KEY' : 'NEXUS_TEST_KEY'}\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: ${real ? 30000 : 500}\n`)
+  const env = { ...process.env, DSH_HOME: home, NEXUS_TEST_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }
+  delete env.NEXUS_MISSING_KEY
+  const child = spawn(process.execPath, [cli, '--profile', 'nexus-test', '--port', '0', '--no-open'], { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  let output = ''; child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data })
+  try {
+    let result
+    for (let i = 0; i < 450; i++) { try { result = JSON.parse(await readFile(report, 'utf8')); break } catch {} if (child.exitCode !== null) break; await delay(100) }
+    assert.ok(result, 'profile did not produce a report: ' + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-6000))
+    assert.equal(result.error, undefined, result.stack)
+    assert.equal(result.agentId, result.sessionId)
+    assert.equal(result.workerIsSupervisor, false)
+    assert.equal(result.workerModel, 'ordinary-model')
+    assert.ok(result.workerEvents.some(event => event.type === 'assistant/message' && event.data.message.content[0].text === 'Ordinary worker reply'))
+    assert.ok(result.duplicateRejected)
+    assert.ok(result.writerRejected)
+    assert.ok(result.released)
+    assert.equal(result.events.filter(event => event.type === 'turn/start').length, 1)
+    assert.equal(result.events.filter(event => event.type === 'user/message').length, 1)
+    assert.ok(result.events.some(event => event.type === 'user/message' && event.data.content[0].text === prompt))
+    assert.deepEqual(result.events.map(event => event.seq), Array.from({ length: result.events.length }, (_, index) => index))
+    return { ...result, wire, report }
+  } finally {
+    child.kill('SIGTERM')
+    await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(5000)])
+    for (const socket of server.clients) socket.terminate()
+    await new Promise(resolve => server.close(resolve))
+  }
+}
+
+test('official profile records a text turn, preserves the ordinary factory and releases identity and writer', { timeout: 60000 }, async () => {
+  const result = await profileTurn('success')
+  assert.ok(result.events.some(event => event.type === 'assistant/message' && event.data.message.content[0].text === 'Nexus profile reply'))
+  assert.equal(result.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+  assert.deepEqual(result.wire.find(event => event.type === 'session.update').session.modalities, ['text'])
+  assert.ok(result.wire.some(event => event.type === 'conversation.item.create' && event.item.content[0].text === 'Hello Nexus'))
+})
+
+for (const [scenario, code] of [['missing', 'CREDENTIAL_MISSING'], ['closed', 'CONNECTION_CLOSED'], ['timeout', 'TIMEOUT'], ['failed', 'RESPONSE_FAILED']]) {
+  test(`official profile reports ${code} without a completed turn or fake assistant`, { timeout: 60000 }, async () => {
+    const result = await profileTurn(scenario)
+    const reason = result.events.findLast(event => event.type === 'turn/end').data.reason
+    assert.equal(reason.kind, 'error')
+    assert.equal(reason.error.code, code)
+    assert.equal(result.events.filter(event => event.type === 'assistant/message').length, 0)
+    if (scenario === 'failed') assert.ok(result.events.some(event => event.type === 'assistant/attempt'))
+  })
+}
+
+test('real DashScope text-only turn through the official Host profile', { skip: process.env.NEXUS_REAL_TEST !== '1', timeout: 60000 }, async () => {
+  const result = await profileTurn('real')
+  const reason = result.events.findLast(event => event.type === 'turn/end').data.reason
+  assert.equal(reason.kind, 'completed', JSON.stringify(reason))
+  const message = result.events.find(event => event.type === 'assistant/message').data.message
+  assert.equal(message.source.model, 'qwen3.8-omni-flash-realtime')
+  assert.match(message.content[0].text, /Nexus.*已接入/)
+  console.log('real native log:', result.report)
+})

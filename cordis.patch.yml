@@ -1,0 +1,6 @@
+- insert:
+    - id: nexus
+      name: dsh-nexus
+      config:
+        credentialRef: DASHSCOPE_API_KEY
+        endpoint: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
