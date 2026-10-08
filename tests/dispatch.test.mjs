@@ -8,8 +8,8 @@ import { WebSocketServer } from 'ws'
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
 const root = resolve('.')
 
-async function dispatchProfile(real = false) {
-  const home = resolve('.scratch/nexus-v1', `dispatch-${real ? 'real' : 'controlled'}-${Date.now()}`)
+async function dispatchProfile(real = false, deepCold = false) {
+  const home = resolve('.scratch/nexus-v1', `dispatch-${deepCold ? 'deep-cold' : real ? 'real' : 'controlled'}-${Date.now()}`)
   const profile = resolve(home, 'profiles/nexus-dispatch')
   const fixture = resolve(home, 'probe')
   const workspace = resolve(home, 'workspace')
@@ -18,7 +18,10 @@ async function dispatchProfile(real = false) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await new Promise(accept => server.once('listening', accept))
   const wire = []
-  const plan = [
+  const plan = deepCold ? [
+    ['nexus_list_sessions', {}], ['nexus_read_session', { sessionId: 'deep-grandchild' }],
+    ['nexus_send_session', { sessionId: 'deep-grandchild', text: 'run-deep-grandchild' }],
+  ] : [
     ['nexus_list_sessions', {}], ['nexus_read_session', { sessionId: 'user-existing' }],
     ['nexus_send_session', { sessionId: 'user-existing', text: 'run-existing' }],
     ['nexus_create_session', { cwd: workspace, text: 'run-new' }],
@@ -52,8 +55,8 @@ async function dispatchProfile(real = false) {
           socket.send(JSON.stringify({ type: 'response.function_call_arguments.done', ...item }))
           socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed', output: [item] } }))
         } else {
-          assert.ok(history.some(item => item.type === 'function_call_output' && item.call_id === 'dispatch-call-5' && JSON.parse(item.output).isError))
-          socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Dispatch accepted, one target failed; completion requires worker records.' }))
+          if (!deepCold) assert.ok(history.some(item => item.type === 'function_call_output' && item.call_id === 'dispatch-call-5' && JSON.parse(item.output).isError))
+          socket.send(JSON.stringify({ type: 'response.text.delta', delta: deepCold ? 'The deep target dispatch failed because its direct parent is cold.' : 'Dispatch accepted, one target failed; completion requires worker records.' }))
           socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))
         }
       }
@@ -62,7 +65,7 @@ async function dispatchProfile(real = false) {
   const prompt = real ? `请实际使用工具完成测试：先列出工作会话，读取已有普通会话user-existing的上下文，向它发送任务“run-existing-real”；再在工作区${workspace}新建普通会话并发送任务“run-new-real”；随后尝试向不存在的missing-target发送任务（预期失败）。以工具结果为据，简短说明哪些派活已接受及哪个失败，不要将接受说成完成。` : 'Dispatch to existing and new native sessions; exercise steering, stopping, failure and full configured capabilities.'
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-dispatch-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
   await copyFile(resolve('tests/dispatch-probe.js'), resolve(fixture, 'index.js'))
-  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-dispatch-probe\n      name: nexus-dispatch-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n        real: ${real}\n        prompt: ${JSON.stringify(prompt)}\n`)
+  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-dispatch-probe\n      name: nexus-dispatch-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n        real: ${real}\n        deepCold: ${deepCold}\n        prompt: ${JSON.stringify(prompt)}\n`)
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-dispatch-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-dispatch-probe'] } } }))
@@ -82,6 +85,7 @@ async function dispatchProfile(real = false) {
       assert.ok(answer)
       assert.deepEqual([answer.data.turn, answer.data.step], [call.data.turn, call.data.step])
     }
+    if (deepCold) { console.log('deep cold dispatch evidence:', report); return { ...result, wire } }
     const existing = result.workers.find(item => item.id === 'user-existing')
     assert.equal(existing.ownedByNexus, false)
     assert.equal(existing.header.parentSession, undefined)
@@ -136,4 +140,16 @@ test('accurate Realtime model dispatches existing and new native workers and rep
   const final = result.events.findLast(event => event.type === 'assistant/message').data.message
   assert.equal(final.source.model, 'qwen3.8-omni-flash-realtime')
   assert.ok(final.content.some(part => part.type === 'text' && part.text.length))
+})
+
+// Explicit opt-in specification regression: rc.2 has no manager-owned,
+// non-driving parent activation API. Keep the unmet acceptance visible.
+test('deep cold continuable target accepts a direct Nexus dispatch', { skip: process.env.NEXUS_DEEP_COLD !== '1', timeout: 120000 }, async () => {
+  const result = await dispatchProfile(false, true)
+  assert.ok(result.deepColdPrepared)
+  const target = result.workers.find(item => item.id === 'deep-grandchild')
+  assert.equal(target.header.parentSession, 'deep-parent')
+  const answer = result.events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === 'dispatch-call-3').data.message
+  assert.equal(answer.isError, false, JSON.stringify(answer.content))
+  assert.ok(target.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch' && event.data.content[0].text === 'run-deep-grandchild'))
 })

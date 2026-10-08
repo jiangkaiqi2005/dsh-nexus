@@ -51,3 +51,35 @@ git diff --check
 最终 typecheck、build 和文档收束后的 `git diff --check` 通过；默认完整 suite 共 21 项：18 passed、0 failed、3 skipped（真实文字、真实跨进程恢复、真实调度默认跳过）。真实调度检查另行 1 passed、0 failed。运行真实检查需要临时 `NEXUS_DISPATCH_KEY`、`NEXUS_REAL_DISPATCH=1`，可选 `NEXUS_REAL_ENDPOINT`。此次只读已授权的 `C:\Users\25330\.qiyu\provider.json` top-level 凭据，密钥只进入临时进程环境和隔离 Host 原生 credentials 服务，不进入命令参数、profile、日志或源码。
 
 用户已禁止 Computer Use。本票没有控制用户窗口、浏览器或工作中的 Desktop，没有给用户 profile 安装新包，没有读写其非空主管 journal。用户 Desktop 中的新版实际安装、冷恢复和调度尚未验收。语音、自动结果回流和多层冷 subagent parent 的直接投递不属于本次已通过的实证范围。
+
+## 首轮评审与修复轮 1：未解决的深层冷投递
+
+首轮 Standards 为 approve；Spec 为 changes_requested，唯一必修 P2 指向 `src/work-sessions.ts` 的 direct parent resolve。票 03 要求全部工作会话、不依赖直属关系，并要求指定已有会话时实际收到任务。上一节的单层双冷实证不能覆盖 direct parent 自身是冷 subagent 的情况；该发现成立，本轮处置为 **cannot_fix**，不是 rejected，也没有将票 03 宣告完整通过。
+
+定向回归由官方 Host 创建普通 `deep-root` → continuable `deep-parent` → continuable `deep-grandchild`。两层 child 均先完成初始化，再通过原生 manager drain 冷却；root 仍存活。主管依次全局列读、读取孙会话、直接调用 `nexus_send_session(sessionId=deep-grandchild, text=run-deep-grandchild)`，没有额外向祖先投递任务。
+
+最终证据为 `.scratch/nexus-v1/dispatch-deep-cold-1791467833523/result.json` 和同目录 `wire.json`，输出保存在 `.scratch/nexus-v1/deep-cold-red-final.txt`。目标验收断言要求 `isError: false`，实际是 `isError: true`，原生错误为 `session "deep-parent" is owned by subagent routing`，**1 failed、0 passed，进程退出码 1**。parent/grandchild 均 inactive，durable parent 仍分别为 deep-root/deep-parent，两者的 Nexus 调度消息均为 0；原来初始化 completed 不被算成这次任务执行。主管收到第 3 次调用的真实失败结果并完成文字失败续答，释放身份/writer，没有隐式唤醒 parent。
+
+复现这条仍为红色的规格验收：
+
+```powershell
+$env:NEXUS_DEEP_COLD = '1'
+try { node --test --test-name-pattern='deep cold' tests/dispatch.test.mjs }
+finally { Remove-Item Env:NEXUS_DEEP_COLD }
+```
+
+该测试明确 opt-in，仅避免已知未满足的验收阻断其他场景；gating 不代表通过。修改探针后的相关文件检查 `node --test tests/dispatch.test.mjs` 为 1 passed、2 skipped（真实模型、深层冷验收）。上一节完整 21 项/18 passed/3 skipped 的证据来自实现提交 `f82f79e52333d4d4d57f8fc4807c3b1976fa36d1`；本轮没有重跑完整 suite 或付费模型，也没有声称新增红测后的完整 suite 已绿。
+
+当前发布 rc.2 的精确接口证据：
+
+| 入口 | 发布源码/类型位置与限制 |
+| --- | --- |
+| SessionController.resolveAgent | `dsh-api-session-controller/lib/types/index.d.ts:66` 明确 ordinary Session。`agent.js:107` 对 origin=subagent 判定路由所有权，`:120` 返回 session/agent-busy；`:435` 的 resumeObserved 同样拒绝该身份。inspect/list/page/follow 仅观察，没有 activate 方法。 |
+| 官方 Host queue/steer adapter | `dsh-subagent/lib/types/internal.d.ts:46`、`:57` 都要求 exact live direct parent；internal 子路径仅提供投递，没有不驱动 parent 的物化入口。 |
+| 远程 subagent.prompt | `dsh-subagent/lib/types/index.js:282` 要求 parent 已 live；`:286` 创建 kind=user 来源，不能用于 Nexus 来源适配，也不能恢复冷 parent。 |
+| manager cold resume | `dsh-subagent/lib/types/continuation.d.ts:37` activations 与 `:111` coldResume 均 private；`continuation.js:338` 的 coldResume 后必经 `:382` submitMaterialized，物化与消息投递绑定。Runtime 的 continuations 自身也 private（index.d.ts:119）。 |
+| AgentRegistry.resume | `dsh-agent/lib/types/index.d.ts:112` 支持 parentAgent，但 `:133` 起明确 handle 归调用方持有。manager 的实际恢复另外通过自己的 ownerCtx（continuation-activation.js:451），建立 inbox/ancestry/pool/observer 并登记 resident（:482）。没有已发布 Runtime adoption/materialize API 将外部 handle 纳入同一 manager。仅调用 registry.resume 再把 parent 当作 manager-owned，会改变 native lifecycle ownership。 |
+
+源码对应 node_modules 中精确 `0.2.0-rc.2` 发布包；图索引不覆盖这些符号后才回退读取发布源码。没有使用 private fields、另建 continuation manager、虚构 Symbol、空消息唤醒、parent 来源冒充或修改 Host 来绕过约束。
+
+最小后续适配范围建议：保留当前普通全局会话、live 子会话和普通冷 parent→冷 child 的已验证能力，将更深层冷 parent 的直接派活延后到宿主提供保持原 manager ownership 且不驱动 parent 的 typed Host activation/delivery 适配入口时完成。此方案会缩小原票 03 的全部会话要求，不能据此宣告原票验收通过；目前没有改 Spec/ticket，P2 必修仍未解决。本轮按用户要求在票 03 流程结束后停止，不开始票 04。
