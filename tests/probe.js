@@ -91,7 +91,7 @@ export function apply(ctx, config) {
           await agent.whenIdle()
         }
         const pending = { queued: [...agent.inbox.nextTurn], steering: [...agent.inbox.nextStep] }
-        await ctx.parallel('session/flush', agent.id)
+        await ctx.parallel('session/flush', agent.session)
         const workerEvents = worker.agent.session.snapshotEvents()
         const entry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-nexus')
         if (!entry) throw new Error('Nexus loader entry missing')

@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-workspace'
+import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import { Supervisor, type Config } from './supervisor.js'
 
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials']
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
 
 export async function apply(ctx: Context, config: Config) {
@@ -19,6 +21,7 @@ export async function apply(ctx: Context, config: Config) {
     yield () => { if (startupOwnsWriter) return handle.close() }
     const agent = new Supervisor(ctx, session, config)
     yield agent.scope.rawDispose
+    session.append('model/selection', agent.options)
     yield ctx.sessions.enter(session)
     yield ctx.agents.enter(agent, undefined)
     // Reverse teardown: stop/idle → close durable writer → registry → session → scope.
@@ -27,6 +30,9 @@ export async function apply(ctx: Context, config: Config) {
     yield () => agent.stop()
     if (session.seq) await handle.append(session.snapshotEvents())
     await handle.flush()
+    // The native blank-session composer requires durable Workspace membership.
+    const workspace = await ctx.workspaceRegistry.create(process.cwd(), 'Nexus')
+    await workspace.attachSession(session.id)
     ctx.sessions.announce(session)
     await ctx.agents.announce(agent, 'startup')
   }, 'nexus supervisor')
