@@ -1,12 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { agentEvents, type Agent, type AgentCancelCause, type AgentStatus, type CancelOptions, type InboxTarget } from '@deepseek-ai/dsh-agent'
+import { agentEvents, assembleContextFor, type Agent, type AgentCancelCause, type AgentStatus, type CancelOptions, type InboxTarget } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { createAssistantMessage, createSystemMessage, LlmAttemptId, type StreamChunk, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createSystemMessage, createUserMessage, createToolResultMessage, LlmAttemptId, type StreamChunk, type UserMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-stream'
 import type { Session, TurnEndReason } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
-import { INSTRUCTIONS, MODEL, RealtimeFailure, reply } from './realtime.js'
+import { INSTRUCTIONS, MODEL, RealtimeFailure, TextConnection } from './realtime.js'
+import { registerWorkSessions } from './work-sessions.js'
+import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type { ToolExecutionResult, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
 export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number }
 
@@ -24,6 +28,10 @@ export class Supervisor implements Agent {
   private wakeRequested = false
   private turn = 0
   private revision = 0
+  private composed = false
+  private tools!: ToolRuntime
+  private prompt!: SystemPrompt
+  private connection?: TextConnection
   status: AgentStatus = 'idle'
 
   constructor(ctx: Context, readonly session: Session, private config: Config) {
@@ -91,16 +99,11 @@ export class Supervisor implements Agent {
         if (!messages.length) continue
         step = 1
         this.session.append('step/start', { turn, step })
-        if (!this.session.requestHeader()) {
-          this.session.append('request/header', { header: { config: this.options }, reason: 'initial' })
-          this.session.append('system/message', { turn, step, message: createSystemMessage(INSTRUCTIONS) }, { surfaceOp: 'append' })
-        }
-        for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
-        await this.request(turn, step, signal)
+        let toolsPending = await this.request(turn, step, signal, messages)
         // Stopping listeners may add steering for another step of this turn.
         while (true) {
           signal.throwIfAborted()
-          if (!this.inbox.nextStep.length) {
+          if (!toolsPending && !this.inbox.nextStep.length) {
             await this.events.serial('agent/turn-stopping', { turn, signal })
             signal.throwIfAborted()
             if (!this.inbox.nextStep.length) break
@@ -109,8 +112,7 @@ export class Supervisor implements Agent {
           step++
           this.session.append('step/start', { turn, step })
           const steering = this.inbox.claim(turn, 'next-step')
-          for (const message of steering) this.session.append('user/message', message, { surfaceOp: 'append' })
-          await this.request(turn, step, signal)
+          toolsPending = await this.request(turn, step, signal, steering)
         }
       } catch (error) {
         if (signal.aborted) reason = { kind: 'aborted', reason: signal.reason }
@@ -120,6 +122,8 @@ export class Supervisor implements Agent {
           this.events.emit('agent/error', { turn, step, error: new Error(failure.message) })
         }
       } finally {
+        this.connection?.close()
+        this.connection = undefined
         if (step) this.session.append('step/end', { turn, step })
         this.session.append('turn/end', { turn, reason: reason ?? { kind: 'completed' } })
       }
@@ -127,7 +131,34 @@ export class Supervisor implements Agent {
       this.wakeRequested = false
     } while (this.inbox.nextTurn.length || this.inbox.nextStep.length)
   }
-  private async request(turn: number, step: number, signal: AbortSignal) {
+  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[]) {
+    if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(INSTRUCTIONS) }, { surfaceOp: 'append' })
+    for (const message of inputs) this.session.append('user/message', message, { surfaceOp: 'append' })
+    // Preset retention audits the settled Host loader; compose at first work
+    // rather than awaiting that loader from its own plugin activation.
+    if (!this.composed) {
+      await this.ctx.agentPresets.mount(this.ctx)
+      const tools = this.ctx.agentPresets.serviceFor(this, 'tools') ?? this.ctx.get('tools')
+      const prompt = this.ctx.agentPresets.serviceFor(this, 'systemPrompt') ?? this.ctx.get('systemPrompt')
+      if (!tools || !prompt) throw new Error('The selected native preset must provide tools and systemPrompt')
+      this.tools = this.ctx.reflect.trace(tools)
+      this.prompt = this.ctx.reflect.trace(prompt)
+      registerWorkSessions(this.ctx, this, this.tools)
+      this.composed = true
+    }
+    signal.throwIfAborted()
+    const assembly = await this.prompt.assemble(assembleContextFor(this, signal))
+    const instructions = `${INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
+    const previous = this.session.requestHeader()
+    const header = { config: this.options, tools: assembly.tools }
+    this.session.append('request/header', { header, reason: !previous ? 'initial' : JSON.stringify(previous) === JSON.stringify(header) ? 'series' : 'change' })
+    const system = this.session.surface.nodes.map(seq => this.session.eventAt(seq)).find(event => event?.type === 'system/message')
+    if (!system || JSON.stringify(system.data.message.content) !== JSON.stringify([{ type: 'text', text: instructions }])) {
+      this.session.append('system/message', { turn, step, message: createSystemMessage(instructions) }, system ? { surfaceOp: { op: 'replace', startSeq: system.seq, endSeq: system.seq }, sourceEventSeqs: [system.seq] } : { surfaceOp: 'append' })
+    }
+    const context = renderContextSnapshot(assembly)
+    const retained = this.session.snapshotEvents().findLast(event => event.type === 'user/message' && event.data.source.kind === 'nexus-runtime')
+    if (context && (!retained || retained.type !== 'user/message' || JSON.stringify(retained.data.content) !== JSON.stringify([{ type: 'text', text: context }]))) this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'nexus-runtime', form: 'snapshot' } }), { surfaceOp: 'append' })
     const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
     if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
     signal.throwIfAborted()
@@ -136,6 +167,7 @@ export class Supervisor implements Agent {
     const stream = new AssistantStreamAccumulator()
     let index = 0
     let text = ''
+    let calls: ToolCallBlock[] = []
     const push = (chunk: StreamChunk) => {
       const time = Date.now()
       stream.push({ time, chunk })
@@ -144,10 +176,19 @@ export class Supervisor implements Agent {
     this.events.emit('agent/assistant-stream', { frame: { type: 'start', attemptId, revision, turn, step } })
     push({ type: 'block-start', index: 0, blockType: 'text' })
     try {
-      text = await reply(this.config.endpoint, credential.value, this.session.snapshotEvents(), signal, this.config.timeoutMs ?? 30000, delta => { text += delta; push({ type: 'text-delta', index: 0, text: delta }) })
+      const surface = new Set(this.session.surface.nodes)
+      this.connection ??= new TextConnection(this.config.endpoint, credential.value, signal, this.config.timeoutMs ?? 30000)
+      const response = await this.connection.request(this.session.snapshotEvents().filter(event => surface.has(event.seq)), delta => { text += delta; push({ type: 'text-delta', index: 0, text: delta }) }, assembly.tools, instructions)
+      text = response.text
+      calls = response.calls
       push({ type: 'block-end', index: 0, block: { type: 'text', text } })
-      push({ type: 'finish', reason: { kind: 'stop' } })
-      const event = this.session.append('assistant/message', { turn, step, message: createAssistantMessage({ content: [{ type: 'text', text }], source: this.options }), stream: [...stream.snapshot()] }, { surfaceOp: 'append' })
+      for (const [offset, call] of response.calls.entries()) {
+        push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' })
+        push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments })
+        push({ type: 'block-end', index: offset + 1, block: call })
+      }
+      push({ type: 'finish', reason: { kind: response.calls.length ? 'tool-calls' : 'stop' } })
+      const event = this.session.append('assistant/message', { turn, step, message: createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...response.calls], source: this.options }), stream: [...stream.snapshot()] }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {
       if (text) push({ type: 'block-end', index: 0, block: { type: 'text', text } })
@@ -156,6 +197,22 @@ export class Supervisor implements Agent {
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: event.seq } } })
       throw error
     }
+    let concluded = false
+    for (const call of calls) concluded = (await this.execute(call, turn, step, signal)) || concluded
+    return calls.length > 0 && !concluded
+  }
+  private async execute(call: ToolCallBlock, turn: number, step: number, signal: AbortSignal) {
+    this.session.append('tool/call', { turn, step, callId: call.id, name: call.name, arguments: call.arguments })
+    let result: ToolExecutionResult | undefined
+    let args: unknown
+    try { args = JSON.parse(call.arguments) }
+    catch {
+      result = { isError: true, error: { message: 'Tool arguments must be valid JSON.', info: { name: 'ToolArgumentsError', code: 'INVALID_ARGUMENTS' } }, content: [{ type: 'text', text: 'Tool arguments must be valid JSON.' }] }
+    }
+    result ??= await this.ctx.agents.withInitiator(this, () => this.tools.execute({ callId: call.id, name: call.name, arguments: args, agent: this, signal }))
+    this.session.append('tool/result', { turn, step, message: createToolResultMessage({ callId: call.id, content: result.content, isError: result.isError }), ...(result.isError && result.error.info ? { error: result.error.info } : {}), ...(result.meta === undefined ? {} : { meta: result.meta }) }, { surfaceOp: 'append' })
+    for (const message of result.additionalContexts ?? []) this.session.append('user/message', message, { surfaceOp: 'append' })
+    return result.concludesTurn === true
   }
   async stop() {
     this.disposed = true

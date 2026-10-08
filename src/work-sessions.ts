@@ -1,0 +1,97 @@
+import type { Context } from '@deepseek-ai/cordis'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { defineTool, type ToolRuntime } from '@deepseek-ai/dsh-tools'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-api-session-controller'
+import type {} from '@deepseek-ai/dsh-workspace'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { queueHostSubagentPrompt, steerHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'nexus-dispatch': { kind: 'nexus-dispatch'; sessionId: string; callId: string }
+    'nexus-runtime': { kind: 'nexus-runtime'; form: 'snapshot' }
+  }
+}
+
+/** Add global-session operations to the caller's existing native capability set. */
+export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: ToolRuntime) {
+  const output = { schema: { type: 'json' } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+  const sessionId = { type: 'string', required: true, description: 'Target native work session identity.' } as const
+  const text = { type: 'string', required: true, description: 'Task or guidance to deliver, preserving the user requirements.' } as const
+  const resolve = async (id: string) => {
+    if (id === supervisor.id) throw new Error('Use the main conversation to address Nexus itself')
+    const live = ctx.agents.get(SessionId(id))
+    if (live) return live
+    const target = await ctx.sessionController.resolveAgent(SessionId(id))
+    if ('error' in target) throw target.error
+    return target.agent
+  }
+  const send = (agent: Agent, message: string, callId: string) => {
+    const input = createUserMessage({ content: [{ type: 'text', text: message }], source: { kind: 'nexus-dispatch', sessionId: supervisor.id, callId } })
+    const delivery = agent.status === 'running' ? 'steer' : 'followup'
+    agent[delivery](input)
+    return { sessionId: agent.id, messageId: input.id, delivery, accepted: true, completed: false }
+  }
+  const deliver = async (id: string, message: string, callId: string, signal: AbortSignal) => {
+    if (id === supervisor.id) throw new Error('Use the main conversation to address Nexus itself')
+    const state = await ctx.sessionController.inspect(SessionId(id), signal)
+    if (state.meta.origin !== 'subagent' || !state.meta.parentSession) {
+      const agent = await resolve(id)
+      signal.throwIfAborted()
+      return send(agent, message, callId)
+    }
+    // The published rc.2 Host adapter retains the native Activation and real
+    // parent's authority while preserving Nexus attribution through cold resume.
+    const parent = await resolve(state.meta.parentSession)
+    signal.throwIfAborted()
+    const delivery = ctx.agents.get(SessionId(id))?.status === 'running' ? 'steer' : 'followup'
+    const adapter = delivery === 'steer' ? steerHostSubagentPrompt : queueHostSubagentPrompt
+    const messageId = await adapter(ctx.subagents, parent, SessionId(id), [{ type: 'text', text: message }], { kind: 'nexus-dispatch', sessionId: supervisor.id, callId }, signal)
+    return { sessionId: id, messageId, delivery, accepted: true, completed: false }
+  }
+  tools.register(defineTool({ name: 'nexus_list_sessions', description: 'List all native work sessions, including existing user-created sessions, without activating them.', parameters: {}, output,
+    execute: async (_args, exec) => JSON.parse(JSON.stringify({ items: (await ctx.sessionController.list({}, exec.signal)).items.filter(item => item.sessionId !== supervisor.id) })) as JsonValue,
+  }))
+  tools.register(defineTool({ name: 'nexus_read_session', description: 'Read native work session state and a bounded history page. Use beforeSeq to read earlier context when hasMore is true.', parameters: { sessionId, beforeSeq: { type: 'integer' } }, output,
+    execute: async (args, exec) => {
+      const id = SessionId(args.sessionId)
+      const state = await ctx.sessionController.inspect(id, exec.signal)
+      const throughSeq = state.events.length - 1
+      const address = state.meta.origin === 'subagent' && state.meta.parentSession ? { kind: 'subagent' as const, parentSessionId: state.meta.parentSession, childSessionId: id, mode: 'unknown' as const } : { kind: 'session' as const, sessionId: id }
+      const page = await ctx.sessionController.page({ address, throughSeq, ...(args.beforeSeq === undefined ? {} : { beforeSeq: args.beforeSeq }), maxMessages: 30 }, exec.signal)
+      return JSON.parse(JSON.stringify({ sessionId: id, header: state.meta, status: ctx.agents.get(id)?.status ?? 'inactive', throughSeq, ...page })) as JsonValue
+    },
+  }))
+  tools.register(defineTool({ name: 'nexus_create_session', description: 'Create a native work session in an explicit absolute workspace directory and start its task. Acceptance is not completion. Uses the normal worker factory and selected preset.', parameters: { cwd: { type: 'string', required: true }, text, agentPreset: { type: 'string' } }, output,
+    execute: async (args, exec) => {
+      exec.signal.throwIfAborted()
+      const workspace = await ctx.workspaceRegistry.create(args.cwd)
+      exec.signal.throwIfAborted()
+      const created = await ctx.sessionController.create({ workspaceId: workspace.id, ...(args.agentPreset ? { agentPreset: args.agentPreset } : {}) })
+      exec.signal.throwIfAborted()
+      return send(await resolve(created.sessionId), args.text, exec.callId)
+    },
+  }))
+  tools.register(defineTool({ name: 'nexus_send_session', description: 'Deliver a task to any existing work session. Idle agents wake; running agents receive native next-step steering. Acceptance is not completion.', parameters: { sessionId, text }, output,
+    execute: async (args, exec) => {
+      return deliver(args.sessionId, args.text, exec.callId, exec.signal)
+    },
+  }))
+  tools.register(defineTool({ name: 'nexus_stop_session', description: 'Request native cancellation of a work session current turn while retaining its queued input. Use only when the goal calls for stopping; acceptance is not completion.', parameters: { sessionId }, output,
+    execute: async (args, exec) => {
+      const state = await ctx.sessionController.inspect(SessionId(args.sessionId), exec.signal)
+      if (state.meta.origin === 'subagent' && state.meta.parentSession) {
+        const parent = await resolve(state.meta.parentSession)
+        exec.signal.throwIfAborted()
+        ctx.subagents.interrupt(SessionId(args.sessionId), { kind: 'ancestor', agent: parent })
+        return { sessionId: args.sessionId, accepted: true, completed: false }
+      }
+      const agent = await resolve(args.sessionId)
+      exec.signal.throwIfAborted()
+      agent.cancel({ kind: 'hook', reason: `Nexus ${supervisor.id} tool ${exec.callId}` }, { keepInbox: true })
+      return { sessionId: agent.id, accepted: true, completed: false }
+    },
+  }))
+}

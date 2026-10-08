@@ -61,8 +61,8 @@ async function profileTurn(scenario) {
     assert.ok(result.released)
     if (!['cancel-retain', 'cancel-replace', 'stop-before-wake', 'stopping-steer', 'stopping-cancel'].includes(scenario)) {
       assert.equal(result.events.filter(event => event.type === 'turn/start').length, 1)
-      assert.equal(result.events.filter(event => event.type === 'user/message').length, 1)
-      assert.ok(result.events.some(event => event.type === 'user/message' && event.data.content[0].text === prompt))
+      assert.equal(result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length, 1)
+      assert.ok(result.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.content[0].text === prompt))
     }
     assert.deepEqual(result.events.map(event => event.seq), Array.from({ length: result.events.length }, (_, index) => index))
     return { ...result, wire, report }
@@ -86,7 +86,7 @@ test('cancel before admission preserves queued and steering input when keepInbox
   const result = await profileTurn('cancel-retain')
   assert.equal(result.pending.queued.length, 1)
   assert.equal(result.pending.steering.length, 1)
-  assert.equal(result.events.filter(event => event.type === 'user/message').length, 0)
+  assert.equal(result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length, 0)
   assert.equal(result.events.filter(event => event.type === 'step/start').length, 0)
   assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason), [{ kind: 'aborted', reason: { kind: 'user' } }])
   assert.equal(result.wire.length, 0)
@@ -96,7 +96,7 @@ test('new input after cancel runs in a fresh turn instead of the cancelled wake'
   const result = await profileTurn('cancel-replace')
   assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind), ['aborted', 'completed'])
   assert.deepEqual(result.events.filter(event => event.type === 'step/start').map(event => event.data), [{ turn: 2, step: 1 }])
-  assert.deepEqual(result.events.filter(event => event.type === 'user/message').map(event => event.data.content[0].text), ['Hello Nexus'])
+  assert.deepEqual(result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').map(event => event.data.content[0].text), ['Hello Nexus'])
   assert.equal(result.events.filter(event => event.type === 'assistant/message').length, 1)
   assert.equal(result.pending.queued.length + result.pending.steering.length, 0)
 })
@@ -105,7 +105,7 @@ test('stop before admission records an aborted empty turn without a model call',
   const result = await profileTurn('stop-before-wake')
   assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason), [{ kind: 'aborted', reason: { kind: 'disposed' } }])
   assert.equal(result.events.filter(event => event.type === 'step/start').length, 0)
-  assert.equal(result.events.filter(event => event.type === 'user/message').length, 0)
+  assert.equal(result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length, 0)
   assert.equal(result.wire.length, 0)
 })
 
