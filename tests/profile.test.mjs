@@ -44,7 +44,7 @@ async function profileTurn(scenario) {
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  disabled: ${scenario === 'late-conflict'}\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'Qiyu_API_KEY' : scenario === 'missing' ? 'NEXUS_MISSING_KEY' : 'NEXUS_TEST_KEY'}\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: ${real ? 30000 : 500}\n`)
   const env = { ...process.env, DSH_HOME: home, NEXUS_TEST_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }
   delete env.NEXUS_MISSING_KEY
-  const child = spawn(process.execPath, [cli, '--profile', 'nexus-test', '--port', '0', '--no-open'], { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [cli, '--profile', 'nexus-test', '--port', '0', '--no-open'], { cwd: root, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   let output = ''; child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data })
   try {
     let result

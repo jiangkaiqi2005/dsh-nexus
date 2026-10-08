@@ -32,6 +32,12 @@ export class Supervisor implements Agent {
     this.ctx = this.scope.ctx
     this.events = agentEvents(this.ctx, this)
     this.inbox = new NativeInbox(session, this.ctx, this.events)
+    for (const event of session.snapshotEvents()) {
+      if (event.type === 'turn/start') this.turn = Math.max(this.turn, event.data.turn)
+    }
+    // Stream attempts are transient; the durable cursor keeps new ids distinct
+    // from attempts emitted by earlier process instances.
+    this.revision = session.seq
   }
   private setStatus(status: AgentStatus) { this.status = status; this.events.emit('agent/status', { status }) }
   send(message: UserMessage, target: InboxTarget, wakeup: boolean) {

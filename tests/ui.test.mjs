@@ -53,7 +53,7 @@ export function apply(ctx, config) {
   await symlink(fixture, resolve(profile, 'node_modules/nexus-ui-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-ui-probe'] } } }))
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_UI_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n    timeoutMs: 5000\n`)
-  const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-ui', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, NEXUS_UI_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-ui', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, NEXUS_UI_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   let output = ''
   child.stdout.on('data', data => { output += data })
   child.stderr.on('data', data => { output += data })
