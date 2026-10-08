@@ -1,6 +1,6 @@
 # 票 01 实施与验证记录
 
-验证日期：2026-10-08。当前状态：已实现可评审文字切片，受控验证和准确型号真实文字轮次通过；用户 Desktop 安装与界面验收未完成，票 01 尚未完成。
+验证日期：2026-10-08。当前状态：已实现可评审文字切片，完成首轮评审修复，受控验证和准确型号真实文字轮次通过；0.1.0 已经官方 CLI 安装到用户 Desktop，修复包更新及界面验收未完成，票 01 尚未完成。
 
 ## 当前兼容基线
 
@@ -31,11 +31,22 @@
 | 重复身份与写所有权 | 通过 | 重复 registry identity、并行 write open 拒绝；Nexus 卸载后身份注销、重新取得独占写权、读取关闭后的完整记录 |
 | 失败行为 | 通过 | CREDENTIAL_MISSING、CONNECTION_CLOSED、TIMEOUT、RESPONSE_FAILED；后者保留失败 attempt，不登记假完成 |
 | 准确型号真实端点调用 | 通过 | 用户明确提供的本地 provider.json 配置，经临时 Host credentials 引用调用；实际回复“Nexus 已接入”，卸载后重新开写句柄读取原生日志 |
-| 用户 Desktop 安装和原生界面 | 未验证 | 尚未安装到用户 desktop profile；侧栏按钮、消息投影、插件 metadata 与 SVG 的实际呈现仍需实机查看 |
+| 用户 Desktop 安装 | 首包通过 | 0.1.0 打包文件经 Desktop 自带 CLI 安装，exit 0；实际 Desktop 重开生成固定主管的原生 header。0.1.1 修复包尚待更新 |
+| 用户 Desktop 原生界面与文字轮次 | 未验证 | 侧栏按钮、消息投影、插件 metadata 与 SVG 的实际呈现仍需实机查看；原生 managed credentials 已配置默认引用，不能以独立 profile 的真实调用代替实机验收 |
 
 受控端点仅替代外部模型，Host、默认 worker factory、SessionController、projection 和压缩 JSONL persistence 均使用 rc.2 产品 composition。测试没有用临时拼装 Context 代替官方 profile。模拟响应和原生实际落盘是不同层次的证据，不能将前者称为真实模型通过。
 
-真实调用证据：`.scratch/nexus-v1/real-1791458748463/result.json`。所用型号为 `qwen3.8-omni-flash-realtime`，端点为 `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`，仅输出文字。用户提供的 `C:\Users\25330\.qiyu\provider.json` 只读；密钥仅传入验证进程的临时环境，再由 Host credentials 读取，不写入插件、profile、日志或此文档。
+真实调用证据：首包 `.scratch/nexus-v1/real-1791458748463/result.json`，修复后 `.scratch/nexus-v1/real-1791460173067/result.json`。所用型号为 `qwen3.8-omni-flash-realtime`，端点为 `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`，仅输出文字。用户提供的 `C:\Users\25330\.qiyu\provider.json` 只读；密钥仅传入验证进程的临时环境，再由 Host credentials 读取，不写入插件、profile、日志或此文档。
+
+## 首轮评审修复
+
+- S1 与规格取消边界：在 claim 前检查 abort，取消清除本轮已有 wake 请求；保留 queued/steering 时不把它们写成已消费用户消息。空取消轮次仍记录原生 turn/start 与 aborted turn/end，取消后的新输入在新 signal 与下一 turn 执行。
+- S2：每次文字回复后先检查 abort，等待 turn-stopping 后再次检查 abort 与 steering；停止监听器新增 steering 在当前 turn 的下一 step 执行。
+- S3：取得 native writer 后立即挂保底关闭 disposer，在正常关闭 disposer 注册后转交所有权；正常卸载维持 stop/idle → writer close → registry/session/scope。插件 apply 等待异步 effect setup，使启动失败可由官方生命周期观察。
+
+新增六个公开边界回归：提前 cancel 保留两种队列、取消后替代输入、提前 stop、turn-stopping steering、turn-stopping cancel、prepare/create/enter 之间竞争身份导致启动失败。测试仍通过真实官方 profile 和原生存储执行；竞争身份通过公开 Cordis 生命周期与 Session prepare/enter 发布，没有替换 persistence 服务。旧实现六项均复现失败；其中 writer 泄漏先表现为重新 open write 的 SessionAlreadyOwnedError，最终回归在同身份 create 时表现为 SessionAlreadyExistsError（旧 pending owner 未释放）。修复后重新 create、flush、close、open write、read 均通过，竞争 Session 未被覆盖。
+
+首轮修复只覆盖票 01，不接入票 02 的重启恢复。协调者只读检查当前 Desktop journal，仅含 header、无事件行。修复包实机首次创建验收需要先正常退出 Desktop，完整备份并隔离该空测试 session 目录，保留原件与检查证据；任何用户/assistant/tool/pending 记录非空时不得用此重置。此操作尚未执行，且不能算恢复验收。
 
 初期两个环境候选均返回 HTTP 401，日志如实记录失败。有效配置首次握手成功但产生 `COMMON_ERROR`：参考 Qiyu 已实际验证的协议，补齐该端点在纯文字模式也要求的 `voice=Tina`、`input_audio_format=pcm16`、`output_audio_format=pcm24`、`input_audio_transcription.model=gummy-realtime-v1`，使用裸 `response.create`，真实轮次随后通过。输出模态仍严格为 `['text']`；收到音频输出会判为失败。这是当前实际端点的验证结论，不承诺其他地域端点 schema 相同。[官方客户端事件](https://help.aliyun.com/en/model-studio/client-events)的 text-only 支持与上述旧端点必要字段差异仍需按实际配置核对。
 
@@ -49,7 +60,7 @@ npm test
 npm pack
 ```
 
-受控完整套件结果：5 passed，真实调用用例默认 1 skipped。测试保留每次独立 profile 与原生 read-handle 输出在 `.scratch/nexus-v1/<scenario>-<timestamp>/result.json`。打包文件清单包含 dist 全部运行模块、client.js、patch、locale 和 icon；不包含源码测试、验证 profile 或凭据。
+受控完整套件结果：11 passed，真实调用用例默认 1 skipped。真实调用修复后单独执行，1 passed。测试保留每次独立 profile 与原生 read-handle 输出在 `.scratch/nexus-v1/<scenario>-<timestamp>/result.json`。打包文件清单包含 dist 全部运行模块、client.js、patch、locale 和 icon；不包含源码测试、验证 profile 或凭据。
 
 仅在已确认可用的 Host 配置下运行真实用例，变量只传凭据引用与非密钥端点：
 
@@ -60,4 +71,4 @@ $env:NEXUS_REAL_ENDPOINT = '<适用地域或 Workspace 的完整 WS 地址>'
 node --test --test-name-pattern='real DashScope' tests/profile.test.mjs
 ```
 
-真实用例曾单独执行，结果为 1 passed。当前仍需通过 Desktop 自带 CLI 安装打包插件，将适用凭据保存为原生引用，再在用户 Desktop 查看固定侧栏入口、实际文字输入与原生消息显示、中英文 metadata 和 SVG 图标。此步骤之前不勾选票 01 的完整实机完成条件。
+当前仍需通过 Desktop 自带 CLI 更新 0.1.1 修复包，在用户 Desktop 查看固定侧栏入口、实际文字输入与原生消息显示、中英文 metadata 和 SVG 图标。协调者已通过 rc.2 原生 LocalCredentialProvider.set 配置默认 `DASHSCOPE_API_KEY` 引用：安全 descriptor 为 configured=true/source=file/writable=true，原有 refs 与 records 保持一致。值只进入 Host 的 native managed store，没有输出，也没有写插件、前端、repo/scratch；Nexus 不依赖 Qiyu 文件路径。此步骤之前不勾选票 01 的完整实机完成条件。

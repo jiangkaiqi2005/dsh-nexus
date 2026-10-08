@@ -43,6 +43,7 @@ export class Supervisor implements Agent {
   steer(message: UserMessage) { this.send(message, 'next-step', true) }
   inject(message: UserMessage) { this.send(message, 'next-step', false) }
   cancel(cause: AgentCancelCause, options?: CancelOptions) {
+    this.wakeRequested = false
     if (!options?.keepInbox) this.inbox.clear()
     this.abort?.abort(cause)
   }
@@ -79,6 +80,7 @@ export class Supervisor implements Agent {
       this.session.append('turn/start', { turn })
       let reason: TurnEndReason | undefined
       try {
+        signal.throwIfAborted()
         const messages = this.inbox.claim(turn)
         if (!messages.length) continue
         step = 1
@@ -89,8 +91,14 @@ export class Supervisor implements Agent {
         }
         for (const message of messages) this.session.append('user/message', message, { surfaceOp: 'append' })
         await this.request(turn, step, signal)
-        // Steering arriving during a text reply gets its nearest subsequent step.
-        while (this.inbox.nextStep.length && !signal.aborted) {
+        // Stopping listeners may add steering for another step of this turn.
+        while (true) {
+          signal.throwIfAborted()
+          if (!this.inbox.nextStep.length) {
+            await this.events.serial('agent/turn-stopping', { turn, signal })
+            signal.throwIfAborted()
+            if (!this.inbox.nextStep.length) break
+          }
           this.session.append('step/end', { turn, step })
           step++
           this.session.append('step/start', { turn, step })
@@ -98,7 +106,6 @@ export class Supervisor implements Agent {
           for (const message of steering) this.session.append('user/message', message, { surfaceOp: 'append' })
           await this.request(turn, step, signal)
         }
-        await this.events.serial('agent/turn-stopping', { turn, signal })
       } catch (error) {
         if (signal.aborted) reason = { kind: 'aborted', reason: signal.reason }
         else {

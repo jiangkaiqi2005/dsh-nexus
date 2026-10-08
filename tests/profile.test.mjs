@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile, mkdir, writeFile, symlink, copyFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { WebSocketServer } from 'ws'
 
 const root = resolve('.')
@@ -34,13 +35,13 @@ async function profileTurn(scenario) {
   })
   await mkdir(fixture, { recursive: true })
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-verification-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
-  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-verification-probe\n      name: nexus-verification-probe\n      config:\n        report: ${JSON.stringify(report)}\n        prompt: ${JSON.stringify(prompt)}\n`)
+  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-verification-probe\n      name: nexus-verification-probe\n      config:\n        report: ${JSON.stringify(report)}\n        prompt: ${JSON.stringify(prompt)}\n        scenario: ${scenario}\n        module: ${JSON.stringify(pathToFileURL(resolve('dist/index.js')).href)}\n`)
   await copyFile(resolve('tests/probe.js'), resolve(fixture, 'index.js'))
   await mkdir(resolve(profile, 'node_modules'), { recursive: true })
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-verification-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-verification-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'Qiyu_API_KEY' : scenario === 'missing' ? 'NEXUS_MISSING_KEY' : 'NEXUS_TEST_KEY'}\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: ${real ? 30000 : 500}\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  disabled: ${scenario === 'late-conflict'}\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'Qiyu_API_KEY' : scenario === 'missing' ? 'NEXUS_MISSING_KEY' : 'NEXUS_TEST_KEY'}\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: ${real ? 30000 : 500}\n`)
   const env = { ...process.env, DSH_HOME: home, NEXUS_TEST_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }
   delete env.NEXUS_MISSING_KEY
   const child = spawn(process.execPath, [cli, '--profile', 'nexus-test', '--port', '0', '--no-open'], { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -50,6 +51,7 @@ async function profileTurn(scenario) {
     for (let i = 0; i < 450; i++) { try { result = JSON.parse(await readFile(report, 'utf8')); break } catch {} if (child.exitCode !== null) break; await delay(100) }
     assert.ok(result, 'profile did not produce a report: ' + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-6000))
     assert.equal(result.error, undefined, result.stack)
+    if (scenario === 'late-conflict') return { ...result, wire, report }
     assert.equal(result.agentId, result.sessionId)
     assert.equal(result.workerIsSupervisor, false)
     assert.equal(result.workerModel, 'ordinary-model')
@@ -57,9 +59,11 @@ async function profileTurn(scenario) {
     assert.ok(result.duplicateRejected)
     assert.ok(result.writerRejected)
     assert.ok(result.released)
-    assert.equal(result.events.filter(event => event.type === 'turn/start').length, 1)
-    assert.equal(result.events.filter(event => event.type === 'user/message').length, 1)
-    assert.ok(result.events.some(event => event.type === 'user/message' && event.data.content[0].text === prompt))
+    if (!['cancel-retain', 'cancel-replace', 'stop-before-wake', 'stopping-steer', 'stopping-cancel'].includes(scenario)) {
+      assert.equal(result.events.filter(event => event.type === 'turn/start').length, 1)
+      assert.equal(result.events.filter(event => event.type === 'user/message').length, 1)
+      assert.ok(result.events.some(event => event.type === 'user/message' && event.data.content[0].text === prompt))
+    }
     assert.deepEqual(result.events.map(event => event.seq), Array.from({ length: result.events.length }, (_, index) => index))
     return { ...result, wire, report }
   } finally {
@@ -76,6 +80,57 @@ test('official profile records a text turn, preserves the ordinary factory and r
   assert.equal(result.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
   assert.deepEqual(result.wire.find(event => event.type === 'session.update').session.modalities, ['text'])
   assert.ok(result.wire.some(event => event.type === 'conversation.item.create' && event.item.content[0].text === 'Hello Nexus'))
+})
+
+test('cancel before admission preserves queued and steering input when keepInbox is set', { timeout: 60000 }, async () => {
+  const result = await profileTurn('cancel-retain')
+  assert.equal(result.pending.queued.length, 1)
+  assert.equal(result.pending.steering.length, 1)
+  assert.equal(result.events.filter(event => event.type === 'user/message').length, 0)
+  assert.equal(result.events.filter(event => event.type === 'step/start').length, 0)
+  assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason), [{ kind: 'aborted', reason: { kind: 'user' } }])
+  assert.equal(result.wire.length, 0)
+})
+
+test('new input after cancel runs in a fresh turn instead of the cancelled wake', { timeout: 60000 }, async () => {
+  const result = await profileTurn('cancel-replace')
+  assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind), ['aborted', 'completed'])
+  assert.deepEqual(result.events.filter(event => event.type === 'step/start').map(event => event.data), [{ turn: 2, step: 1 }])
+  assert.deepEqual(result.events.filter(event => event.type === 'user/message').map(event => event.data.content[0].text), ['Hello Nexus'])
+  assert.equal(result.events.filter(event => event.type === 'assistant/message').length, 1)
+  assert.equal(result.pending.queued.length + result.pending.steering.length, 0)
+})
+
+test('stop before admission records an aborted empty turn without a model call', { timeout: 60000 }, async () => {
+  const result = await profileTurn('stop-before-wake')
+  assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason), [{ kind: 'aborted', reason: { kind: 'disposed' } }])
+  assert.equal(result.events.filter(event => event.type === 'step/start').length, 0)
+  assert.equal(result.events.filter(event => event.type === 'user/message').length, 0)
+  assert.equal(result.wire.length, 0)
+})
+
+test('turn-stopping steering continues at the next step of the same turn', { timeout: 60000 }, async () => {
+  const result = await profileTurn('stopping-steer')
+  assert.equal(result.events.filter(event => event.type === 'turn/start').length, 1)
+  assert.deepEqual(result.events.filter(event => event.type === 'step/start').map(event => event.data), [{ turn: 1, step: 1 }, { turn: 1, step: 2 }])
+  assert.deepEqual(result.events.filter(event => event.type === 'assistant/message').map(event => [event.data.turn, event.data.step]), [[1, 1], [1, 2]])
+  assert.equal(result.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+})
+
+test('cancel at turn-stopping records an aborted terminal even after a model reply', { timeout: 60000 }, async () => {
+  const result = await profileTurn('stopping-cancel')
+  assert.equal(result.events.filter(event => event.type === 'assistant/message').length, 1)
+  assert.deepEqual(result.events.filter(event => event.type === 'turn/end').map(event => event.data.reason), [{ kind: 'aborted', reason: { kind: 'user' } }])
+})
+
+test('late native session publication rejects Nexus startup and releases its acquired writer', { timeout: 60000 }, async () => {
+  const result = await profileTurn('late-conflict')
+  assert.match(result.startupError, /nexus-supervisor.*already exists/)
+  assert.ok(result.competitorPreserved)
+  assert.equal(result.supervisorPublished, false)
+  assert.equal(result.header.id, 'nexus-supervisor')
+  assert.deepEqual(result.events, [])
+  assert.equal(result.wire.length, 0)
 })
 
 for (const [scenario, code] of [['missing', 'CREDENTIAL_MISSING'], ['closed', 'CONNECTION_CLOSED'], ['timeout', 'TIMEOUT'], ['failed', 'RESPONSE_FAILED']]) {
