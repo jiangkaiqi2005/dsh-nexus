@@ -8,7 +8,7 @@ Nexus 是 DeepSeek Harness 的实时语音管家插件，项目与包名为 `dsh
 
 点击侧栏底部 Nexus 即可在主管的原生会话输入文字；重复点击返回同一个主管。主管会话使用当前目录对应的原生工作区，已有工作区沿用其名称。
 
-按用户最新指示，当前适配现有 Desktop `0.2.0-rc.2`，不修改或升级 Desktop 程序；原先研究的 alpha.1 适配后置。受控 Host 验证与准确型号的真实文字轮次、原生落盘已通过；Desktop 入口与界面尚未实机验收。详见[票 01 验证记录](docs/verification/01-supervisor-text-session.md)。
+按用户最新指示，当前适配现有 Desktop `0.2.0-rc.2`，不修改或升级 Desktop 程序；原先研究的 alpha.1 适配后置。票 01 已通过受控 Host 验证、真实模型文字轮次和原生落盘验证，以及用户 Desktop 的入口、文字界面和插件 metadata 实机验收。详见[票 01 验证记录](docs/verification/01-supervisor-text-session.md)。
 
 构建：`npm ci --ignore-scripts`，`npm run build`，`npm test`，`npm pack`。测试使用 Windows 已安装的 Edge 无头模式；其他环境可通过 `NEXUS_TEST_BROWSER` 选择已安装的 Playwright 浏览器 channel。只安装打包后的 `.tgz`。Desktop 先正常退出，再通过其自带 `resources/runtime/cli/bin/dsh.cmd plugin --profile desktop add <tgz绝对路径>` 安装并重新打开；npm 版 CLI 不管理保留的 desktop profile。
 

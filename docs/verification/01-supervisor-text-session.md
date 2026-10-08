@@ -1,6 +1,6 @@
 # 票 01 实施与验证记录
 
-验证日期：2026-10-08。当前状态：完成两轮修复，受控 Host、真实无头原生 UI 和准确型号真实文字轮次通过；用户 Desktop 的 0.1.1 已安装且中文 metadata/SVG 实机通过，但文字入口受工作区归属阻断。0.1.2 待更新和实机文字验收，票 01 尚未完成。
+验证日期：2026-10-08。当前状态：完成两轮修复，票 01 必需验收证据已满足。受控 Host、无头原生 UI、准确型号真实调用、用户 Desktop 0.1.2 文字界面和原生落盘均通过；重启恢复属于票 02，尚未实施。
 
 ## 当前兼容基线
 
@@ -31,14 +31,22 @@
 | 重复身份与写所有权 | 通过 | 重复 registry identity、并行 write open 拒绝；Nexus 卸载后身份注销、重新取得独占写权、读取关闭后的完整记录 |
 | 失败行为 | 通过 | CREDENTIAL_MISSING、CONNECTION_CLOSED、TIMEOUT、RESPONSE_FAILED；后者保留失败 attempt，不登记假完成 |
 | 准确型号真实端点调用 | 通过 | 用户明确提供的本地 provider.json 配置，经临时 Host credentials 引用调用；实际回复“Nexus 已接入”，卸载后重新开写句柄读取原生日志 |
-| 用户 Desktop 安装 | 0.1.1 通过 | 打包文件经 Desktop 自带 CLI 安装，exit 0；实际 Desktop 重开生成固定主管的原生 header。0.1.2 尚待更新 |
-| 用户 Desktop 插件 metadata | 中文/SVG 通过 | 已安装 Nexus 详情显示 0.1.1、中文说明、原创蓝绿 SVG，以及一个组件运行中；英文实际呈现未检查 |
+| 用户 Desktop 安装 | 0.1.2 通过 | 打包文件经 Desktop 自带 CLI 安装并启动；当前为 0.1.2，宿主仍为 rc.2 |
+| 用户 Desktop 插件 metadata | 中英文/SVG 通过 | Nexus 详情显示 0.1.2、中英文说明、原创蓝绿 SVG，以及一个组件运行中；临时英文检查后恢复原中文 |
 | 原生 UI 无头文字回归 | 通过 | 官方 rc.2 profile + 实际 Edge headless：点击 footer，初次 composer 可输入且型号正确，重复点击保持主管；UI 用户/assistant 气泡与 live native read-handle 的 completed 记录一致 |
-| 用户 Desktop 文字轮次 | 待修复包实测 | 0.1.1 footer 能导航到主管，但空会话无 workspace membership 时要求选择工作区，选择后变成普通 worker。原生 managed credentials 已配置；独立 profile 的真实调用不能代替 Desktop 实机验收 |
+| 用户 Desktop 文字轮次 | 通过 | footer 直接打开可输入的主管，初始准确型号标签正确；实际回复“Nexus 桌面已接入”，1 turn / 1 step completed；重复 footer 保持同会话及已有回复，没有新增轮次 |
+| 用户 Desktop 原生落盘 | 通过 | 独立 rc.2 JsonlSessionPersistence 的只读实例 open/read，读取 15 条连续事件 seq 0..14，包含实际用户文字、准确型号 assistant 与 completed |
+| 关闭写句柄后的完整记录 | 通过（独立实际 Host） | 真实模型官方 profile `real-1791461816065` 卸载 Nexus，停止 driver、关闭 writer、释放身份，再取得 write handle 并读取完整交流；当前用户 Desktop writer 未关闭，未验证其退出 |
 
 受控端点仅替代外部模型，Host、默认 worker factory、SessionController、projection 和压缩 JSONL persistence 均使用 rc.2 产品 composition。测试没有用临时拼装 Context 代替官方 profile。模拟响应和原生实际落盘是不同层次的证据，不能将前者称为真实模型通过。
 
 真实调用证据：首包 `.scratch/nexus-v1/real-1791458748463/result.json`，修复一 `.scratch/nexus-v1/real-1791460173067/result.json`，修复二 `.scratch/nexus-v1/real-1791461816065/result.json`。所用型号为 `qwen3.8-omni-flash-realtime`，端点为 `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`，仅输出文字。用户提供的 `C:\Users\25330\.qiyu\provider.json` 只读；密钥仅传入验证进程的临时环境，再由 Host credentials 读取，不写入插件、profile、日志或此文档。
+
+Desktop 实机输入为 `请只回复“Nexus 桌面已接入”，不要输出其他文字。`，实际 Qwen 回复 `Nexus 桌面已接入`。持久化摘要保存于 `.scratch/nexus-v1/desktop-0.1.2-live-read.json`：固定身份 `nexus-supervisor`，模型 `qwen3.8-omni-flash-realtime`，15 条事件 seq 0..14；model/selection 位于初始事实，request/header 位于实际 turn 内，user/message、assistant/message、step/end、completed turn/end 完整。重复入口之后没有新增轮次。
+
+该 Desktop 落盘证据来自新的只读 provider 实例：`Context → plugin(JsonlSessionPersistence, { root: '<原生 sessions 根目录>' }) → open('nexus-supervisor', 'read') → handle.read() → handle.close() → fiber.dispose()`。这是对实际原生日志的独立冷读；用户 Desktop 的 writer 此时仍在运行，并未重启或关闭。日志包含多个独立 Zstd frames，Node `zstdDecompressSync` 仅返回首个 header frame 的结果不能代表整份记录；须使用原生 handle 读取，不能据首 frame 误判事件未落盘。
+
+票 01 的界面和真实模型要求由 Desktop 实机结果覆盖；关闭写句柄后可读的要求由独立实际官方 Host/profile 的关闭、重取写权及读回结果覆盖。标准与规格评审均确认这些分项证据满足本票 mandatory；不追加关闭用户正在工作的 Desktop 作为完成前置条件。其实际 shutdown 和重启尚未验证，票 02 恢复仍未实施。用户现已要求停止 Computer Use；后续验证只使用后台独立 profiles、CLI 或只读接口，不关闭、重启或抢焦点用户 Desktop。
 
 ## 首轮评审修复
 
@@ -85,4 +93,4 @@ $env:NEXUS_REAL_ENDPOINT = '<适用地域或 Workspace 的完整 WS 地址>'
 node --test --test-name-pattern='real DashScope' tests/profile.test.mjs
 ```
 
-当前仍需通过 Desktop 自带 CLI 更新 0.1.2，在用户 Desktop 验证实际文字输入与消息显示，以及英文 metadata。中文 metadata/SVG 已实机查看。协调者已通过 rc.2 原生 LocalCredentialProvider.set 配置默认 `DASHSCOPE_API_KEY` 引用：安全 descriptor 为 configured=true/source=file/writable=true，原有 refs 与 records 保持一致。值只进入 Host 的 native managed store，没有输出，也没有写插件、前端、repo/scratch；Nexus 不依赖 Qiyu 文件路径。此步骤之前不勾选票 01 的完整实机完成条件。
+Desktop 0.1.2 的文字、消息显示、中英文 metadata 与 SVG 实机检查已完成。协调者通过 rc.2 原生 LocalCredentialProvider.set 配置默认 `DASHSCOPE_API_KEY` 引用：安全 descriptor 为 configured=true/source=file/writable=true，原有 refs 与 records 保持一致。值只进入 Host 的 native managed store，没有输出，也没有写插件、前端、repo/scratch；Nexus 不依赖 Qiyu 文件路径。
