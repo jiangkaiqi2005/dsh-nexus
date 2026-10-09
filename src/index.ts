@@ -4,6 +4,7 @@ import { SessionPersistenceNotFoundError, type SessionHandle } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import { Supervisor, type Config } from './supervisor.js'
+import { ResultRelay } from './results.js'
 
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'subagents']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
@@ -12,6 +13,7 @@ export async function apply(ctx: Context, config: Config) {
   if (!config.credentialRef || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.credentialRef)) throw new Error('Nexus requires a Host credential reference')
   const endpoint = new URL(config.endpoint)
   if (!['wss:', 'ws:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw new Error('Nexus requires a WebSocket endpoint without embedded credentials')
+  if (config.deliverResults !== undefined && typeof config.deliverResults !== 'boolean') throw new Error('Nexus deliverResults must be a boolean')
   if (config.timeoutMs !== undefined && (!Number.isSafeInteger(config.timeoutMs) || config.timeoutMs <= 0)) throw new Error('Nexus timeout must be a positive integer')
   return ctx.effect(async function* () {
     let session: Session | undefined
@@ -52,6 +54,8 @@ export async function apply(ctx: Context, config: Config) {
     yield () => handle.close()
     startupOwnsWriter = false
     yield () => agent.stop()
+    // Observe only after the supervisor can accept inbox work; disposed first on teardown.
+    if (config.deliverResults !== false) yield new ResultRelay(ctx, agent).start()
     // The native blank-session composer requires durable Workspace membership.
     const workspace = await ctx.workspaceRegistry.create(session.header.cwd ?? process.cwd(), 'Nexus')
     await workspace.attachSession(session.id)
