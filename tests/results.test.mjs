@@ -137,3 +137,92 @@ test('start subscribes to the native session event feed and contains delivery er
   assert.equal(warnings.length, 1)
   assert.doesNotMatch(warnings[0], /undefined/)
 })
+
+// Direct user input to work sessions (ticket 05): admitted inbox insertions carrying the Host prompt rpcId.
+const userInput = (text, rpcId = `rpc-${text}`) => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user', rpcId } })
+const admit = (target, inbox, message) => target.append('agent/inbox/spliced', { target: inbox, start: 0, removedCount: 0, inserted: [message] })
+
+test('direct user input in a work session reaches the supervisor under its own source, steering and queued alike', () => {
+  const target = supervisor()
+  const worker = session('w')
+  const r = relay(target)
+  const steer = userInput('switch to THEME-AMBER')
+  const queued = userInput('afterwards write the summary')
+  r.observe(worker, admit(worker, 'next-step', steer))
+  r.observe(worker, admit(worker, 'next-turn', queued))
+  assert.deepEqual(target.delivered.map(message => [message.role, message.source.kind, message.source.form, message.source.sessionId, message.source.messageId, message.source.target]), [
+    ['user', 'nexus-user-input', 'notice', 'w', steer.id, 'next-step'], ['user', 'nexus-user-input', 'notice', 'w', queued.id, 'next-turn'],
+  ])
+  assert.match(textOf(target.delivered[0]), /^Direct user input in a work session\. The user entered this into that work session itself, not into this conversation; it is not your dispatch and not an automatic result\.\nSession: w \(ordinary session\), workspace: E:\/work\nAdmitted as native steering/)
+  assert.match(textOf(target.delivered[0]), new RegExp(`User message: ${steer.id}\nContent:\nswitch to THEME-AMBER\n`))
+  assert.match(textOf(target.delivered[1]), /Admitted as a queued prompt[\s\S]*afterwards write the summary/)
+  assert.match(target.delivered[0].source.summary, /^user to w: switch to THEME-AMBER/)
+})
+
+test('only the user own input is mirrored: no supervisor feedback, Nexus dispatch, agent-delegated task, claim or replayed notice', () => {
+  const target = supervisor()
+  const worker = session('w')
+  const child = session('child', { origin: 'subagent', parentSession: SessionId('parent') })
+  const r = relay(target)
+  r.observe(target.session, admit(target.session, 'next-turn', userInput('said to Nexus itself')))
+  r.observe(worker, admit(worker, 'next-step', createUserMessage({ content: [{ type: 'text', text: 'dispatched' }], source: { kind: 'nexus-dispatch', sessionId: 'sup', callId: 'c1' } })))
+  r.observe(child, admit(child, 'next-turn', createUserMessage({ content: [{ type: 'text', text: 'delegated by the parent agent' }], source: { kind: 'user' } })))
+  r.observe(worker, worker.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }))
+  r.observe(worker, worker.append('user/message', userInput('a claimed copy is not a new admission'), { surfaceOp: 'append' }))
+  assert.equal(target.delivered.length, 0)
+  // The user's own input to a subagent session through its composer is mirrored and names the parent.
+  r.observe(child, admit(child, 'next-step', userInput('child, stop after the parser')))
+  assert.equal(target.delivered.length, 1)
+  assert.match(textOf(target.delivered[0]), /Session: child \(subagent of parent\)[\s\S]*child, stop after the parser/)
+})
+
+test('a queued input moved to steering is mirrored once; an edit is mirrored again; a restart neither repeats nor forgets', () => {
+  const target = supervisor()
+  const worker = session('w')
+  const r = relay(target)
+  const original = userInput('use THEME-AMBER', 'rpc-edit')
+  r.observe(worker, admit(worker, 'next-turn', original))
+  r.observe(worker, admit(worker, 'next-step', original)) // queue → steer moves the same message
+  r.observe(worker, admit(worker, 'next-step', original)) // duplicate feed
+  const edited = { ...original, content: [{ type: 'text', text: 'use THEME-CRIMSON instead' }] }
+  r.observe(worker, admit(worker, 'next-turn', edited))
+  assert.equal(target.delivered.length, 2)
+  assert.doesNotMatch(textOf(target.delivered[0]), /edited/)
+  assert.match(textOf(target.delivered[1]), /The user edited this pending message; this content replaces the earlier version\.[\s\S]*THEME-CRIMSON/)
+  assert.equal(target.delivered[1].source.messageId, original.id)
+  for (const message of target.delivered) target.session.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 0, inserted: [message] })
+  const restarted = relay(target)
+  restarted.observe(worker, admit(worker, 'next-step', edited))
+  restarted.observe(worker, admit(worker, 'next-step', original))
+  assert.equal(target.delivered.length, 2)
+  restarted.observe(worker, admit(worker, 'next-turn', { ...original, content: [{ type: 'text', text: 'third version' }] }))
+  assert.equal(target.delivered.length, 3)
+  assert.match(textOf(target.delivered[2]), /The user edited this pending message[\s\S]*third version/)
+})
+
+test('a new requirement and an older result interleave in admission order with distinct sources', () => {
+  const target = supervisor()
+  const worker = session('w')
+  const r = relay(target)
+  worker.append('turn/start', { turn: 1 })
+  worker.append('step/start', { turn: 1, step: 1 })
+  r.observe(worker, admit(worker, 'next-turn', userInput('next, use THEME-AMBER')))
+  worker.append('assistant/message', { turn: 1, step: 1, message: createAssistantMessage({ content: [{ type: 'text', text: 'built THEME-BLUE' }], source: { provider: 'test', model: 'worker' } }) }, { surfaceOp: 'append' })
+  worker.append('step/end', { turn: 1, step: 1 })
+  r.observe(worker, worker.append('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  assert.deepEqual(target.delivered.map(message => message.source.kind), ['nexus-user-input', 'nexus-work-result'])
+  assert.match(textOf(target.delivered[1]), /not an instruction from the user[\s\S]*built THEME-BLUE/)
+})
+
+test('a supervisor that cannot accept a mirrored input does not consume it', () => {
+  const target = supervisor()
+  const worker = session('w')
+  const r = relay(target)
+  const event = admit(worker, 'next-step', userInput('retry me'))
+  target.fail = true
+  assert.throws(() => r.observe(worker, event), /unavailable/)
+  target.fail = false
+  r.observe(worker, event)
+  assert.equal(target.delivered.length, 1)
+  assert.doesNotMatch(textOf(target.delivered[0]), /edited/)
+})

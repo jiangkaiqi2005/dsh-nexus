@@ -5,6 +5,8 @@ export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersis
 export function apply(ctx, config) {
   class WorkerAdapter extends LlmAdapter {
     async *stream() {
+      // The prompt that started this turn was mirrored to the supervisor; answer after it handled that, so turns stay deterministic.
+      await ctx.agents.get('nexus-supervisor')?.whenIdle()
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Ordinary worker reply' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
