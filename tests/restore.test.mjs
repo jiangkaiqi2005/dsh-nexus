@@ -49,7 +49,7 @@ async function restartedProfile(scenario) {
       const report = resolve(home, `phase-${phase}.json`)
       await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-restore-probe\n      name: nexus-restore-probe\n      config:\n        scenario: ${scenario}\n        phase: ${phase}\n        prompt: ${JSON.stringify(phase === 1 ? first : second)}\n        report: ${JSON.stringify(report)}\n`)
       await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  disabled: ${scenario === 'race' && phase === 2}\n  config:\n    credentialRef: NEXUS_RESTORE_KEY\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: 30000\n`)
-      child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-restore', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, NEXUS_RESTORE_KEY: real ? process.env.NEXUS_RESTORE_KEY : 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-restore', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_RESTORE_KEY: real ? process.env.NEXUS_RESTORE_KEY : 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       let output = ''
       child.stdout.on('data', data => { output += data })
       child.stderr.on('data', data => { output += data })

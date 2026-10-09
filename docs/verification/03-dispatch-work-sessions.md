@@ -48,7 +48,7 @@ node --test --test-name-pattern='accurate Realtime' tests/dispatch.test.mjs
 git diff --check
 ```
 
-最终 typecheck、build 和文档收束后的 `git diff --check` 通过；默认完整 suite 共 21 项：18 passed、0 failed、3 skipped（真实文字、真实跨进程恢复、真实调度默认跳过）。真实调度检查另行 1 passed、0 failed。运行真实检查需要临时 `NEXUS_DISPATCH_KEY`、`NEXUS_REAL_DISPATCH=1`，可选 `NEXUS_REAL_ENDPOINT`。此次只读已授权的 `C:\Users\25330\.qiyu\provider.json` top-level 凭据，密钥只进入临时进程环境和隔离 Host 原生 credentials 服务，不进入命令参数、profile、日志或源码。
+最终 typecheck、build 和文档收束后的 `git diff --check` 通过；实现提交 `f82f79e` 时点的默认完整 suite 共 21 项（其后修复轮 1 新增了深层冷红测，总数随之变化；以下为当时结果）：18 passed、0 failed、3 skipped（真实文字、真实跨进程恢复、真实调度默认跳过）。真实调度检查另行 1 passed、0 failed。运行真实检查需要临时 `NEXUS_DISPATCH_KEY`、`NEXUS_REAL_DISPATCH=1`，可选 `NEXUS_REAL_ENDPOINT`。此次只读已授权的 `C:\Users\25330\.qiyu\provider.json` top-level 凭据，密钥只进入临时进程环境和隔离 Host 原生 credentials 服务，不进入命令参数、profile、日志或源码。
 
 用户已禁止 Computer Use。本票没有控制用户窗口、浏览器或工作中的 Desktop，没有给用户 profile 安装新包，没有读写其非空主管 journal。用户 Desktop 中的新版实际安装、冷恢复和调度尚未验收。语音、自动结果回流和多层冷 subagent parent 的直接投递不属于本次已通过的实证范围。
 
@@ -113,3 +113,9 @@ rc.2 公开及已发布 typed 子路径中，冷孙会话的投递必须经过 e
 - `NEXUS_DEEP_COLD=1 node --test --test-name-pattern='deep cold' tests/dispatch.test.mjs`：1 failed、0 passed，与上文一致，P2 未解决。
 - 默认环境 `npm test`：22 项，17 passed、1 failed、4 skipped。失败项是既有的默认受控调度检查（`official Host native dispatch ...`），原因是探针插件在其步骤中途被 cordis 依赖卸载，报 `cannot get required service "agents" in inactive context`，该检查在未改产品源码时单独重跑 3 次、插桩重跑 3 次均复现。把进程的 `USERPROFILE`/`HOME` 指向空目录后同一检查单独运行通过（1 passed），说明它与运行机器的用户级环境有关，而非本轮文档改动；根因没有继续定位，也没有改测试掩盖。此前修复轮 1 记录的该检查通过结果仍是当时环境下的事实。
 - 同样将 `USERPROFILE`/`HOME` 指向空目录后跑 `npm test`：22 项，17 passed、1 failed（Nexus footer 的 Edge headless 检查，空 profile 下无法启动浏览器，属该临时环境产物）、4 skipped。两种环境各有一项不同的失败，合起来不足以替代一次环境正常的完整绿。因此本轮不宣称完整 suite 全绿。
+
+### 修复轮 2 后续：受控调度检查失败根因与修复
+
+上一小节记录的“默认受控调度检查失败”，根因已定位：rc.2 `dsh-skill-filesystem` 的监视根总会加入 `join(agentsHome, 'skills')`，其中 `agentsHome = config.agentsHome ?? process.env.DSH_AGENTS_HOME ?? homedir()/.agents`。现有测试 harness 只设置了 `DSH_HOME`，隔离 Host 仍监视用户 `~/.agents/skills`；该目录当时存在符号链接环，Host 报 `fatal load failure: ELOOP`，探针随之被依赖卸载，表现为 `cannot get required service "agents" in inactive context`。把 `USERPROFILE`/`HOME` 指向空目录后通过，也是同一原因，不是产品代码问题。
+
+修复：所有 spawn 官方 Host 的测试（dispatch、restore、ui、profile）在 env 加入 `DSH_AGENTS_HOME`，指向该次运行隔离目录下的 `agents` 子目录。没有触碰用户的 `~/.agents` 或 `~/.claude`。修复后在默认环境重跑 `npm test`：22 项，18 passed、0 failed、4 skipped（3 项真实模型 opt-in，1 项深层冷 opt-in 红测）。深层冷 P2 仍为 cannot_fix，不受此修复影响。
