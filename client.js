@@ -5,16 +5,27 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const SUPERVISOR = 'nexus-supervisor'
 
-    // Client face of the Host call endpoint; typert.js holds the matching Host descriptor.
-    const isAudio = value => typeof value === 'string' && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
+    // Client face of the Host call endpoint; typert.js holds the matching Host
+    // descriptor with the same validation, so both ends accept exactly the same items.
+    const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
+    const uplink = value => {
+      if (!value || typeof value !== 'object' || value.type !== 'audio' || !isAudio(value.audio) || Object.keys(value).length !== 2) throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 }')
+      return value
+    }
+    const frame = value => {
+      if (value?.type === 'audio' && isAudio(value.audio)) return value
+      if (value?.type === 'state' && ['connecting', 'live'].includes(value.state)) return value
+      if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
+      throw new TypeError('nexusVoice/call frame is malformed')
+    }
     const strict = (typeSymbol, parse) => ({ mode: 'strict', typeSymbol, create: () => ({ parse }) })
     const CONTRIBUTION = {
       package: 'dsh-nexus',
       descriptors: [{
         id: 'dsh-nexus#nexusVoice/call', service: 'nexusVoice', namespace: 'nexusVoice', method: 'call', mode: 'stream',
         invocation: { kind: 'direct' }, parameters: [], cancellation: { parameter: 'signal' },
-        uplink: { codec: strict('dsh-nexus/voice#VoiceUplink', value => { if (value?.type !== 'audio' || !isAudio(value.audio)) throw new TypeError('malformed uplink'); return value }) },
-        result: strict('dsh-nexus/voice#VoiceFrame', value => value),
+        uplink: { codec: strict('dsh-nexus/voice#VoiceUplink', uplink) },
+        result: strict('dsh-nexus/voice#VoiceFrame', frame),
       }],
     }
 
@@ -35,58 +46,67 @@ window.__ModuleLoader__.load({
     /**
      * One call of this client. It captures the microphone at 16 kHz, plays model
      * audio at 24 kHz, and reports only states it actually reached: "live" is
-     * set when the Host says the model accepted the voice session.
+     * set when the Host says the model accepted the voice session. Each start is
+     * its own attempt: hanging up releases what that attempt acquired, and an
+     * ended attempt never touches the state or resources of a later one.
      */
     class Call {
-      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.sent = 0; this.listeners = new Set(); this.release = () => {} }
+      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.listeners = new Set(); this.attempt = undefined }
       subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
       set(state, code) { this.state = state; this.code = code; for (const listener of this.listeners) listener() }
       get active() { return ['requesting-mic', 'connecting', 'live'].includes(this.state) }
       async start(remote) {
         if (this.active) return
-        this.played = 0; this.sent = 0
+        const cleanups = []
+        const attempt = { release: () => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() } }
+        this.attempt = attempt
+        const current = () => this.attempt === attempt
+        // Release this attempt; report a failure only while it is still the user's call.
+        const end = (state, code) => {
+          attempt.release()
+          if (!current()) return
+          this.attempt = undefined
+          this.set(state, code)
+        }
+        this.played = 0
         this.set('requesting-mic')
         // Created within the user's click so playback is allowed to start.
         let playback
-        try { playback = new AudioContext({ sampleRate: 24000 }) } catch { return this.set('playback-blocked') }
-        const closePlayback = () => playback.close().catch(() => {})
+        try { playback = new AudioContext({ sampleRate: 24000 }) } catch { return end('playback-blocked') }
+        cleanups.push(() => playback.close().catch(() => {}))
         await Promise.race([playback.resume().catch(() => {}), new Promise(resolve => setTimeout(resolve, 1500))])
-        if (playback.state !== 'running') { closePlayback(); return this.set('playback-blocked', playback.state) }
-        if (!navigator.mediaDevices?.getUserMedia) { closePlayback(); return this.set('mic-failed', 'unsupported') }
+        if (!current()) return attempt.release()
+        if (playback.state !== 'running') return end('playback-blocked', playback.state)
+        if (!navigator.mediaDevices?.getUserMedia) return end('mic-failed', 'unsupported')
         let stream
         try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } }) }
-        catch (error) { closePlayback(); return this.set(MIC_FAILURES[error?.name] ?? 'mic-failed', error?.name) }
-        if (!stream.getAudioTracks().length) { stream.getTracks().forEach(track => track.stop()); closePlayback(); return this.set('no-device') }
+        catch (error) { return end(MIC_FAILURES[error?.name] ?? 'mic-failed', error?.name) }
+        cleanups.push(() => stream.getTracks().forEach(track => track.stop()))
+        if (!current()) return attempt.release()
+        if (!stream.getAudioTracks().length) return end('no-device')
         this.set('connecting')
         const handle = remote.call()
+        cleanups.push(() => handle.dispose())
         const capture = new AudioContext({ sampleRate: 16000 })
+        cleanups.push(() => capture.close().catch(() => {}))
         const source = capture.createMediaStreamSource(stream)
         const processor = capture.createScriptProcessor(2048, 1, 1)
+        cleanups.push(() => { processor.disconnect(); source.disconnect() })
         processor.onaudioprocess = event => {
-          if (this.state !== 'live') return
+          if (!current() || this.state !== 'live') return
           const input = event.inputBuffer.getChannelData(0)
           const samples = new Int16Array(input.length)
           for (let i = 0; i < input.length; i++) samples[i] = Math.max(-1, Math.min(1, input[i])) * 0x7fff
           handle.send({ type: 'audio', audio: base64(samples) })
-          this.sent += samples.length
         }
         source.connect(processor)
         processor.connect(capture.destination)
         let next = 0
-        let released = false
-        this.release = () => {
-          if (released) return
-          released = true
-          processor.disconnect(); source.disconnect()
-          stream.getTracks().forEach(track => track.stop())
-          capture.close().catch(() => {})
-          closePlayback()
-          handle.dispose()
-        }
         try {
           for await (const frame of handle) {
+            if (!current()) return attempt.release()
             if (frame.type === 'state' && frame.state === 'live') this.set('live')
-            else if (frame.type === 'state' && frame.state === 'failed') { this.release(); return this.set('failed', frame.code) }
+            else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
             else if (frame.type === 'audio') {
               const samples = pcm(frame.audio)
               const buffer = playback.createBuffer(1, samples.length, 24000)
@@ -102,13 +122,17 @@ window.__ModuleLoader__.load({
               this.set(this.state, this.code)
             }
           }
-          if (this.state !== 'idle') { this.release(); this.set('failed', 'CALL_CLOSED') }
+          end('failed', 'CALL_CLOSED')
         } catch (error) {
-          this.release()
-          if (this.state !== 'idle') this.set('failed', error?.code ?? 'CALL_CLOSED')
+          end('failed', error?.code ?? 'CALL_CLOSED')
         }
       }
-      hangup() { this.set('idle'); this.release() }
+      hangup() {
+        const attempt = this.attempt
+        this.attempt = undefined
+        this.set('idle')
+        attempt?.release()
+      }
     }
 
     // Flat keys: the locale service does not resolve nested ones.
@@ -124,7 +148,7 @@ window.__ModuleLoader__.load({
       if (sessionId !== SUPERVISOR) return null
       const busy = call.active
       return h('div', {
-        'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played, 'data-sent-samples': call.sent,
+        'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played,
         style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13 },
       },
       h('span', { role: 'status' }, t(`state-${call.state}`) + (call.code && !busy ? ` (${call.code})` : '')),

@@ -6,6 +6,12 @@ import type { Supervisor } from './supervisor.js'
 declare module '@deepseek-ai/cordis' {
   interface Context { nexusVoice: VoiceController }
 }
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** The user spoke during a call and the model answered, but the endpoint returned no transcript: not the user's words. */
+    'nexus-voice': { kind: 'nexus-voice'; form: 'notice'; summary: string }
+  }
+}
 
 /** Host-to-client items of one call: actual call state, and model audio (base64 PCM16, 24 kHz mono). */
 export type VoiceFrame =
