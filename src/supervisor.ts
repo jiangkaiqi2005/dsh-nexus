@@ -12,8 +12,7 @@ import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepsee
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ToolExecutionResult, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
-/** `deliverResults: false` turns off automatic work-result delivery; it is on unless set. */
-export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; deliverResults?: boolean }
+export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number }
 
 export class Supervisor implements Agent {
   readonly id

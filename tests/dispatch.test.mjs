@@ -40,6 +40,7 @@ async function dispatchProfile(real = false, deepCold = false) {
   server.on('connection', socket => {
     const connection = ++connections
     const history = []
+    let answered = 0
     socket.send(JSON.stringify({ type: 'session.created' }))
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString()); wire.push({ ...event, connection })
@@ -47,6 +48,13 @@ async function dispatchProfile(real = false, deepCold = false) {
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') history.push(event.item)
       if (event.type === 'response.create') {
+        // Automatic work results also wake the supervisor; they do not advance the scripted dispatch plan.
+        const fresh = history.slice(Math.max(answered, history.findLastIndex(item => item.role === 'assistant') + 1)).filter(item => !item.content?.[0]?.text.includes('Current runtime context'))
+        answered = history.length
+        if (fresh.length && fresh.every(item => item.type === 'message' && item.role === 'user' && item.content[0].text.includes('Automatic work-session result'))) {
+          socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Result noted.' }))
+          return socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))
+        }
         const next = plan[request++]
         if (next) {
           const [name, args] = next
@@ -69,7 +77,7 @@ async function dispatchProfile(real = false, deepCold = false) {
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-dispatch-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-dispatch-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_DISPATCH_KEY\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    deliverResults: false\n    timeoutMs: 30000\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_DISPATCH_KEY\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: 30000\n`)
   const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-dispatch', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_DISPATCH_KEY: real ? process.env.NEXUS_DISPATCH_KEY : 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
   try {
@@ -79,7 +87,7 @@ async function dispatchProfile(real = false, deepCold = false) {
     assert.equal(result.error, undefined, result.stack)
     assert.equal(result.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed', JSON.stringify(result.events.findLast(event => event.type === 'turn/end').data.reason))
     assert.ok(result.released)
-    if (!real) { assert.equal(connections, 1); await writeFile(resolve(home, 'wire.json'), JSON.stringify(wire)) }
+    if (!real) { assert.equal(new Set(wire.filter(event => event.type === 'conversation.item.create' && event.item.type === 'function_call_output').map(event => event.connection)).size, 1, 'every tool result stays on the connection that issued its call'); await writeFile(resolve(home, 'wire.json'), JSON.stringify(wire)) }
     for (const call of result.events.filter(event => event.type === 'tool/call')) {
       const answer = result.events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === call.data.callId)
       assert.ok(answer)

@@ -9,9 +9,9 @@
 - **内容**：消息包含会话身份（含是否 subagent 及其 parent、工作区）、轮次号与终态事件 seq、终态与失败代码/消息、该轮最后一条有文字的 assistant 消息的消息身份和文字。会话读取只扫描该轮自己的事件，不复制历史；超长文字保留头 2500 与尾 3500 字符并标明省略，提示用 `nexus_read_session` 读取记录。没有 assistant 文字时如实写明。
 - **来源**：新的原生消息来源 `nexus-work-result`（`form: 'notice'`，带 `summary`、`sessionId`、`turn`、`terminal`、`terminalSeq`），区别于 `user` 与 `nexus-dispatch`；角色是 user 但来源不是用户，不伪造用户或 parent-agent。模型侧沿用现有“非用户来源附带 `[Context source: …]`”的投影，系统指令增加对该来源的说明：自动报告不是用户指令，由模型据用户目标决定汇报、读详情、追加、审查或停止；纯文字连接必须回应，无话可说时简短回应（空回复在 `TextConnection` 中本来就是错误，没有放宽）。
 - **投递**：用原生 waking `steer` 入主管 inbox（`next-step`），与原生 subagent-settled 通知同一契约。主管闲时开启新 turn 并 claim；主管忙时留在 inbox，在当前请求结束后的下一个 step 边界（或下一轮）进入模型，用户输入走原有 `next-turn` 队列，两者互不覆盖。连接层没有写死任何动作顺序、迭代次数、必须汇报或必须追加。
-- **身份与去重**：键为 `(sessionId, turn)`，同键只投递一次。重启时从主管原生日志里曾经入队的 `agent/inbox/spliced` 消息重建，所以重启后重复的终态不再投递；投递失败（主管不可用）会释放该键以便重试。主管自身会话不回流；以主管为 parent 的 subagent 会话不由本中继处理（原生 settled 通知已负责），避免双重投递。
+- **身份与去重**：键为 `(sessionId, turn)`，同键只投递一次。重启时从主管原生日志里曾经入队的 `agent/inbox/spliced` 消息重建，所以重启后重复的终态不再投递；投递失败（主管不可用）会释放该键以便重试。主管自身会话不回流；以主管为 parent 的 subagent 会话不由本中继处理，因为 rc.2 已经通过原生 `subagent-settled` 通知送达（实测见修复轮 1 第 2 条），避免双重投递；该原生通知按 Activation 结算、只带子会话 id、一行摘要与收尾文字，不带轮次/消息身份，粒度比本中继粗。
 - **接收与处理分开**：中继观察到终态是一回事；`agent/inbox/spliced` 入队是第二回事；请求时追加 `user/message` 并发送到模型传输层是“接收”；其后第一条 `assistant/message`（及其内容）才是“已处理”。验证对三者分别断言。
-- **生命周期**：中继在主管可接收 inbox 后启动，teardown 时先于 `agent.stop()` 释放，不会在主管停止后继续投递。配置项 `deliverResults`（默认开启；仅 `false` 关闭）仅用于隔离不关心回流的早期票机制测试（票 01–03 的 Host 测试里，普通 worker 的终态会唤醒主管，改变这些测试专门断言的主管事件序列），不是产品需求；票 04 的所有检查均在默认开启下运行。
+- **生命周期**：中继在主管可接收 inbox 后启动，teardown 时先于 `agent.stop()` 释放，不会在主管停止后继续投递。没有配置开关：回流始终开启（修复轮 1 删除了最初为隔离旧测试加的 `deliverResults`）。
 
 重启语义沿用票 02：恢复的 inbox 不自动唤醒，停机期间无法运行 worker；重启前已入队而未被处理的结果保留在原生 inbox 中，在下一次用户输入或其它唤醒时进入模型。用户 UI 的 stop 走 `keepInbox: true`，不会丢弃排队的结果。
 
@@ -35,7 +35,7 @@
 
 ### 受控（relay 层，真实原生 Session 事件）
 
-`tests/results.test.mjs`，7 项，直接对 `ResultRelay` 输入由真实 `Session` 追加出的原生事件：终态字段与最终内容、仅引用结束的那一轮；重复 feed、整段快照回放、回放与实时结束交错、回放中新出现的轮次仅投一次；主管自身及其原生子会话排除、其它 subagent 保留且标注 parent；超长内容有界且保留头尾；重启后按主管日志重建身份；主管不可用时不消耗键、可重试；`start()` 订阅 `session/event` 且投递错误被约束。变异检查：去掉去重、去掉主管自排除后，对应用例确实失败。
+`tests/results.test.mjs`，7 项，直接对 `ResultRelay` 输入由真实 `Session` 追加出的原生事件：终态字段与最终内容、仅引用结束的那一轮；重复 feed、整段快照回放、回放与实时结束交错、回放中新出现的轮次仅投一次；主管自身及其原生子会话排除、其它 subagent 保留且标注 parent；超长内容有界且保留头尾；重启后按主管日志重建身份；主管不可用时不消耗键、可重试；`start()` 订阅 `session/event` 且投递错误被约束。变异检查：临时改写编译产物 `dist/results.js` 去掉去重或去掉主管自排除，对应用例确实失败；命令、输出见修复轮 1 第 3 条。
 
 重复事件与快照回放没有注入真实 Host 总线：向全局 `session/event` 重发会同时被持久化、索引、不变量校验等官方监听器消费而破坏日志，因此该类边界只在 relay 层验证，Host 层证明的是真实实时事件接线。
 
@@ -70,6 +70,29 @@ git diff --check
 - worker 是受控 native adapter，不是付费 DeepSeek worker 对项目的真实修复；主管真实模型检查为文字模式，语音通话中的结果播报、打断和挂断属于后续票。
 - 回流只覆盖 Nexus 运行期间发生的终态；不回溯启动前已经结束的轮次，也不在重启时自动唤醒。已入队但在重启前未被处理的结果留在原生 inbox，待下一次唤醒进入模型。
 - 所有 subagent 会话（Nexus 子会话除外）都会回流，包括 worker 内部辅助 subagent 的轮次；模型可据来源里的 parent 信息判断，但这可能增加主管请求量。未设计按类型过滤，因为 Spec 要求全局覆盖且由模型决定。
-- 纯文字连接要求主管每次回应至少给出简短文字；“完全沉默”需要放宽 `TextConnection` 空回复错误，本票没有做。
+- 纯文字连接要求主管每次回应至少给出简短文字；“完全沉默”需要放宽 `TextConnection` 空回复错误，本票没有做。（系统指令里的 “always answer in text” 即由此而来，`src/realtime.ts` 已加注释；语音票需要重新评估。）
 - 用户指令优先、来自工作会话的用户引导同步（用户故事 24）、指令仲裁属于票 05；本票只保证用户输入与结果同时到达时都不丢。
 - 票 03 的深层冷 subagent parent 直接派活（P2 cannot_fix）不受本票影响，仍需人工关注。
+
+## 修复轮 1
+
+评审两轴均 approve，无 P1/P2；以下为 P3 处置。基线 reviewHead `2217fbf`。
+
+| # | 原问题 | 状态 | 理由 | 证据 | 检查 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `deliverResults` 为测试加的产品开关，导致票 01–03 的 Host 测试在非默认配置运行 | fixed | 开关与配置校验已删除（`src/index.ts`、`src/supervisor.ts`），回流始终开启，旧测试 patch 不再设置。旧测试改为在默认配置下容忍回流：profile/restore 探针在 worker 轮次后先让主管消化其结果再开始场景（restore 的“恢复后不自动运行”检查移到 worker 恢复之前），profile 以记录的基线切分事件与 wire 并按基线偏移 turn 编号；restore 的 turn 编号改为断言连续无缺口，脚本模型的 `requests` 只计场景自己的提示；dispatch 的脚本模型对“仅含自动结果”的请求只回文字、不推进派活计划，工具结果仍须落在同一连接，探针收敛等待改为全体空闲且日志不再增长。 | 默认配置下 profile 11 项、restore 5 项、dispatch 1 项通过；另在默认配置下重跑真实模型：调度 `.scratch/nexus-v1/dispatch-real-1791532952800/result.json` 1 passed，恢复 `.scratch/nexus-v1/restore-real-1791532978924` 1 passed。 | 见下方命令 |
+| 2 | 排除主管自己的 subagent 依赖未证实的原生 settled 通知 | fixed（实测，保留排除） | 受控 Host 检查新增：探针以主管为 parent 用原生 `startContinuable` 起 continuable 子会话（受控 native adapter）。结果：主管收到恰好一条 `subagent-settled` 来源消息（含收尾文字 `ok-native`），其后有模型回应；中继对该子会话 0 条，不重复。子会话先前因继承 Realtime 型号而失败时，原生通知也如实送达（“failed before it finished”，存档于 `.scratch/nexus-v1/delivery-controlled-1791532817388/result.json`）。粒度差异：原生通知按 Activation，只给子会话 id、摘要和收尾文字，没有轮次/消息身份；中继的 `nexus-work-result` 带轮次与终态事件 seq。 | `.scratch/nexus-v1/delivery-controlled-1791532848603/result.json`（及最终套件中的受控运行） | `tests/delivery.test.mjs` 受控用例 |
+| 3 | “变异检查”无命令与证据 | fixed | 重新执行并存档。命令：对 `dist/results.js` 分别用 `sed` 把 `if (this.delivered.has(id))` 改为 `if (false)`、把 `session.id === this.target.id` 改为 `false`，各跑 `node --test tests/results.test.mjs`，再恢复原文件重跑。结果：去重变异 5 passed、2 failed（重复/回放交错、重启重建）；自排除变异 6 passed、1 failed（主管自排除）；恢复后 7 passed、0 failed。 | `.scratch/nexus-v1/mutation-check-04.txt` | 同左 |
+| 4 | “always answer in text” 来源未注明 | fixed | 由 `TextConnection` 把空回复当作 EMPTY_RESPONSE 错误所致（票 01 既有约束），行为不变；`src/realtime.ts` 的 `INSTRUCTIONS` 上方加注释，文档“未验证与边界”同步注明，语音票需重评。 | `src/realtime.ts` | typecheck |
+| 5 | ui 测试与其它 patch 不一致；`DSH_AGENTS_HOME` 同一行重复 4 处 | 前半随 1 消失；后半 rejected | 开关删除后四个测试的 patch 重新一致。四处 spawn 各自独立构造 env，抽公共辅助会改动无关结构，且是步骤 0 的最小修复，故不处理。 | — | — |
+
+修复轮 1 的检查（均在最终工作树上）：
+
+```powershell
+npm run typecheck
+npm run build
+npm test
+git diff --check
+```
+
+结果：typecheck、build 通过；`npm test` 31 项，26 passed、0 failed、5 skipped（4 项真实模型 opt-in，1 项深层冷 opt-in）；`git diff --check` 无问题。受控 delivery 检查在最终套件中通过。回流逻辑本身未改，所以真实回流检查（`delivery-real-1791532007436`）未重跑。

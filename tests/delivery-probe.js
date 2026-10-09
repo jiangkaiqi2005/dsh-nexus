@@ -107,10 +107,15 @@ export function apply(ctx, config) {
           const review = await create('review-target')
           task(review, 'ok-FOLLOWUP')
           await quiet()
+
+          // A native continuable child of the supervisor itself: the runtime's own settled notice is its route.
+          await ctx.subagents.startContinuable({ provider: 'spawn', childId: 'nexus-child', label: 'Nexus native child', request: { parent: supervisor, agentOptions: { provider: 'delivery-worker', model: 'worker-model' }, prompt: [{ type: 'text', text: 'ok-native' }] }, signal: new AbortController().signal })
+          await quiet()
         }
 
         for (const current of ctx.agents.list()) await current.whenIdle()
         const workers = ctx.agents.list().filter(current => current !== supervisor).map(current => ({ id: current.id, header: current.session.header, events: current.session.snapshotEvents(), status: current.status }))
+        if (!config.real && !workers.some(item => item.id === 'nexus-child')) { const state = await ctx.sessionController.inspect('nexus-child'); workers.push({ id: 'nexus-child', header: state.meta, events: state.events, status: 'inactive' }) }
         for (const current of ctx.agents.list()) await ctx.parallel('session/flush', current.session)
         const entry = [...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus')
         await entry.update({ ...entry.options, disabled: true })

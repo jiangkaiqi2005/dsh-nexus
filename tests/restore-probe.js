@@ -34,11 +34,18 @@ export function apply(ctx, config) {
         const initialStatus = agent.status
         const models = []
         ctx.on('agent/created', ({ agent: current }) => { if (current.id === agent.id) models.push(current.options.model) })
+        if (config.phase !== 1) {
+        // Startup and navigation never drain the recovered inbox by themselves.
+        await new Promise(resolve => setTimeout(resolve, 150))
+        if (agent.session.snapshotEvents().length !== before.length) throw new Error('restored supervisor automatically ran work')
+        }
         if (config.phase === 1) worker = await ctx.agents.create({ sessionId: 'restore-worker', meta: { cwd: process.cwd() }, agentOptions: { provider: 'nexus-restore-worker', model: 'ordinary-model' } })
         else worker = await ctx.agents.resume({ resumeSessionId: 'restore-worker', agentOptions: { provider: 'nexus-restore-worker', model: 'ordinary-model' } })
         const prompt = (target, text, suffix = '') => ctx.sessionController.prompt({ sessionId: target.id, requestId: `restore-${config.phase}${suffix}`, content: [{ type: 'text', text }], mode: 'followup' }, new AbortController().signal)
         await prompt(worker.agent, 'Hello ordinary worker')
         await worker.agent.whenIdle()
+        // The worker's finished turn reaches the supervisor; settle it before the scenario starts.
+        await agent.whenIdle()
         if (config.phase === 1) {
           await prompt(agent, config.prompt)
           await agent.whenIdle()
@@ -54,13 +61,14 @@ export function apply(ctx, config) {
             return
           }
           if (config.scenario === 'interrupt') {
-            agent.session.append('turn/start', { turn: 2 })
-            agent.session.append('step/start', { turn: 2, step: 1 })
-            agent.session.append('assistant/message', { turn: 2, step: 1, message: createAssistantMessage({ source: agent.options, content: [
+            const turn = Math.max(...agent.session.snapshotEvents().filter(event => event.type === 'turn/start').map(event => event.data.turn)) + 1
+            agent.session.append('turn/start', { turn })
+            agent.session.append('step/start', { turn, step: 1 })
+            agent.session.append('assistant/message', { turn, step: 1, message: createAssistantMessage({ source: agent.options, content: [
               { type: 'tool-call', id: 'started-call', name: 'fixture.sideEffect', arguments: '{}' },
               { type: 'tool-call', id: 'unstarted-call', name: 'fixture.read', arguments: '{}' },
             ] }), stream: [] }, { surfaceOp: 'append' })
-            agent.session.append('tool/call', { turn: 2, step: 1, callId: 'started-call', name: 'fixture.sideEffect', arguments: '{}' })
+            agent.session.append('tool/call', { turn, step: 1, callId: 'started-call', name: 'fixture.sideEffect', arguments: '{}' })
             agent.inject(createUserMessage({ content: [{ type: 'text', text: 'Pending clarification' }], source: { kind: 'user' } }))
             await ctx.parallel('session/flush', agent.session)
             await writeFile(config.report, JSON.stringify({ phase: 1, pid: process.pid, events: agent.session.snapshotEvents(), crashReady: true }))
@@ -68,9 +76,6 @@ export function apply(ctx, config) {
             return
           }
         } else {
-          // Startup and navigation never drain the recovered inbox by themselves.
-          await new Promise(resolve => setTimeout(resolve, 150))
-          if (agent.session.snapshotEvents().length !== before.length) throw new Error('restored supervisor automatically ran work')
           const resolved = await ctx.sessionController.resolveAgent(agent.id)
           if (resolved.agent !== agent) throw new Error('entry did not resolve the same supervisor')
           await prompt(agent, config.prompt)

@@ -102,10 +102,10 @@ function analyze(result) {
 
 // Every terminal of every other session reaches the model exactly once, and observation, receipt and processing are separate facts.
 function assertEveryTerminalDelivered(a, result, wire) {
-  for (const worker of result.workers) {
+  for (const worker of result.workers.filter(worker => worker.id !== 'nexus-child')) {
     for (const end of worker.events.filter(event => event.type === 'turn/end')) assert.equal(a.find(worker.id, end.data.turn).length, 1, `${worker.id} turn ${end.data.turn}`)
   }
-  assert.equal(a.results.length, result.workers.flatMap(worker => worker.events.filter(event => event.type === 'turn/end')).length)
+  assert.equal(a.results.length, result.workers.filter(worker => worker.id !== 'nexus-child').flatMap(worker => worker.events.filter(event => event.type === 'turn/end')).length)
   assert.ok(!a.results.some(entry => entry.source.sessionId === 'nexus-supervisor'), 'supervisor output must not return to itself')
   for (const entry of a.results) {
     assert.equal(entry.message.role, 'user')
@@ -162,6 +162,16 @@ test('official Host relays every work-session terminal to the supervisor: idle w
   const second = events.find(event => event.type === 'user/message' && event.data.source.kind === 'user' && textOf(event.data).includes('SECOND-USER'))
   assert.ok(second && turnOf(second.seq).turn > busyTurn.turn)
   assert.match(textOf(events.find(event => event.type === 'assistant/message' && event.seq > second.seq).data.message), /SECOND-USER/)
+
+  // The supervisor's own subagent reaches it through the runtime's settled notice (per activation, not per turn), never twice.
+  const child = result.workers.find(worker => worker.id === 'nexus-child')
+  assert.equal(child.header.parentSession, 'nexus-supervisor')
+  assert.equal(child.events.filter(event => event.type === 'turn/end').length, 1)
+  assert.equal(find('nexus-child').length, 0, 'the relay leaves the supervisor own children to the native notice')
+  const settled = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'subagent-settled' && event.data.source.senderSessionId === 'nexus-child')
+  assert.equal(settled.length, 1)
+  assert.match(textOf(settled[0].data), /ok-native/)
+  assert.match(textOf(events.find(event => event.type === 'assistant/message' && event.seq > settled[0].seq).data.message), /ok-native/)
 
   // The scripted model, not the connection, asked for a second pass; the loop ends when the model stops asking.
   assert.equal(find('review-target').length, 2)

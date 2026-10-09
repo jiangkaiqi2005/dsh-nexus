@@ -27,6 +27,12 @@ async function restartedProfile(scenario) {
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') history.push(event.item)
       if (event.type === 'response.create') {
+        // A worker's finished turn also wakes the supervisor; those requests are not the scenario's prompts.
+        const latest = history.filter(item => !item.content?.[0]?.text.includes('Current runtime context')).at(-1)
+        if (latest?.role === 'user' && latest.content[0].text.includes('Automatic work-session result')) {
+          socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Result noted.' }))
+          return socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))
+        }
         requests.push(history)
         if (scenario === 'active-exit' && requests.length === 2) return
         const remembered = history.some(item => item.content.some(part => part.text === first))
@@ -48,7 +54,7 @@ async function restartedProfile(scenario) {
     for (const phase of [1, 2, ...(scenario === 'interrupt' ? [3] : [])]) {
       const report = resolve(home, `phase-${phase}.json`)
       await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-restore-probe\n      name: nexus-restore-probe\n      config:\n        scenario: ${scenario}\n        phase: ${phase}\n        prompt: ${JSON.stringify(phase === 1 ? first : second)}\n        report: ${JSON.stringify(report)}\n`)
-      await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  disabled: ${scenario === 'race' && phase === 2}\n  config:\n    credentialRef: NEXUS_RESTORE_KEY\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    deliverResults: false\n    timeoutMs: 30000\n`)
+      await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  disabled: ${scenario === 'race' && phase === 2}\n  config:\n    credentialRef: NEXUS_RESTORE_KEY\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: 30000\n`)
       child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-restore', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_RESTORE_KEY: real ? process.env.NEXUS_RESTORE_KEY : 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       let output = ''
       child.stdout.on('data', data => { output += data })
@@ -92,7 +98,9 @@ for (const scenario of ['normal', 'reload', 'race', 'interrupt', 'active-exit'])
     assert.equal(second.events.findLast(event => event.type === 'assistant/message').data.message.content[0].text, 'ORCHID-72')
     assert.equal(requests.length, ['interrupt', 'active-exit'].includes(scenario) ? 3 : 2)
     assert.ok(requests[1].some(item => item.role === 'assistant' && item.content[0].text === 'ORCHID-72'))
-    assert.deepEqual(second.events.filter(event => event.type === 'turn/start').map(event => event.data.turn), ['interrupt', 'active-exit'].includes(scenario) ? [1, 2, 3] : [1, 2])
+    const turns = second.events.filter(event => event.type === 'turn/start').map(event => event.data.turn)
+    assert.deepEqual(turns, turns.map((_, index) => index + 1), 'turn numbers continue from the recovered history without gaps or repeats')
+    assert.ok(turns.length >= (['interrupt', 'active-exit'].includes(scenario) ? 3 : 2))
     assert.ok(second.models.every(model => model === 'qwen3.8-omni-flash-realtime'))
     if (scenario === 'race') assert.match(second.raceError, /Unknown agent preset: nexus/)
     if (scenario === 'active-exit') assert.equal(second.before.findLast(event => event.type === 'turn/end').data.reason.kind, 'interrupted')

@@ -62,6 +62,9 @@ export function apply(ctx, config) {
         const message = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
         await prompt(worker.agent.id, 'worker-input', 'Hello worker')
         await worker.agent.whenIdle()
+        // The worker's finished turn reaches the supervisor; settle that before the scenario starts.
+        await agent.whenIdle()
+        const baseline = agent.session.seq
         if (config.scenario === 'cancel-retain') {
           agent.followup(message('Queued before cancel'))
           agent.steer(message('Steering before cancel'))
@@ -101,7 +104,7 @@ export function apply(ctx, config) {
         const handle = await ctx.sessionPersistence.open(agent.id, 'write')
         const { events } = await handle.read()
         await handle.close()
-        await writeFile(config.report, JSON.stringify({ agentId: agent.id, sessionId: agent.session.id, duplicateRejected, writerRejected, released, workerIsSupervisor: worker.agent === agent, workerModel: worker.agent.options.model, workerEvents, events, pending }))
+        await writeFile(config.report, JSON.stringify({ baseline, agentId: agent.id, sessionId: agent.session.id, duplicateRejected, writerRejected, released, workerIsSupervisor: worker.agent === agent, workerModel: worker.agent.options.model, workerEvents, events, pending }))
       } catch (error) {
         await writeFile(config.report, JSON.stringify({ error: String(error), stack: error.stack }))
       } finally { await worker?.dispose() }

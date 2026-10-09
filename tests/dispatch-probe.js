@@ -61,7 +61,13 @@ export function apply(ctx, config) {
           await ctx.sessionController.prompt({ sessionId: agent.id, requestId: 'dispatch-failure', mode: 'queue', content: [{ type: 'text', text: '这是工具失败回填的集成测试。请务必实际调用nexus_send_session，参数sessionId为missing-target，text为failure-test；即使你知道它不存在也要调用，以便检查真实错误回填。收到工具错误后用文字说明这个实际失败，不要创建替代会话。' }] }, new AbortController().signal)
           await agent.whenIdle()
         }
-        for (const current of ctx.agents.list()) if (current !== agent) await current.whenIdle()
+        // Worker terminals wake the supervisor too: settle until nothing is running and nothing new is logged.
+        for (let stable = 0, last = -1; stable < 3; await new Promise(accept => setTimeout(accept, 250))) {
+          for (const current of ctx.agents.list()) await current.whenIdle()
+          const total = ctx.agents.list().reduce((sum, current) => sum + current.session.seq, 0)
+          if (total === last && ctx.agents.list().every(current => current.status === 'idle')) stable++
+          else { stable = 0; last = total }
+        }
         const workers = ctx.agents.list().filter(current => current !== agent).map(current => ({ id: current.id, ownedByNexus: ctx.agents.isOwnedBy(current.id, agent), header: current.session.header, events: current.session.snapshotEvents(), status: current.status }))
         if (config.deepCold) for (const id of ['deep-parent', 'deep-grandchild']) {
           const state = await ctx.sessionController.inspect(id)
