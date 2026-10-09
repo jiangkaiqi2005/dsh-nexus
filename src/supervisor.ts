@@ -6,13 +6,30 @@ import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-strea
 import type { Session, TurnEndReason } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
-import { INSTRUCTIONS, MODEL, RealtimeFailure, TextConnection } from './realtime.js'
+import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Response, type ServerTurn } from './realtime.js'
 import { registerWorkSessions } from './work-sessions.js'
 import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ToolExecutionResult, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
 export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number }
+
+/** The client end of a call: where model audio goes and how a failed model connection is reported. */
+export interface CallLink { audio(delta: string): void; failed(code: string): void }
+/** A live call as its Remote stream holds it. */
+export interface LiveCall { append(audio: string): void; end(): void }
+
+/** Settle with the promise, or reject as soon as the turn is cancelled. */
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}
+/** How long a committed utterance waits for its transcript once its reply has settled. */
+const TRANSCRIPT_GRACE_MS = 3000
 
 export class Supervisor implements Agent {
   readonly id
@@ -28,10 +45,12 @@ export class Supervisor implements Agent {
   private wakeRequested = false
   private turn = 0
   private revision = 0
-  private composed = false
+  private composing?: Promise<void>
   private tools!: ToolRuntime
   private prompt!: SystemPrompt
-  private connection?: TextConnection
+  private connection?: RealtimeConnection
+  private call?: { abort: AbortController; connection?: RealtimeConnection }
+  private readonly voiceTurns: ServerTurn[] = []
   status: AgentStatus = 'idle'
 
   constructor(ctx: Context, readonly session: Session, private config: Config) {
@@ -95,11 +114,13 @@ export class Supervisor implements Agent {
       let reason: TurnEndReason | undefined
       try {
         signal.throwIfAborted()
-        const messages = this.inbox.claim(turn)
-        if (!messages.length) continue
+        // A committed utterance opens its own turn; the server is already answering it.
+        const voice = this.voiceTurns.shift()
+        const messages = voice ? [] : this.inbox.claim(turn)
+        if (!voice && !messages.length) continue
         step = 1
         this.session.append('step/start', { turn, step })
-        let toolsPending = await this.request(turn, step, signal, messages)
+        let toolsPending = voice ? await this.request(turn, step, signal, [await this.utterance(voice, signal)], voice) : await this.request(turn, step, signal, messages)
         // Stopping listeners may add steering for another step of this turn.
         while (true) {
           signal.throwIfAborted()
@@ -122,21 +143,25 @@ export class Supervisor implements Agent {
           this.events.emit('agent/error', { turn, step, error: new Error(failure.message) })
         }
       } finally {
-        this.connection?.close()
+        if (this.connection !== this.call?.connection) this.connection?.close()
         this.connection = undefined
         if (step) this.session.append('step/end', { turn, step })
         this.session.append('turn/end', { turn, reason: reason ?? { kind: 'completed' } })
       }
       if (signal.aborted) break
       this.wakeRequested = false
-    } while (this.inbox.nextTurn.length || this.inbox.nextStep.length)
+    } while (this.inbox.nextTurn.length || this.inbox.nextStep.length || this.voiceTurns.length)
   }
-  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[]) {
-    if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(INSTRUCTIONS) }, { surfaceOp: 'append' })
-    for (const message of inputs) this.session.append('user/message', message, { surfaceOp: 'append' })
+  /** The user's words of one committed utterance, recorded as the user's own input. */
+  private async utterance(voice: ServerTurn, signal: AbortSignal) {
+    const settled = voice.response.then(() => {}, () => {}).then(() => new Promise<undefined>(resolve => setTimeout(resolve, TRANSCRIPT_GRACE_MS)))
+    const transcript = await abortable(Promise.race([voice.transcript, settled]), signal)
+    return createUserMessage({ content: [{ type: 'text', text: transcript ?? '[Voice input; the endpoint returned no transcription]' }], source: { kind: 'user' } })
+  }
+  private compose() {
     // Preset retention audits the settled Host loader; compose at first work
     // rather than awaiting that loader from its own plugin activation.
-    if (!this.composed) {
+    return this.composing ??= (async () => {
       await this.ctx.agentPresets.mount(this.ctx)
       const tools = this.ctx.agentPresets.serviceFor(this, 'tools') ?? this.ctx.get('tools')
       const prompt = this.ctx.agentPresets.serviceFor(this, 'systemPrompt') ?? this.ctx.get('systemPrompt')
@@ -144,11 +169,61 @@ export class Supervisor implements Agent {
       this.tools = this.ctx.reflect.trace(tools)
       this.prompt = this.ctx.reflect.trace(prompt)
       registerWorkSessions(this.ctx, this, this.tools)
-      this.composed = true
+    })().catch(error => { this.composing = undefined; throw error })
+  }
+  private surface() {
+    const surface = new Set(this.session.surface.nodes)
+    return this.session.snapshotEvents().filter(event => surface.has(event.seq))
+  }
+  /**
+   * Connect the same model with audio for one client: utterances its VAD
+   * commits become native turns, and later supervisor requests use this
+   * connection while the call lasts. Resolves once the model accepted the
+   * voice session and the native context.
+   */
+  async startCall(link: CallLink, signal: AbortSignal): Promise<LiveCall> {
+    if (this.disposed) throw new RealtimeFailure('UNAVAILABLE')
+    if (this.call) throw new RealtimeFailure('CALL_BUSY')
+    const call: { abort: AbortController; connection?: RealtimeConnection } = { abort: new AbortController() }
+    this.call = call
+    const end = () => {
+      signal.removeEventListener('abort', end)
+      if (this.call !== call) return
+      this.call = undefined
+      call.abort.abort()
+      call.connection?.close()
     }
+    signal.addEventListener('abort', end, { once: true })
+    try {
+      await this.compose()
+      const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
+      const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
+      if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
+      call.abort.signal.throwIfAborted()
+      const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
+        audio: link.audio,
+        committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
+        failed: error => { end(); link.failed(error.code) },
+      })
+      await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
+      call.connection = connection
+      return { append: audio => connection.appendAudio(audio), end }
+    } catch (error) {
+      end()
+      throw error instanceof RealtimeFailure ? error : call.abort.signal.aborted ? new RealtimeFailure('ABORTED') : error
+    }
+  }
+  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[], voice?: ServerTurn) {
+    if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(INSTRUCTIONS) }, { surfaceOp: 'append' })
+    for (const message of inputs) this.session.append('user/message', message, { surfaceOp: 'append' })
+    await this.compose()
     signal.throwIfAborted()
+    // A turn keeps the connection it started on; a live call serves the turns that start during it.
+    if (voice) this.connection = voice.connection
+    this.connection ??= this.call?.connection
+    for (const message of voice ? inputs : []) this.connection?.markPresent(message.id)
     const assembly = await this.prompt.assemble(assembleContextFor(this, signal))
-    const instructions = `${INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
+    const instructions = `${this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
     const previous = this.session.requestHeader()
     const header = { config: this.options, tools: assembly.tools }
     this.session.append('request/header', { header, reason: !previous ? 'initial' : JSON.stringify(previous) === JSON.stringify(header) ? 'series' : 'change' })
@@ -159,9 +234,13 @@ export class Supervisor implements Agent {
     const context = renderContextSnapshot(assembly)
     const retained = this.session.snapshotEvents().findLast(event => event.type === 'user/message' && event.data.source.kind === 'nexus-runtime')
     if (context && (!retained || retained.type !== 'user/message' || JSON.stringify(retained.data.content) !== JSON.stringify([{ type: 'text', text: context }]))) this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'nexus-runtime', form: 'snapshot' } }), { surfaceOp: 'append' })
-    const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
-    if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
-    signal.throwIfAborted()
+    if (!this.connection) {
+      const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
+      if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
+      signal.throwIfAborted()
+      this.connection = new RealtimeConnection(this.config.endpoint, credential.value, signal, this.config.timeoutMs ?? 30000)
+    }
+    const connection = this.connection
     const attemptId = LlmAttemptId(`${this.id}:${++this.revision}`)
     const revision = this.revision
     const stream = new AssistantStreamAccumulator()
@@ -176,10 +255,16 @@ export class Supervisor implements Agent {
     this.events.emit('agent/assistant-stream', { frame: { type: 'start', attemptId, revision, turn, step } })
     push({ type: 'block-start', index: 0, blockType: 'text' })
     try {
-      const surface = new Set(this.session.surface.nodes)
-      this.connection ??= new TextConnection(this.config.endpoint, credential.value, signal, this.config.timeoutMs ?? 30000)
-      const response = await this.connection.request(this.session.snapshotEvents().filter(event => surface.has(event.seq)), delta => { text += delta; push({ type: 'text-delta', index: 0, text: delta }) }, assembly.tools, instructions)
+      const onText = (delta: string) => { text += delta; push({ type: 'text-delta', index: 0, text: delta }) }
+      let response: Response
+      if (voice) { voice.listen(onText); response = await abortable(voice.response, signal) }
+      else response = await abortable(connection.request(this.surface(), onText, assembly.tools, instructions), signal)
       text = response.text
+      if (connection.voice && !text && !response.calls.length) {
+        // The model chose not to answer aloud; nothing is recorded as said.
+        this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
+        return false
+      }
       calls = response.calls
       push({ type: 'block-end', index: 0, block: { type: 'text', text } })
       for (const [offset, call] of response.calls.entries()) {
@@ -188,7 +273,9 @@ export class Supervisor implements Agent {
         push({ type: 'block-end', index: offset + 1, block: call })
       }
       push({ type: 'finish', reason: { kind: response.calls.length ? 'tool-calls' : 'stop' } })
-      const event = this.session.append('assistant/message', { turn, step, message: createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...response.calls], source: this.options }), stream: [...stream.snapshot()] }, { surfaceOp: 'append' })
+      const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...response.calls], source: this.options })
+      connection.markPresent(message.id)
+      const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()] }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {
       if (text) push({ type: 'block-end', index: 0, block: { type: 'text', text } })
@@ -217,6 +304,7 @@ export class Supervisor implements Agent {
   async stop() {
     this.disposed = true
     this.wakeRequested = false
+    if (this.call) { const call = this.call; this.call = undefined; call.abort.abort(); call.connection?.close() }
     this.cancel({ kind: 'disposed' })
     await this.whenIdle()
   }

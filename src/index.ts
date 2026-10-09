@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import { Supervisor, type Config } from './supervisor.js'
 import { ResultRelay } from './results.js'
+import { VoiceController } from './voice.js'
 
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
@@ -14,6 +15,7 @@ export async function apply(ctx: Context, config: Config) {
   const endpoint = new URL(config.endpoint)
   if (!['wss:', 'ws:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw new Error('Nexus requires a WebSocket endpoint without embedded credentials')
   if (config.timeoutMs !== undefined && (!Number.isSafeInteger(config.timeoutMs) || config.timeoutMs <= 0)) throw new Error('Nexus timeout must be a positive integer')
+  const voice = new VoiceController(ctx)
   return ctx.effect(async function* () {
     let session: Session | undefined
     let handle: SessionHandle
@@ -53,6 +55,8 @@ export async function apply(ctx: Context, config: Config) {
     yield () => handle.close()
     startupOwnsWriter = false
     yield () => agent.stop()
+    // Calls reach the supervisor only while it can work; detached before it stops.
+    yield voice.attach(agent)
     // Observe only after the supervisor can accept inbox work; disposed first on teardown.
     yield new ResultRelay(ctx, agent).start()
     // The native blank-session composer requires durable Workspace membership.

@@ -1,19 +1,162 @@
 window.__ModuleLoader__.load({
   id: 'dsh-nexus',
   factory(require) {
-    const h = require('react').createElement
+    const React = require('react')
+    const h = React.createElement
+    const SUPERVISOR = 'nexus-supervisor'
+
+    // Client face of the Host call endpoint; typert.js holds the matching Host descriptor.
+    const isAudio = value => typeof value === 'string' && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
+    const strict = (typeSymbol, parse) => ({ mode: 'strict', typeSymbol, create: () => ({ parse }) })
+    const CONTRIBUTION = {
+      package: 'dsh-nexus',
+      descriptors: [{
+        id: 'dsh-nexus#nexusVoice/call', service: 'nexusVoice', namespace: 'nexusVoice', method: 'call', mode: 'stream',
+        invocation: { kind: 'direct' }, parameters: [], cancellation: { parameter: 'signal' },
+        uplink: { codec: strict('dsh-nexus/voice#VoiceUplink', value => { if (value?.type !== 'audio' || !isAudio(value.audio)) throw new TypeError('malformed uplink'); return value }) },
+        result: strict('dsh-nexus/voice#VoiceFrame', value => value),
+      }],
+    }
+
+    const base64 = samples => {
+      const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength)
+      let binary = ''
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+      return btoa(binary)
+    }
+    const pcm = audio => {
+      const binary = atob(audio)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      return new Int16Array(bytes.buffer, 0, bytes.length >> 1)
+    }
+    const MIC_FAILURES = { NotAllowedError: 'mic-denied', SecurityError: 'mic-denied', NotFoundError: 'no-device', OverconstrainedError: 'no-device' }
+
+    /**
+     * One call of this client. It captures the microphone at 16 kHz, plays model
+     * audio at 24 kHz, and reports only states it actually reached: "live" is
+     * set when the Host says the model accepted the voice session.
+     */
+    class Call {
+      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.sent = 0; this.listeners = new Set(); this.release = () => {} }
+      subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
+      set(state, code) { this.state = state; this.code = code; for (const listener of this.listeners) listener() }
+      get active() { return ['requesting-mic', 'connecting', 'live'].includes(this.state) }
+      async start(remote) {
+        if (this.active) return
+        this.played = 0; this.sent = 0
+        this.set('requesting-mic')
+        // Created within the user's click so playback is allowed to start.
+        let playback
+        try { playback = new AudioContext({ sampleRate: 24000 }) } catch { return this.set('playback-blocked') }
+        const closePlayback = () => playback.close().catch(() => {})
+        await Promise.race([playback.resume().catch(() => {}), new Promise(resolve => setTimeout(resolve, 1500))])
+        if (playback.state !== 'running') { closePlayback(); return this.set('playback-blocked', playback.state) }
+        if (!navigator.mediaDevices?.getUserMedia) { closePlayback(); return this.set('mic-failed', 'unsupported') }
+        let stream
+        try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } }) }
+        catch (error) { closePlayback(); return this.set(MIC_FAILURES[error?.name] ?? 'mic-failed', error?.name) }
+        if (!stream.getAudioTracks().length) { stream.getTracks().forEach(track => track.stop()); closePlayback(); return this.set('no-device') }
+        this.set('connecting')
+        const handle = remote.call()
+        const capture = new AudioContext({ sampleRate: 16000 })
+        const source = capture.createMediaStreamSource(stream)
+        const processor = capture.createScriptProcessor(2048, 1, 1)
+        processor.onaudioprocess = event => {
+          if (this.state !== 'live') return
+          const input = event.inputBuffer.getChannelData(0)
+          const samples = new Int16Array(input.length)
+          for (let i = 0; i < input.length; i++) samples[i] = Math.max(-1, Math.min(1, input[i])) * 0x7fff
+          handle.send({ type: 'audio', audio: base64(samples) })
+          this.sent += samples.length
+        }
+        source.connect(processor)
+        processor.connect(capture.destination)
+        let next = 0
+        let released = false
+        this.release = () => {
+          if (released) return
+          released = true
+          processor.disconnect(); source.disconnect()
+          stream.getTracks().forEach(track => track.stop())
+          capture.close().catch(() => {})
+          closePlayback()
+          handle.dispose()
+        }
+        try {
+          for await (const frame of handle) {
+            if (frame.type === 'state' && frame.state === 'live') this.set('live')
+            else if (frame.type === 'state' && frame.state === 'failed') { this.release(); return this.set('failed', frame.code) }
+            else if (frame.type === 'audio') {
+              const samples = pcm(frame.audio)
+              const buffer = playback.createBuffer(1, samples.length, 24000)
+              const channel = buffer.getChannelData(0)
+              for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 0x8000
+              const node = playback.createBufferSource()
+              node.buffer = buffer
+              node.connect(playback.destination)
+              next = Math.max(next, playback.currentTime)
+              node.start(next)
+              next += buffer.duration
+              this.played += samples.length
+              this.set(this.state, this.code)
+            }
+          }
+          if (this.state !== 'idle') { this.release(); this.set('failed', 'CALL_CLOSED') }
+        } catch (error) {
+          this.release()
+          if (this.state !== 'idle') this.set('failed', error?.code ?? 'CALL_CLOSED')
+        }
+      }
+      hangup() { this.set('idle'); this.release() }
+    }
+
+    // Flat keys: the locale service does not resolve nested ones.
+    const states = table => Object.fromEntries(Object.entries(table).map(([state, text]) => [`state-${state}`, text]))
+    const STATES = {
+      en: { idle: 'Voice off', 'requesting-mic': 'Requesting microphone…', connecting: 'Connecting…', live: 'Live with Nexus', 'mic-denied': 'Microphone permission denied', 'no-device': 'No microphone available', 'mic-failed': 'Microphone failed', 'playback-blocked': 'Audio playback not ready', failed: 'Call failed' },
+      zh: { idle: '语音未接通', 'requesting-mic': '正在请求麦克风…', connecting: '正在接通…', live: '已接通 Nexus', 'mic-denied': '麦克风权限被拒绝', 'no-device': '没有可用的麦克风', 'mic-failed': '麦克风不可用', 'playback-blocked': '音频播放未就绪', failed: '通话失败' },
+    }
+
+    function CallBar({ sessionId, call, remote, t }) {
+      const [, render] = React.useReducer(count => count + 1, 0)
+      React.useEffect(() => call.subscribe(render), [call])
+      if (sessionId !== SUPERVISOR) return null
+      const busy = call.active
+      return h('div', {
+        'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played, 'data-sent-samples': call.sent,
+        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13 },
+      },
+      h('span', { role: 'status' }, t(`state-${call.state}`) + (call.code && !busy ? ` (${call.code})` : '')),
+      h('button', {
+        type: 'button', onClick: () => busy ? call.hangup() : call.start(remote),
+        style: { color: 'inherit', background: 'transparent', border: '1px solid currentColor', borderRadius: 6, cursor: 'pointer', padding: '2px 10px' },
+      }, busy ? t('hangup') : t('start')))
+    }
+
     return {
       inject: ['slots', 'uiWorkspace', 'locale'],
       apply(ctx) {
-        ctx.locale.register('nexus', 'en', { open: 'Open Nexus' })
-        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus' })
+        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', ...states(STATES.en) })
+        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', ...states(STATES.zh) })
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
           name: 'sidebar.footer.action', id: 'nexus', order: -10, locale: 'nexus',
-          inject: () => ({ open: () => ctx.uiWorkspace.openSession('nexus-supervisor') }),
+          inject: () => ({ open: () => ctx.uiWorkspace.openSession(SUPERVISOR) }),
         }, ({ open, t, wide }) => h('button', {
           type: 'button', title: t('open'), 'aria-label': t('open'), onClick: open,
           style: { color: 'inherit', background: 'transparent', border: 0, cursor: 'pointer', padding: 8 },
         }, wide ? 'Nexus' : 'N')))
+        const call = new Call()
+        ctx.effect(() => () => call.hangup())
+        ctx.inject(['remote'], async remoteCtx => {
+          await remoteCtx.remote.$mount(CONTRIBUTION)
+          remoteCtx.inject(['remote.nexusVoice', 'slots'], uiCtx => {
+            uiCtx.slots.inject('conversation.input.dock', () => uiCtx.slots.register({
+              name: 'conversation.input.dock', id: 'nexus-voice', locale: 'nexus',
+              inject: sessionId => ({ sessionId, call, remote: uiCtx.remote.nexusVoice }),
+            }, CallBar))
+          })
+        })
       },
     }
   },
