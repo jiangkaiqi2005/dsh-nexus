@@ -77,7 +77,7 @@ async function restartedProfile(scenario) {
     }
     await writeFile(resolve(home, 'result.json'), JSON.stringify({ reports, requests }))
     console.log('restart evidence:', home)
-    return { reports, requests, code }
+    return { reports, requests, code, second }
   } finally {
     if (child?.exitCode === null) child.kill('SIGKILL')
     for (const socket of server.clients) socket.terminate()
@@ -87,7 +87,7 @@ async function restartedProfile(scenario) {
 
 for (const scenario of ['normal', 'reload', 'race', 'interrupt', 'active-exit']) {
   test(`official Host new-process restore: ${scenario}`, { timeout: 120000 }, async () => {
-    const { reports, requests } = await restartedProfile(scenario)
+    const { reports, requests, second: secondPrompt } = await restartedProfile(scenario)
     const [first, second, third] = reports
     assert.notEqual(first.pid, second.pid)
     assert.equal(second.id, 'nexus-supervisor')
@@ -102,8 +102,10 @@ for (const scenario of ['normal', 'reload', 'race', 'interrupt', 'active-exit'])
     // Interrupt: the recovered "Pending clarification" joins the phase-2 result turn, so that request counts as a prompt.
     // Active-exit: the unanswered interrupted input is replayed beside the phase-2 result, so that request counts too.
     assert.equal(requests.length, ['interrupt', 'active-exit'].includes(scenario) ? 4 : 2)
-    assert.ok(requests[1].some(item => item.role === 'assistant' && item.content[0].text === 'ORCHID-72'))
+    const recall = requests.find(history => history.some(item => item.role === 'user' && item.content[0].text === secondPrompt))
+    assert.ok(recall?.some(item => item.role === 'assistant' && item.content[0].text === 'ORCHID-72'), 'the new-process prompt carries the previous process history')
     if (scenario === 'interrupt') assert.ok(requests[1].some(item => item.role === 'user' && item.content[0].text === 'Pending clarification'))
+    if (scenario === 'active-exit') assert.ok(requests[2].some(item => item.role === 'user' && item.content[0].text === 'Interrupted active request'))
     const turnOf = seq => second.events.findLast(event => event.type === 'turn/start' && event.seq < seq).data.turn
     const results = second.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-work-result')
     const exited = ['interrupt', 'active-exit'].includes(scenario)
