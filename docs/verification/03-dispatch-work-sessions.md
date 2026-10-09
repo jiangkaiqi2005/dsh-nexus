@@ -83,3 +83,33 @@ finally { Remove-Item Env:NEXUS_DEEP_COLD }
 源码对应 node_modules 中精确 `0.2.0-rc.2` 发布包；图索引不覆盖这些符号后才回退读取发布源码。没有使用 private fields、另建 continuation manager、虚构 Symbol、空消息唤醒、parent 来源冒充或修改 Host 来绕过约束。
 
 最小后续适配范围建议：保留当前普通全局会话、live 子会话和普通冷 parent→冷 child 的已验证能力，将更深层冷 parent 的直接派活延后到宿主提供保持原 manager ownership 且不驱动 parent 的 typed Host activation/delivery 适配入口时完成。此方案会缩小原票 03 的全部会话要求，不能据此宣告原票验收通过；目前没有改 Spec/ticket，P2 必修仍未解决。本轮按用户要求在票 03 流程结束后停止，不开始票 04。
+
+## 修复轮 2：重新核查合规路线（结论仍为 cannot_fix）
+
+本轮对唯一未决 P2 重新寻找只依赖 rc.2 已发布公开或 typed 子路径的合规路线。核查对象是 node_modules 中精确 `0.2.0-rc.2` 发布包，没有读取私有字段或 Symbol，没有修改产品源码，也没有改 Spec/票。结论：没有找到合规路线，P2 保持 **cannot_fix**，票 03 不宣告完整通过。
+
+### 新增核查的发布源码位置
+
+下面行号均相对 `node_modules/@deepseek-ai/` 下的发布文件。
+
+| 方向 | 发布源码位置与结论 |
+| --- | --- |
+| 授权谱系：冷孙会话投递只认直属 live parent | `dsh-subagent/lib/types/continuation-activation.js:311-318` 的 authorizeLineage 要求 `ctx.agents.get(parent.id) === parent`，且 `parentSession === parent.id`。冷恢复路径 `continuation.js:353-354` 对 observed header 的 parentSession 调同一检查；已驻留路径 `continuation-activation.js:356` 同样检查。祖先 Agent 或 Nexus 都不能替孙会话授权，冷 parent 也无法作为“直属 live parent”。 |
+| 逐层由 live 祖先恢复中间层 | 恢复入口只有 `continuation.js:193` sendMessage、`:222` queuePrompt、`:234` steerPrompt，都经 `:238` deliverToChild，冷时进入 `:338` coldResume，物化后必经 submitMaterialized 投递内容。没有“只恢复、不投递”的发布方法，`ctx.subagents`（index.d.ts）公开面也只有 startContinuable、sendMessage、interrupt、drain*、listChildren/Descendants、prompt、interruptByParent。要逐层恢复，只能向中间 subagent 投递一条真实消息；Nexus 没有这条消息，只能构造空唤醒或把孙任务伪装成中间层任务，违反总纲第 8 条。 |
+| 原生持久化落入冷孙 inbox | inbox 是 Activation 内的进程内对象（`continuation-activation.js:475` 创建 `new SubagentInbox(handle.agent)`），投递需 resident Activation；`:356-364` 的 submitAdmitted 才 `inbox.deliver`。没有已发布的“向冷子会话持久化追加待消费消息”入口。写会话日志属于绕过原生机制，不采用。 |
+| 原生 UI/Host RPC 如何对深层冷 subagent 发消息 | RPC `subagent.prompt`（`dsh-subagent/lib/types/index.js:283`）在 parent 不 live 时直接抛 `subagent/parent-unavailable`，再进入同一 deliverSubagentPrompt（`:168-171`）。Web 客户端对 parent 离线的 subagent 会话把输入框置为只读（`dsh-client-ui-subagent/lib/client.js:930-935`，文案 `:916`：“The parent session is offline; reopen it to continue sending messages.”）。因此原生界面也不能直接向冷 parent 之下的冷孙会话发消息，没有可复用的更宽入口。Nexus 的 Host adapter 与它是同一条路径。 |
+| 经 session-controller 其它入口 | `dsh-api-session-controller/lib/types/agent.js:106-110` 把 origin=subagent 判定为路由所有权；`:120-121` 返回 `session/agent-busy`，`:440`、`:446`、`:458` 的 resumeObserved/createOrAdopt 都抛 ApiSessionSubagentOwnership。没有 subagent 激活方法。 |
+| 用 AgentRegistry.resume 自行恢复中间层 | `dsh-agent/lib/types/index.d.ts` 的 ResumeAgentOptions.parentAgent 是公开类型，但 manager 自己恢复子会话用的是服务私有 ownerCtx（`continuation-activation.js:451`），随后登记 resident、inbox、pool 与 ownership（`:475-490`）。由 Nexus 的 ctx 自行 resume 中间层，会得到一个不被 manager 登记的 Agent：后续原生祖先再投递会再次 coldResume 并撞上 writer 持有，且 drain/pool/中断语义分裂。这等于另建 continuation manager、改写原生所有权，违反总纲第 8 条，不采用。 |
+
+### 结论与后续
+
+rc.2 公开及已发布 typed 子路径中，冷孙会话的投递必须经过 exact live 直属 parent，而冷 parent 只能由其 live 直属 parent 在投递真实消息时恢复。原生 UI 对此情形同样只读。因此深层冷链上的直接指定投递在 rc.2 下没有合规实现。当前能力不变：普通会话、live 子会话、普通冷 parent→冷 child 可直接调度；更深层冷 parent 如实回填原生失败。
+
+本轮 `NEXUS_DEEP_COLD=1 node --test --test-name-pattern='deep cold' tests/dispatch.test.mjs` 仍为 1 failed、0 passed、退出码 1，错误为 `session "deep-parent" is owned by subagent routing`，证据 `.scratch/nexus-v1/dispatch-deep-cold-1791530233273/result.json`。本轮只改文档，所以没有新增回归，也没有重跑付费模型。该红测保留为规格缺口的显式验收，等待宿主提供保持 manager 所有权且不驱动 parent 的 typed 激活/投递入口后再实施。
+
+### 修复轮 2 的检查记录
+
+- `npm run typecheck`、`npm run build` 通过；`git diff --check` 无输出。
+- `NEXUS_DEEP_COLD=1 node --test --test-name-pattern='deep cold' tests/dispatch.test.mjs`：1 failed、0 passed，与上文一致，P2 未解决。
+- 默认环境 `npm test`：22 项，17 passed、1 failed、4 skipped。失败项是既有的默认受控调度检查（`official Host native dispatch ...`），原因是探针插件在其步骤中途被 cordis 依赖卸载，报 `cannot get required service "agents" in inactive context`，该检查在未改产品源码时单独重跑 3 次、插桩重跑 3 次均复现。把进程的 `USERPROFILE`/`HOME` 指向空目录后同一检查单独运行通过（1 passed），说明它与运行机器的用户级环境有关，而非本轮文档改动；根因没有继续定位，也没有改测试掩盖。此前修复轮 1 记录的该检查通过结果仍是当时环境下的事实。
+- 同样将 `USERPROFILE`/`HOME` 指向空目录后跑 `npm test`：22 项，17 passed、1 failed（Nexus footer 的 Edge headless 检查，空 profile 下无法启动浏览器，属该临时环境产物）、4 skipped。两种环境各有一项不同的失败，合起来不足以替代一次环境正常的完整绿。因此本轮不宣称完整 suite 全绿。
