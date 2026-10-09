@@ -35,9 +35,9 @@ export function apply(ctx, config) {
         const models = []
         ctx.on('agent/created', ({ agent: current }) => { if (current.id === agent.id) models.push(current.options.model) })
         if (config.phase !== 1) {
-        // Startup and navigation never drain the recovered inbox by themselves.
-        await new Promise(resolve => setTimeout(resolve, 150))
-        if (agent.session.snapshotEvents().length !== before.length) throw new Error('restored supervisor automatically ran work')
+          // Startup and navigation never drain the recovered inbox by themselves.
+          await new Promise(resolve => setTimeout(resolve, 150))
+          if (agent.session.snapshotEvents().length !== before.length) throw new Error('restored supervisor automatically ran work')
         }
         if (config.phase === 1) worker = await ctx.agents.create({ sessionId: 'restore-worker', meta: { cwd: process.cwd() }, agentOptions: { provider: 'nexus-restore-worker', model: 'ordinary-model' } })
         else worker = await ctx.agents.resume({ resumeSessionId: 'restore-worker', agentOptions: { provider: 'nexus-restore-worker', model: 'ordinary-model' } })

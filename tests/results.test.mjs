@@ -71,17 +71,20 @@ test('duplicates, snapshot replay and live events interleave without a second de
   assert.equal(new Set(target.delivered.map(message => message.id)).size, 3)
 })
 
-test('the supervisor and its own native children never feed back; other subagents do', () => {
+test('the supervisor never feeds back; its own children and other subagents are relayed per turn', () => {
   const target = supervisor()
   const r = relay(target)
   const self = target.session
   r.observe(self, turn(self, 1, { text: 'my own reply' }))
   const child = session('child', { origin: 'subagent', parentSession: SessionId('sup') })
-  r.observe(child, turn(child, 1, { text: 'native notice owns this' }))
+  r.observe(child, turn(child, 1, { text: 'child first turn' }))
+  r.observe(child, turn(child, 2, { reason: { kind: 'error', error: { code: 'NO_ADAPTER', message: 'no adapter registered' } } }))
   const foreign = session('foreign-child', { origin: 'subagent', parentSession: SessionId('other-parent') })
   r.observe(foreign, turn(foreign, 1, { text: 'child of someone else' }))
-  assert.deepEqual(target.delivered.map(message => message.source.sessionId), ['foreign-child'])
-  assert.match(textOf(target.delivered[0]), /subagent of other-parent/)
+  assert.deepEqual(target.delivered.map(message => [message.source.sessionId, message.source.turn]), [['child', 1], ['child', 2], ['foreign-child', 1]])
+  assert.match(textOf(target.delivered[0]), /subagent of sup\)[\s\S]*child first turn/)
+  assert.match(textOf(target.delivered[1]), /Turn: 2 [\s\S]*Outcome: failed - NO_ADAPTER: no adapter registered/)
+  assert.match(textOf(target.delivered[2]), /subagent of other-parent/)
 })
 
 test('large closing text is bounded and keeps the head and the conclusion', () => {

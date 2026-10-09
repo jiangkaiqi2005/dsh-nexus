@@ -21,15 +21,17 @@ async function restartedProfile(scenario) {
   const requests = []
   server.on('connection', socket => {
     const history = []
+    let answered = 0
     socket.send(JSON.stringify({ type: 'session.created' }))
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString())
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') history.push(event.item)
       if (event.type === 'response.create') {
-        // A worker's finished turn also wakes the supervisor; those requests are not the scenario's prompts.
-        const latest = history.filter(item => !item.content?.[0]?.text.includes('Current runtime context')).at(-1)
-        if (latest?.role === 'user' && latest.content[0].text.includes('Automatic work-session result')) {
+        // A request whose new items are only automatic worker results is not a scenario prompt; one that also carries other input is.
+        const fresh = history.slice(Math.max(answered, history.findLastIndex(item => item.role === 'assistant') + 1)).filter(item => !item.content?.[0]?.text.includes('Current runtime context'))
+        answered = history.length
+        if (fresh.length && fresh.every(item => item.type === 'message' && item.role === 'user' && item.content[0].text.includes('Automatic work-session result'))) {
           socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Result noted.' }))
           return socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))
         }
@@ -96,11 +98,17 @@ for (const scenario of ['normal', 'reload', 'race', 'interrupt', 'active-exit'])
     assert.deepEqual(second.before.slice(0, first.events.length), first.events)
     assert.deepEqual(second.events.map(event => event.seq), second.events.map((_, index) => index))
     assert.equal(second.events.findLast(event => event.type === 'assistant/message').data.message.content[0].text, 'ORCHID-72')
-    assert.equal(requests.length, ['interrupt', 'active-exit'].includes(scenario) ? 3 : 2)
+    // Each phase's worker turn is relayed once and wakes the supervisor once; nothing else runs on its own.
+    // Interrupt: the recovered "Pending clarification" joins the phase-2 result turn, so that request counts as a prompt.
+    // Active-exit: the unanswered interrupted input is replayed beside the phase-2 result, so that request counts too.
+    assert.equal(requests.length, ['interrupt', 'active-exit'].includes(scenario) ? 4 : 2)
     assert.ok(requests[1].some(item => item.role === 'assistant' && item.content[0].text === 'ORCHID-72'))
-    const turns = second.events.filter(event => event.type === 'turn/start').map(event => event.data.turn)
-    assert.deepEqual(turns, turns.map((_, index) => index + 1), 'turn numbers continue from the recovered history without gaps or repeats')
-    assert.ok(turns.length >= (['interrupt', 'active-exit'].includes(scenario) ? 3 : 2))
+    if (scenario === 'interrupt') assert.ok(requests[1].some(item => item.role === 'user' && item.content[0].text === 'Pending clarification'))
+    const turnOf = seq => second.events.findLast(event => event.type === 'turn/start' && event.seq < seq).data.turn
+    const results = second.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-work-result')
+    const exited = ['interrupt', 'active-exit'].includes(scenario)
+    assert.deepEqual(results.map(event => [event.data.source.turn, turnOf(event.seq)]), [[1, 1], [2, exited ? 4 : 3]])
+    assert.deepEqual(second.events.filter(event => event.type === 'turn/start').map(event => event.data.turn), exited ? [1, 2, 3, 4, 5] : [1, 2, 3, 4])
     assert.ok(second.models.every(model => model === 'qwen3.8-omni-flash-realtime'))
     if (scenario === 'race') assert.match(second.raceError, /Unknown agent preset: nexus/)
     if (scenario === 'active-exit') assert.equal(second.before.findLast(event => event.type === 'turn/end').data.reason.kind, 'interrupted')

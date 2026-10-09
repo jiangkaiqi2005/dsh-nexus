@@ -119,3 +119,9 @@ rc.2 公开及已发布 typed 子路径中，冷孙会话的投递必须经过 e
 上一小节记录的“默认受控调度检查失败”，根因已定位：rc.2 `dsh-skill-filesystem` 的监视根总会加入 `join(agentsHome, 'skills')`，其中 `agentsHome = config.agentsHome ?? process.env.DSH_AGENTS_HOME ?? homedir()/.agents`。现有测试 harness 只设置了 `DSH_HOME`，隔离 Host 仍监视用户 `~/.agents/skills`；该目录当时存在符号链接环，Host 报 `fatal load failure: ELOOP`，探针随之被依赖卸载，表现为 `cannot get required service "agents" in inactive context`。把 `USERPROFILE`/`HOME` 指向空目录后通过，也是同一原因，不是产品代码问题。
 
 修复：所有 spawn 官方 Host 的测试（dispatch、restore、ui、profile）在 env 加入 `DSH_AGENTS_HOME`，指向该次运行隔离目录下的 `agents` 子目录。没有触碰用户的 `~/.agents` 或 `~/.claude`。修复后在默认环境重跑 `npm test`：22 项，18 passed、0 failed、4 skipped（3 项真实模型 opt-in，1 项深层冷 opt-in 红测）。深层冷 P2 仍为 cannot_fix，不受此修复影响。
+
+## 未决项（票 04 修复轮 2 核实）：主管原生 fork/spawn 子会话不可用
+
+票 04 复审指出、票 04 修复轮 2 核实：主管的实际工具集（受控 `wire.json` 的 `session.update`）含原生 `subagent_fork` 与 `workflow`，均来自 base preset 的 fork/spawn provider（`dsh-base/cordis.patch.yml` 约 :370-392，未开启 `modelSelectionSettings`，fork 按设计固定继承 parent 路由）。rc.2 `dsh-subagent/lib/index.js` 的 `parentAgentOptionsForDelegation`/`resolveChildAgentOptions`（约 :414-452）让子会话继承 parent 最新请求头的 provider/model；主管请求头如实为 `dashscope-realtime/qwen3.8-omni-flash-realtime`，该 provider 只是 Nexus 的 Realtime driver，没有注册 LlmAdapter，所以子会话第一步即 `NO_ADAPTER`（证据 `.scratch/nexus-v1/delivery-controlled-1791532817388/result.json`：descriptor `agentProvider: dashscope-realtime`，turn/end `error NO_ADAPTER`）。
+
+没有找到最小且合规的修复：改写主管请求头型号会伪造记录；为 `dashscope-realtime` 注册 LlmAdapter 等于把 Realtime 主管伪装成普通 worker 模型；修改 preset 的 tool-subagent 配置属于用户/宿主配置；从主管工具集删除这些工具会改变“可使用用户配置的全部能力”的能力面，属产品决策。保持未决，等待确认取舍。Nexus 自己的 `nexus_create_session`/`nexus_send_session` 使用原生默认工作 agent，不受影响；这类子会话失败经票 04 回流以 `Outcome: failed - NO_ADAPTER: …` 如实送达主管。

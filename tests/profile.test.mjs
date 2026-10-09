@@ -54,8 +54,8 @@ async function profileTurn(scenario) {
     assert.ok(result, 'profile did not produce a report: ' + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-6000))
     assert.equal(result.error, undefined, result.stack)
     if (scenario === 'late-conflict') return { ...result, wire, report }
-    // The ordinary worker's finished turn is delivered to the supervisor first (connection 1);
-    // every scenario assertion below concerns the events and wire after that settled baseline.
+    // The ordinary worker's finished turn is delivered to the supervisor first; every scenario
+    // assertion below concerns the events and wire after that settled baseline.
     const all = result.events
     assert.ok(Number.isSafeInteger(result.baseline))
     assert.ok(all.some(event => event.type === 'user/message' && event.seq < result.baseline && event.data.source.kind === 'nexus-work-result'))
@@ -74,7 +74,11 @@ async function profileTurn(scenario) {
       assert.ok(result.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.content[0].text === prompt))
     }
     assert.deepEqual(all.map(event => event.seq), Array.from({ length: all.length }, (_, index) => index))
-    return { ...result, all, wire: wire.filter(event => event.connection !== 1), report }
+    // The supervisor opens one connection per requesting turn, so the pre-baseline turns own the first connections.
+    const opened = all.filter(event => event.type === 'step/start' && event.data.step === 1 && event.seq < result.baseline).length
+    const early = wire.filter(event => event.connection <= opened)
+    if (!['missing', 'closed', 'timeout', 'real'].includes(scenario)) assert.ok(early.some(event => event.type === 'conversation.item.create' && event.item.content?.[0]?.text.includes('Automatic work-session result')), 'pre-baseline connections carried the worker result')
+    return { ...result, all, wire: wire.filter(event => event.connection > opened), report }
   } finally {
     child.kill('SIGTERM')
     await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(5000)])

@@ -102,10 +102,10 @@ function analyze(result) {
 
 // Every terminal of every other session reaches the model exactly once, and observation, receipt and processing are separate facts.
 function assertEveryTerminalDelivered(a, result, wire) {
-  for (const worker of result.workers.filter(worker => worker.id !== 'nexus-child')) {
+  for (const worker of result.workers) {
     for (const end of worker.events.filter(event => event.type === 'turn/end')) assert.equal(a.find(worker.id, end.data.turn).length, 1, `${worker.id} turn ${end.data.turn}`)
   }
-  assert.equal(a.results.length, result.workers.filter(worker => worker.id !== 'nexus-child').flatMap(worker => worker.events.filter(event => event.type === 'turn/end')).length)
+  assert.equal(a.results.length, result.workers.flatMap(worker => worker.events.filter(event => event.type === 'turn/end')).length)
   assert.ok(!a.results.some(entry => entry.source.sessionId === 'nexus-supervisor'), 'supervisor output must not return to itself')
   for (const entry of a.results) {
     assert.equal(entry.message.role, 'user')
@@ -163,11 +163,15 @@ test('official Host relays every work-session terminal to the supervisor: idle w
   assert.ok(second && turnOf(second.seq).turn > busyTurn.turn)
   assert.match(textOf(events.find(event => event.type === 'assistant/message' && event.seq > second.seq).data.message), /SECOND-USER/)
 
-  // The supervisor's own subagent reaches it through the runtime's settled notice (per activation, not per turn), never twice.
+  // The supervisor's own subagent: the relay reports its turn like any other session, and the runtime's
+  // per-activation settled notice still arrives once as a separate, differently identified message.
   const child = result.workers.find(worker => worker.id === 'nexus-child')
   assert.equal(child.header.parentSession, 'nexus-supervisor')
   assert.equal(child.events.filter(event => event.type === 'turn/end').length, 1)
-  assert.equal(find('nexus-child').length, 0, 'the relay leaves the supervisor own children to the native notice')
+  const childResult = find('nexus-child')
+  assert.equal(childResult.length, 1)
+  assert.equal(childResult[0].source.turn, 1)
+  assert.match(childResult[0].text, /Session: nexus-child \(subagent of nexus-supervisor\)[\s\S]*Outcome: completed[\s\S]*Report ok-native: finished/)
   const settled = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'subagent-settled' && event.data.source.senderSessionId === 'nexus-child')
   assert.equal(settled.length, 1)
   assert.match(textOf(settled[0].data), /ok-native/)

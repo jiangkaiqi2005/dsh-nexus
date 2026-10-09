@@ -61,8 +61,8 @@ export class ResultRelay {
 
   /** Admit one terminal at most once per session and turn. */
   observe(session: Session, event: SessionEvent) {
+    // The supervisor's own children are relayed as well: their native subagent-settled notice settles a whole activation without turn or failure identity.
     if (event.type !== 'turn/end' || session.id === this.target.id) return
-    if (session.header.origin === 'subagent' && session.header.parentSession === this.target.id) return // native settled notice owns these
     const id = key(session.id, event.data.turn)
     if (this.delivered.has(id)) return
     this.delivered.add(id)
