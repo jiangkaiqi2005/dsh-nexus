@@ -70,12 +70,12 @@ git diff --check
 - 用户 Desktop 中的新版安装与实机回流未做；全程没有 Computer Use，没有控制用户窗口或浏览器，没有给用户 profile 安装包。
 - worker 是受控 native adapter，不是付费 DeepSeek worker 对项目的真实修复；主管真实模型检查为文字模式，语音通话中的结果播报、打断和挂断属于后续票。
 - 回流只覆盖 Nexus 运行期间发生的终态；不回溯启动前已经结束的轮次，也不在重启时自动唤醒。已入队但在重启前未被处理的结果留在原生 inbox，待下一次唤醒进入模型。
-- 所有 subagent 会话（修复轮 2 起包括主管自己的子会话）都会回流，包括 worker 内部辅助 subagent 的轮次；模型可据来源里的 parent 信息判断，但这可能增加主管请求量。未设计按类型过滤，因为 Spec 要求全局覆盖且由模型决定。
-- 主管以 one-shot 方式起的子会话，其结果已作为该工具调用的工具结果返回给主管；中继仍会为该子会话轮次再投一条 `nexus-work-result`，因此多一次主管唤醒与模型请求。这是当前行为的如实记录，本票（票 05 第 0 步补记）不改变。
+- （票 05 修复轮 1 起已改变，见文末“用户裁定”）原为：所有 subagent 会话（修复轮 2 起包括主管自己的子会话）都会回流，包括 worker 内部辅助 subagent 的轮次；模型可据来源里的 parent 信息判断，但这可能增加主管请求量。未设计按类型过滤，因为 Spec 要求全局覆盖且由模型决定。
+- 主管以 one-shot 方式起的子会话，其结果已作为该工具调用的工具结果返回给主管；中继仍会为该子会话轮次再投一条 `nexus-work-result`，因此多一次主管唤醒与模型请求。这是当时行为的如实记录（票 05 第 0 步补记）；票 05 修复轮 1 起 subagent 会话不再回流，此项随之消失。
 - 纯文字连接要求主管每次回应至少给出简短文字；“完全沉默”需要放宽 `TextConnection` 空回复错误，本票没有做。（系统指令里的 “always answer in text” 即由此而来，`src/realtime.ts` 已加注释；语音票需要重新评估。）
 - 用户指令优先、来自工作会话的用户引导同步（用户故事 24）、指令仲裁属于票 05；本票只保证用户输入与结果同时到达时都不丢。
-- 票 03 的深层冷 subagent parent 直接派活（P2 cannot_fix）不受本票影响，仍需人工关注。
-- 未决（票 03 范围，修复轮 2 核实）：主管工具集中的原生 `subagent_fork`/`workflow` 建出的子会话继承主管的 `dashscope-realtime` 路由，第一步即 `NO_ADAPTER` 失败，主管用这些原生工具建子会话实际不可用；失败会如实回流。根因与未修理由见修复轮 2 第 6 条与票 03 验证文档。
+- 票 03 的深层冷 subagent parent 直接派活：原 P2 cannot_fix，按 2026-10-09 用户裁定不在范围（不适用）。
+- 原未决（票 03 范围，修复轮 2 核实；按 2026-10-09 用户裁定不在范围，不适用）：主管工具集中的原生 `subagent_fork`/`workflow` 建出的子会话继承主管的 `dashscope-realtime` 路由，第一步即 `NO_ADAPTER` 失败，主管用这些原生工具建子会话实际不可用；失败会如实回流。根因与未修理由见修复轮 2 第 6 条与票 03 验证文档。
 
 ## 修复轮 1
 
@@ -125,3 +125,7 @@ node --test --test-name-pattern='accurate Realtime' tests/delivery.test.mjs   # 
 ```
 
 结果：typecheck、build 通过；`npm test` 31 项，26 passed、0 failed、5 skipped（4 项真实模型 opt-in，1 项深层冷 opt-in），受控回流证据 `.scratch/nexus-v1/delivery-controlled-1791534012790/result.json`；`git diff --check` 无问题；受控 delivery 单独运行 1 passed（`delivery-controlled-1791533773245`）；真实回流 1 passed（`delivery-real-1791533987483`，准确型号：闲时结果唤醒后报告 `REPORT-RI-7731` 并调用 `nexus_send_session(user-existing, report-rerun)`，重跑结果回流后报告 `REPORT-RR-8842`；忙时先答 63，结果进入后补充 `REPORT-RB-5524`）。受控与真实证据如前分开：真实检查只证明准确型号的主管处理，worker 仍为受控 native adapter。
+
+## 用户裁定（2026-10-09，票 05 修复轮 1 应用）
+
+用户裁定 Nexus 只管理对话会话（普通会话）的 agent，会话 agent 产生的 subagent 会话 Nexus 不管。回流随之改变：`ResultRelay.observe` 对 `session.header.origin === 'subagent'` 的会话既不回流终态，也不同步用户输入（用户 fork 的普通会话有 `parentSession` 无 `origin`，仍回流）。这**改变了修复轮 2 第 1 条的结论**：主管自己的子会话不再由中继按轮投递，只剩原生 `subagent-settled` 结算通知送达其 parent（主管）；上文“主管自己的子会话”行与修复轮 2 第 1 条为当时的历史记录，未删除。受控 delivery 检查相应改为：`nexus-child` 中继 0 条、原生 settled 1 条且被处理；“每个终态恰好一条”只针对对话会话。relay 层 `tests/results.test.mjs` 对应用例改为 subagent 会话 0 条、用户 fork 会话按轮投递。证据与重跑结果见 `docs/verification/05-user-steering-priority.md` 的修复轮 1。

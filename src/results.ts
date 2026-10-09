@@ -46,8 +46,8 @@ const isDirectUserInput = (message: UserMessage) => message.source.kind === 'use
 const digestOf = (message: UserMessage) => createHash('sha256').update(JSON.stringify(message.content)).digest('hex').slice(0, 16)
 
 /**
- * Observes every other session's turn terminals and the user's direct input to
- * them, and hands both to the supervisor as native waking inbox messages.
+ * Observes every other conversation session's turn terminals and the user's
+ * direct input to them, and hands both to the supervisor as native waking inbox messages.
  * Observation, inbox admission and model processing remain separate facts in
  * the supervisor's own log.
  */
@@ -78,13 +78,13 @@ export class ResultRelay {
 
   /** Admit one terminal at most once per session and turn, and each version of a direct user input once. */
   observe(session: Session, event: SessionEvent) {
-    if (session.id === this.target.id) return
+    // Nexus manages conversation sessions only: subagent sessions belong to the agent that spawned them.
+    if (session.id === this.target.id || session.header.origin === 'subagent') return
     // Admission rather than the later claim: the supervisor learns of a change before older results of that session arrive.
     if (event.type === 'agent/inbox/spliced') {
       for (const message of event.data.inserted) if (isDirectUserInput(message)) this.relayInput(session, event.data.target, message)
       return
     }
-    // The supervisor's own children are relayed as well: their native subagent-settled notice settles a whole activation without turn or failure identity.
     if (event.type !== 'turn/end') return
     const id = key(session.id, event.data.turn)
     if (this.delivered.has(id)) return

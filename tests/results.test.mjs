@@ -71,20 +71,23 @@ test('duplicates, snapshot replay and live events interleave without a second de
   assert.equal(new Set(target.delivered.map(message => message.id)).size, 3)
 })
 
-test('the supervisor never feeds back; its own children and other subagents are relayed per turn', () => {
+test('only conversation sessions are relayed: no supervisor feedback, no subagent sessions, user forks included', () => {
   const target = supervisor()
   const r = relay(target)
   const self = target.session
   r.observe(self, turn(self, 1, { text: 'my own reply' }))
+  // Subagent sessions (origin subagent) belong to the agent that spawned them, the supervisor's own children included.
   const child = session('child', { origin: 'subagent', parentSession: SessionId('sup') })
   r.observe(child, turn(child, 1, { text: 'child first turn' }))
   r.observe(child, turn(child, 2, { reason: { kind: 'error', error: { code: 'NO_ADAPTER', message: 'no adapter registered' } } }))
   const foreign = session('foreign-child', { origin: 'subagent', parentSession: SessionId('other-parent') })
   r.observe(foreign, turn(foreign, 1, { text: 'child of someone else' }))
-  assert.deepEqual(target.delivered.map(message => [message.source.sessionId, message.source.turn]), [['child', 1], ['child', 2], ['foreign-child', 1]])
-  assert.match(textOf(target.delivered[0]), /subagent of sup\)[\s\S]*child first turn/)
-  assert.match(textOf(target.delivered[1]), /Turn: 2 [\s\S]*Outcome: failed - NO_ADAPTER: no adapter registered/)
-  assert.match(textOf(target.delivered[2]), /subagent of other-parent/)
+  assert.equal(target.delivered.length, 0)
+  // A conversation the user forked records parentSession but no subagent origin; it is still a conversation session.
+  const fork = session('user-fork', { parentSession: SessionId('w1') })
+  r.observe(fork, turn(fork, 1, { text: 'forked conversation reply' }))
+  assert.deepEqual(target.delivered.map(message => [message.source.sessionId, message.source.turn]), [['user-fork', 1]])
+  assert.match(textOf(target.delivered[0]), /Session: user-fork \(ordinary session\)[\s\S]*forked conversation reply/)
 })
 
 test('large closing text is bounded and keeps the head and the conclusion', () => {
@@ -159,21 +162,19 @@ test('direct user input in a work session reaches the supervisor under its own s
   assert.match(target.delivered[0].source.summary, /^user to w: switch to THEME-AMBER/)
 })
 
-test('only the user own input is mirrored: no supervisor feedback, Nexus dispatch, agent-delegated task, claim or replayed notice', () => {
+test('only the user own input to conversation sessions is mirrored: no supervisor feedback, Nexus dispatch, agent message, subagent session, claim or replayed notice', () => {
   const target = supervisor()
   const worker = session('w')
   const child = session('child', { origin: 'subagent', parentSession: SessionId('parent') })
   const r = relay(target)
   r.observe(target.session, admit(target.session, 'next-turn', userInput('said to Nexus itself')))
   r.observe(worker, admit(worker, 'next-step', createUserMessage({ content: [{ type: 'text', text: 'dispatched' }], source: { kind: 'nexus-dispatch', sessionId: 'sup', callId: 'c1' } })))
+  r.observe(worker, admit(worker, 'next-step', createUserMessage({ content: [{ type: 'text', text: 'from an adjacent agent' }], source: { kind: 'agent-message', senderSessionId: 'other' } })))
   r.observe(child, admit(child, 'next-turn', createUserMessage({ content: [{ type: 'text', text: 'delegated by the parent agent' }], source: { kind: 'user' } })))
+  r.observe(child, admit(child, 'next-step', userInput('typed into the subagent composer')))
   r.observe(worker, worker.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }))
   r.observe(worker, worker.append('user/message', userInput('a claimed copy is not a new admission'), { surfaceOp: 'append' }))
   assert.equal(target.delivered.length, 0)
-  // The user's own input to a subagent session through its composer is mirrored and names the parent.
-  r.observe(child, admit(child, 'next-step', userInput('child, stop after the parser')))
-  assert.equal(target.delivered.length, 1)
-  assert.match(textOf(target.delivered[0]), /Session: child \(subagent of parent\)[\s\S]*child, stop after the parser/)
 })
 
 test('a queued input moved to steering is mirrored once; an edit is mirrored again; a restart neither repeats nor forgets', () => {

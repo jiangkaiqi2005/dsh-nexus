@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import { Supervisor, type Config } from './supervisor.js'
 import { ResultRelay } from './results.js'
 
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'subagents']
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
 
 export async function apply(ctx: Context, config: Config) {

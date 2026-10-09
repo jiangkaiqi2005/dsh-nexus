@@ -120,12 +120,19 @@ rc.2 公开及已发布 typed 子路径中，冷孙会话的投递必须经过 e
 
 修复：所有 spawn 官方 Host 的测试（dispatch、restore、ui、profile）在 env 加入 `DSH_AGENTS_HOME`，指向该次运行隔离目录下的 `agents` 子目录。没有触碰用户的 `~/.agents` 或 `~/.claude`。修复后在默认环境重跑 `npm test`：22 项，18 passed、0 failed、4 skipped（3 项真实模型 opt-in，1 项深层冷 opt-in 红测）。深层冷 P2 仍为 cannot_fix，不受此修复影响。
 
-## 未决项 P2（需人工关注；票 04 修复轮 2 核实）：主管原生 fork/workflow 子会话不可用
+## 原未决项（票 04 修复轮 2 核实）：主管原生 fork/workflow 子会话——按 2026-10-09 用户裁定不在范围（不适用）
 
 票 04 复审指出、票 04 修复轮 2 核实：主管的实际工具集（受控 `wire.json` 的 `session.update`）含原生 `subagent_fork` 与 `workflow`。它们来自 web-app preset 组合的 delegation 组。**引用更正**：此处原写“base preset，`dsh-base/cordis.patch.yml` 约 :370-392”，但测试用 web-app profile 已在 `dsh-web-app/cordis.patch.yml:525-541` 把这些 base 行全部 `disabled: true`；实际生效的是 `dsh-web-app/presets/cordis.patch.yml:89-100`，其中 `tool-subagent-fork`（:96-100）为 `provider: fork`、`backgroundMode: continuable`，没有 `modelSelectionSettings`，fork 按设计固定继承 parent 路由；`workflow` 来自同组的 `workflow-ptc`（`provider: spawn`，:118-121）与 `tool-workflow`（:122-123）。以上行号均在 node_modules 精确 rc.2 发布包中核实。rc.2 `dsh-subagent/lib/index.js` 的 `parentAgentOptionsForDelegation`/`resolveChildAgentOptions`（:414-452）让子会话继承 parent 最新请求头的 provider/model；主管请求头如实为 `dashscope-realtime/qwen3.8-omni-flash-realtime`，该 provider 只是 Nexus 的 Realtime driver，没有注册 LlmAdapter，所以子会话第一步即 `NO_ADAPTER`（证据 `.scratch/nexus-v1/delivery-controlled-1791532817388/result.json`：descriptor `agentProvider: dashscope-realtime`，turn/end `error NO_ADAPTER`）。
 
-没有找到最小且合规的修复：改写主管请求头型号会伪造记录；为 `dashscope-realtime` 注册 LlmAdapter 等于把 Realtime 主管伪装成普通 worker 模型；修改 preset 的 tool-subagent 配置属于用户/宿主配置；从主管工具集删除这些工具会改变“可使用用户配置的全部能力”的能力面，属产品决策。保持未决，等待确认取舍；真正恢复原生委派属于用户产品决策。Nexus 自己的 `nexus_create_session`/`nexus_send_session` 使用原生默认工作 agent，不受影响；这类子会话失败经票 04 回流以 `Outcome: failed - NO_ADAPTER: …` 如实送达主管。
+没有找到最小且合规的修复：改写主管请求头型号会伪造记录；为 `dashscope-realtime` 注册 LlmAdapter 等于把 Realtime 主管伪装成普通 worker 模型；修改 preset 的 tool-subagent 配置属于用户/宿主配置；从主管工具集删除这些工具会改变“可使用用户配置的全部能力”的能力面，属产品决策。原记为未决 P2；2026-10-09 用户裁定 Nexus 只管理对话会话（普通会话）的 agent、不管会话 agent 产生的 subagent 会话，主管不以原生 fork/workflow 子会话委派，本项按裁定关闭为不适用。Nexus 自己的 `nexus_create_session`/`nexus_send_session` 使用原生默认工作 agent，不受影响；这类子会话失败经票 04 回流以 `Outcome: failed - NO_ADAPTER: …` 如实送达主管。
 
-票 05 第 0 步的合规最小处理（不是白名单，不删工具、不改 preset 或宿主）：Nexus 自己的主管系统指令（`src/realtime.ts` 的 `INSTRUCTIONS`）如实告知模型，原生 `subagent_fork`/`workflow` 子会话当前会继承 Realtime 路由并以 `NO_ADAPTER` 立即失败，委派工作改用 `nexus_create_session`/`nexus_send_session`。这只减少模型误用，不恢复原生委派，P2 仍未决。
+主管系统指令（`src/realtime.ts` 的 `INSTRUCTIONS`，票 05 修复轮 1 措辞）说明：主管管理对话会话，用 `nexus_create_session`/`nexus_send_session` 委派，不通过原生 `subagent_fork`/`workflow` 子会话；subagent 会话归产生它的 agent 管理。不删工具、不改 preset 或宿主。
 
-相关现象（待核实）：同组的 `tool-subagent`（spawn，工具名 `subagent`，:89-95，开启 `modelSelectionSettings`）及 `list_subagent_models` 不在主管实际工具集中（`.scratch/nexus-v1/delivery-controlled-1791533773245/wire.json` 的 `session.update` 有 `subagent_fork`、`workflow`，没有 `subagent`）；据复审描述普通会话有该工具，本票未在同一 Host 中对比核实。可能原因是 `dsh-tool-subagent/lib/index.js:611-640` 在 standing `modelSelectionSettings` 下只给属于该 preset 组合 scope 的 Agent 安装（`belongsToComposition`），主管不是由该组合创建；本推断尚未验证。
+## 2026-10-09 用户裁定的应用（票 05 修复轮 1）
+
+用户裁定：Nexus 只管理、调度对话会话（普通会话）的 agent；会话 agent 产生的 subagent 会话 Nexus 不管。据此：
+
+- **深层冷 subagent parent 直接派活（原 P2 cannot_fix）**：按裁定不在范围，关闭为**不适用**。不能向深层冷 subagent 派活是正确行为。
+- **主管原生 fork/workflow 子会话（原 P2）**：同上，不适用（见上一节）。
+- 实现随之收窄（`src/work-sessions.ts`）：`nexus_list_sessions` 按 `SessionSummary.origin` 不列出 subagent 会话；`nexus_read_session`、`nexus_send_session`、`nexus_stop_session` 对 `origin: 'subagent'` 的目标返回明确失败（“subagent session owned by the agent of <parent>; Nexus manages conversation sessions only”），不激活、不投递。上文的 continuable 子会话 Host adapter（`@deepseek-ai/dsh-subagent/internal`）、冷 child 派活路径及 `subagents` 注入、`@deepseek-ai/dsh-subagent` peer 依赖已删除。判定用 `origin` 而非 `parentSession`：用户 fork 的普通会话也记录 `parentSession` 但没有 `origin`（rc.2 `dsh-api-session-controller/lib/types/commands.js:248-252`），subagent 会话由 `dsh-subagent` `childSessionMeta`（`lib/index.js:470-480`）写入 `origin: 'subagent'`。
+- 测试：`tests/dispatch.test.mjs` 的冷 continuable child 场景改为断言列表不含 `cold-child`、读/派活/停止三次调用均返回上述失败、目标保持 inactive 且没有任何 `nexus-dispatch` 消息；深层冷 opt-in 红测及探针分支删除（不再是验收项）。上文各节保留为当时的历史记录。

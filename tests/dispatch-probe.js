@@ -30,18 +30,7 @@ export function apply(ctx, config) {
         worker.followup(createUserMessage({ content: [{ type: 'text', text: 'Existing user context ANCHOR-19' }], source: { kind: 'user' } }))
         await worker.whenIdle()
         let coldChildPrepared = false
-        let deepColdPrepared = false
-        if (config.deepCold) {
-          const root = await ctx.agents.create({ sessionId: 'deep-root', meta: { cwd: config.workspace }, agentOptions: { provider: 'dispatch-worker', model: 'worker-model' } })
-          await ctx.subagents.startContinuable({ provider: 'spawn', childId: 'deep-parent', label: 'Existing cold subagent parent', request: { parent: root.agent, maxDepth: 2, prompt: [{ type: 'text', text: 'run-initial-parent' }] }, signal: new AbortController().signal })
-          const parent = ctx.agents.get('deep-parent')
-          await parent.whenIdle()
-          await ctx.subagents.startContinuable({ provider: 'spawn', childId: 'deep-grandchild', label: 'Existing cold grandchild', request: { parent, maxDepth: 2, prompt: [{ type: 'text', text: 'run-initial-grandchild' }] }, signal: new AbortController().signal })
-          await ctx.agents.get('deep-grandchild').whenIdle()
-          await ctx.subagents.drainContinuableChildren(root.agent, ['deep-parent'])
-          await root.agent.whenIdle()
-          deepColdPrepared = !!ctx.agents.get('deep-root') && !ctx.agents.get('deep-parent') && !ctx.agents.get('deep-grandchild')
-        } else if (!config.real) {
+        if (!config.real) {
           const parent = await ctx.agents.create({ sessionId: 'cold-parent', meta: { cwd: config.workspace }, agentOptions: { provider: 'dispatch-worker', model: 'worker-model' } })
           await ctx.subagents.startContinuable({ provider: 'spawn', childId: 'cold-child', label: 'Existing non-Nexus child', request: { parent: parent.agent, prompt: [{ type: 'text', text: 'run-initial-child' }] }, signal: new AbortController().signal })
           await ctx.agents.get('cold-child').whenIdle()
@@ -69,11 +58,7 @@ export function apply(ctx, config) {
           else { stable = 0; last = total }
         }
         const workers = ctx.agents.list().filter(current => current !== agent).map(current => ({ id: current.id, ownedByNexus: ctx.agents.isOwnedBy(current.id, agent), header: current.session.header, events: current.session.snapshotEvents(), status: current.status }))
-        if (config.deepCold) for (const id of ['deep-parent', 'deep-grandchild']) {
-          const state = await ctx.sessionController.inspect(id)
-          workers.push({ id, header: state.meta, events: state.events, ownedByNexus: false, status: ctx.agents.get(id)?.status ?? 'inactive' })
-        }
-        if (!config.real && !config.deepCold && !workers.some(item => item.id === 'cold-child')) { const state = await ctx.sessionController.inspect('cold-child'); workers.push({ id: state.meta.id, header: state.meta, events: state.events, ownedByNexus: false, status: 'inactive' }) }
+        if (!config.real && !workers.some(item => item.id === 'cold-child')) { const state = await ctx.sessionController.inspect('cold-child'); workers.push({ id: state.meta.id, header: state.meta, events: state.events, ownedByNexus: false, status: 'inactive' }) }
         for (const current of ctx.agents.list()) await ctx.parallel('session/flush', current.session)
         const entry = [...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus')
         await entry.update({ ...entry.options, disabled: true })
@@ -81,7 +66,7 @@ export function apply(ctx, config) {
         const reader = await ctx.sessionPersistence.open(agent.id, 'read')
         const { events } = await reader.read()
         await reader.close()
-        await writeFile(config.report, JSON.stringify({ pid: process.pid, events, workers, coldChildPrepared, deepColdPrepared, released: !ctx.agents.get(agent.id) }))
+        await writeFile(config.report, JSON.stringify({ pid: process.pid, events, workers, coldChildPrepared, released: !ctx.agents.get(agent.id) }))
       } catch (error) { await writeFile(config.report, JSON.stringify({ error: String(error), stack: error.stack })) }
     }, 1800)
     return () => clearTimeout(timer)
