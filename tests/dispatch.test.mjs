@@ -46,10 +46,10 @@ async function dispatchProfile(real = false) {
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') history.push(event.item)
       if (event.type === 'response.create') {
-        // Automatic work results also wake the supervisor; they do not advance the scripted dispatch plan.
+        // Automatic work results and mirrored worker input also wake the supervisor; they do not advance the scripted dispatch plan.
         const fresh = history.slice(Math.max(answered, history.findLastIndex(item => item.role === 'assistant') + 1)).filter(item => !item.content?.[0]?.text.includes('Current runtime context'))
         answered = history.length
-        if (fresh.length && fresh.every(item => item.type === 'message' && item.role === 'user' && item.content[0].text.includes('Automatic work-session result'))) {
+        if (fresh.length && fresh.every(item => item.type === 'message' && item.role === 'user' && /Automatic work-session result|Direct user input in a work session/.test(item.content[0].text))) {
           socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Result noted.' }))
           return socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))
         }

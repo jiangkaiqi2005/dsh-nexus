@@ -40,8 +40,8 @@ function outcome(event: Extract<SessionEvent, { type: 'turn/end' }>) {
   }
 }
 
-/** The Host prompt entry (session and subagent prompt RPC behind the composer) marks the user's own input with an rpcId; agent-delegated tasks lack it. */
-const isDirectUserInput = (message: UserMessage) => message.source.kind === 'user' && 'rpcId' in message.source && typeof message.source.rpcId === 'string'
+/** Within conversation sessions, user-kind input is the user's own, whichever Host entry carried it; Nexus dispatches, agent messages and results carry their own kinds. */
+const isDirectUserInput = (message: UserMessage) => message.source.kind === 'user'
 
 const digestOf = (message: UserMessage) => createHash('sha256').update(JSON.stringify(message.content)).digest('hex').slice(0, 16)
 
@@ -109,7 +109,8 @@ export class ResultRelay {
       ...(edited ? ['The user edited this pending message; this content replaces the earlier version.'] : []),
       `User message: ${input.id}`,
       `Content:\n${bound(text)}`,
-      'The work session already has this input; it does not need to be resent.',
+      'The input is already in that session queue and need not be resent; the user may still edit or remove a queued input before the work agent reads it.',
+      'Treat it as the current user requirement for that session and update your later arrangements (dispatches, reviews, reports) to follow it, rather than only restating it.',
     ]
     this.delivered.add(id)
     this.inputs.add(inputKey(session.id, input.id))

@@ -36,6 +36,8 @@ export function apply(ctx, config) {
         const prompt = (text, requestId) => ctx.sessionController.prompt({ sessionId: SUPERVISOR, requestId, mode: 'queue', content: [{ type: 'text', text }] }, new AbortController().signal)
         const create = async sessionId => { await ctx.sessionController.create({ sessionId, cwd: config.workspace }); return ctx.agents.get(sessionId) }
         const task = (agent, text) => agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
+        // The user-kind task above is mirrored to the supervisor; let it handle that before the busy scenario starts.
+        const settleMirror = async id => { await until(() => supervisor.session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced' && event.data.inserted.some(message => message.source.kind === 'nexus-user-input' && message.source.sessionId === id)), id + ' mirror'); await supervisor.whenIdle() }
         const until = async (predicate, label, limit = 60000) => { for (const start = Date.now(); !predicate(); await sleep(15)) if (Date.now() - start > limit) throw new Error(`timeout waiting for ${label}`) }
         const quiet = async () => {
           let stable = 0
@@ -59,6 +61,7 @@ export function apply(ctx, config) {
           const busy = await create('user-busy')
           task(busy, 'slow-busy')
           await until(() => busy.status === 'running', 'busy worker')
+          await settleMirror('user-busy')
           await prompt(config.realPrompts.busy, 'real-busy')
           await until(() => supervisor.status === 'running', 'supervisor running')
           gate('busy').open()
@@ -95,6 +98,7 @@ export function apply(ctx, config) {
           const busy = await create('busy')
           task(busy, 'slow-busy')
           await until(() => busy.status === 'running', 'busy worker')
+          await settleMirror('busy')
           marks.busyStart = supervisor.session.seq
           await prompt('HOLD-BUSY first user input', 'busy-1')
           await until(() => supervisor.status === 'running', 'supervisor running')

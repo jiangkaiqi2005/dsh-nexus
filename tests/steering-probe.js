@@ -70,12 +70,14 @@ export function apply(ctx, config) {
         if (config.real) {
           const site = await create('site-worker')
           const doc = await create('doc-worker')
-          await prompt(SUPERVISOR, config.prompts.dispatch, 'real-dispatch')
+          // The user starts both sessions personally; Nexus learns their tasks only from the mirrored input.
+          await prompt('site-worker', config.prompts.site, 'real-site-task')
+          await prompt('doc-worker', config.prompts.doc, 'real-doc-task')
           await until(() => site.status === 'running' && doc.status === 'running', 'both workers running')
           await quiet(['site-worker', 'doc-worker'])
           marks.change = supervisor.session.seq
           await prompt(SUPERVISOR, config.prompts.change, 'real-change')
-          await until(() => ended(site, 1), 'site worker result')
+          await until(() => ended(site, 1), 'site worker result', config.buildLimitMs + 60000)
           await quiet(['doc-worker'])
           marks.steer = supervisor.session.seq
           await prompt('doc-worker', config.prompts.steer, 'real-direct-steer', 'steer')

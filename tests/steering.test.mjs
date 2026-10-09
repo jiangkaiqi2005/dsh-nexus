@@ -11,10 +11,13 @@ const TAGS = /THEME-[A-Z]+|task-\w+|HOLD-BUSY|[ABC]-(?:START|CHANGE)/g
 const MODEL = 'qwen3.8-omni-flash-realtime'
 
 const REAL_PROMPTS = {
-  dispatch: '请调用 nexus_send_session 两次：给会话 site-worker 发送 text 原样为“task-site THEME-BLUE”，给会话 doc-worker 发送 text 原样为“task-doc THEME-BLUE”。两个会话都是我已有的普通会话。发完只回复“已派出”。',
-  change: '我改主意了：site-worker 改用 THEME-AMBER，不要再用 THEME-BLUE。请立刻用 nexus_send_session 把这个新要求转告 site-worker（text 里写上 THEME-AMBER）。它的结果自动到达后，用一句话告诉我它最终用的主题标记。',
-  steer: '改用 THEME-CRIMSON，不要用 THEME-BLUE。',
-  ask: 'doc-worker 现在应该用哪个主题标记？这个要求是谁提出的？只用一句话回答。',
+  // Typed by the user directly into the two work sessions.
+  site: 'task-site：搭建公司官网首页，配色用蓝色主题 THEME-BLUE。',
+  doc: 'task-doc：编写后端 API 参考文档。',
+  // Said to Nexus in the main conversation: natural language, no tool, session id or message to send.
+  change: '官网首页的配色我改主意了，换成琥珀色吧（主题标记 THEME-AMBER）。做完告诉我结果。',
+  steer: '文档里的代码示例改用 THEME-CRIMSON 配色。',
+  ask: 'doc-worker 现在的要求是什么？是谁提出的？一句话回答。',
 }
 
 // Scripted supervisor model: it only executes the dispatches the scenario names; everything else is acknowledged with the tags it saw.
@@ -173,36 +176,41 @@ test('user steering: main-conversation change and direct worker steering reach t
   assert.equal(result.artifacts.gamma, 'THEME-JADE')
 })
 
-test('accurate Realtime model handles a mid-task requirement change and a direct worker steer', { skip: process.env.NEXUS_REAL_STEERING !== '1', timeout: 600000 }, async () => {
-  const { result, events, notices, results, received, replyAfter, placed, finals } = await steeringProfile(true)
+test('accurate Realtime model applies a natural-language change to the affected worker only and absorbs a direct worker steer', { skip: process.env.NEXUS_REAL_STEERING !== '1', timeout: 600000 }, async () => {
+  const { result, events, notices, results, received, replyAfter, worker, placed, finals } = await steeringProfile(true)
   const assistant = events.filter(event => event.type === 'assistant/message')
   assert.ok(assistant.length && assistant.every(event => event.data.message.source.model === MODEL))
   assert.ok(events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
   const text = (from, to = Infinity) => assistant.filter(event => event.seq > from && event.seq < to).map(event => textOf(event.data.message)).join('\n')
+  const dispatched = id => worker(id).events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch')
+  console.log('real assistant texts:', JSON.stringify(assistant.map(event => [event.seq, textOf(event.data.message)])))
+  console.log('real tool calls:', JSON.stringify(events.filter(event => event.type === 'tool/call').map(event => [event.seq, event.data.name, event.data.arguments])))
 
-  // Main-conversation change: the model itself steered the running site-worker; the worker read it at its next step.
+  // Both tasks were the user's own input to the sessions, mirrored to Nexus; later the user steered doc-worker directly.
+  assert.deepEqual(notices.map(entry => entry.source.sessionId), ['site-worker', 'doc-worker', 'doc-worker'])
+  for (const entry of notices) assert.ok(received(entry) && replyAfter(received(entry).seq))
+
+  // The natural-language change named no tool, session or message: the model chose site-worker, steered it, and left doc-worker alone.
   const siteSteer = placed('site-worker', message => message.source.kind === 'nexus-dispatch' && textOf(message).includes('THEME-AMBER'))
-  assert.ok(siteSteer, 'the model relayed the changed requirement to site-worker')
+  assert.ok(siteSteer, 'the model relayed the changed requirement to the affected session')
   assert.equal(siteSteer.step.turn, 1)
   assert.ok(siteSteer.step.step > 1, 'claimed at a later native step of the running turn')
+  assert.ok(!dispatched('doc-worker').some(event => textOf(event.data).includes('AMBER')), 'the unrelated session was not steered with the change')
   assert.match(finals('site-worker').at(-1), /^Built site-worker with THEME-AMBER \(the build step began with THEME-BLUE\)$/)
   assert.equal(result.artifacts['site-worker'], 'THEME-AMBER')
   const siteResult = results.find(entry => entry.source.sessionId === 'site-worker')
   assert.ok(received(siteResult))
-  assert.match(text(received(siteResult).seq, result.marks.steer), /AMBER/, 'the model reported the changed outcome')
+  assert.match(text(received(siteResult).seq, result.marks.steer), /AMBER|琥珀/, 'the model reported the changed outcome')
 
-  // Direct steer: the user typed into doc-worker; Nexus learned it without being told again.
-  assert.deepEqual(notices.map(entry => entry.source.sessionId), ['doc-worker'])
+  // Direct steer: Nexus answered from the mirror before doc-worker's result existed.
   const docSteer = placed('doc-worker', message => message.source.kind === 'user' && message.source.rpcId === 'real-direct-steer')
-  assert.equal(notices[0].source.messageId, docSteer.message.data.id)
+  assert.equal(notices[2].source.messageId, docSteer.message.data.id)
   assert.ok(docSteer.step.step > 1)
-  assert.ok(received(notices[0]) && replyAfter(received(notices[0]).seq))
   const docResult = results.find(entry => entry.source.sessionId === 'doc-worker')
   assert.ok(docResult.splicedSeq >= result.marks.release, 'the doc-worker result arrived only after the question was answered')
   assert.match(text(result.marks.ask, result.marks.release), /CRIMSON/, 'the answer came from the mirrored direct steer')
-  assert.match(finals('doc-worker').at(-1), /^Built doc-worker with THEME-CRIMSON \(the build step began with THEME-BLUE\)$/)
+  assert.match(finals('doc-worker').at(-1), /^Built doc-worker with THEME-CRIMSON /)
   assert.equal(result.artifacts['doc-worker'], 'THEME-CRIMSON')
   assert.ok(received(docResult) && replyAfter(received(docResult).seq))
-  console.log('real assistant texts:', JSON.stringify(assistant.map(event => [event.seq, textOf(event.data.message)])))
-  console.log('real tool calls:', JSON.stringify(events.filter(event => event.type === 'tool/call').map(event => [event.seq, event.data.name, event.data.arguments])))
+  console.log('doc-worker Nexus dispatches:', JSON.stringify(dispatched('doc-worker').map(event => textOf(event.data))))
 })

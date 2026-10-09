@@ -175,6 +175,10 @@ test('only the user own input to conversation sessions is mirrored: no superviso
   r.observe(worker, worker.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }))
   r.observe(worker, worker.append('user/message', userInput('a claimed copy is not a new admission'), { surfaceOp: 'append' }))
   assert.equal(target.delivered.length, 0)
+  // User input from any Host entry counts, not only the browser prompt RPC (an SDK, ACP or headless entry carries no rpcId).
+  r.observe(worker, admit(worker, 'next-step', createUserMessage({ content: [{ type: 'text', text: 'from the SDK entry' }], source: { kind: 'user' } })))
+  assert.equal(target.delivered.length, 1)
+  assert.match(textOf(target.delivered[0]), /Session: w \(ordinary session\)[\s\S]*from the SDK entry/)
 })
 
 test('a queued input moved to steering is mirrored once; an edit is mirrored again; a restart neither repeats nor forgets', () => {
