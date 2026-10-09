@@ -156,4 +156,4 @@ export class ResultRelay {
 
 const key = (sessionId: string, turn: number) => `${sessionId}\u0000${turn}`
 const inputKey = (sessionId: string, messageId: string, digest?: string) => `${sessionId}\u0000input\u0000${messageId}${digest === undefined ? '' : `\u0000${digest}`}`
-const describe = (session: Session) => `${session.id} (${session.header.origin === 'subagent' ? `subagent of ${session.header.parentSession ?? 'unknown'}` : 'ordinary session'})${session.header.cwd ? `, workspace: ${session.header.cwd}` : ''}`
+const describe = (session: Session) => `${session.id} (ordinary session)${session.header.cwd ? `, workspace: ${session.header.cwd}` : ''}`

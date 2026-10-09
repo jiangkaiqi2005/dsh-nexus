@@ -32,7 +32,7 @@ continuable 子会话采用已发布且有类型的 `@deepseek-ai/dsh-subagent/i
 | 新建 worker | 使用显式工作区与正常 factory，任务实际写产物且 completed；收据保持 completed false。 |
 | 引导与停止 | busy worker 下一原生 step 消费 steer；模型选择 stop 后目标 aborted，保留原生队列语义。 |
 | 完整能力与失败 | 非 Nexus 原生 read 实际成功；缺失会话、无效 JSON 参数和原生策略拒绝分别产生真实失败结果。 |
-| 冷 continuable child | 证明 parent/child 原先均不存活，派活后同身份恢复并执行，durable parent 仍为原 parent，消息保持 Nexus 来源。 |
+| 冷 continuable child | 证明 parent/child 原先均不存活，派活后同身份恢复并执行，durable parent 仍为原 parent，消息保持 Nexus 来源。 （注：已按 2026-10-09 用户裁定不适用——Nexus 不管 subagent 会话。） |
 | 工具协议 | 13 次受控函数调用共用原始连接，全部匹配 callId 与原生 turn/step；实际准确型号完成已有/新建派活、失败结果和文字续答。 |
 | 既有回归 | 票 01 取消先于 claim、keepInbox、turn stopping steer、初始化失败 writer 清理，票 02 恢复/竞争/中断/真实进程边界，以及 Edge headless 原生 UI 仍通过。 |
 
@@ -82,7 +82,7 @@ finally { Remove-Item Env:NEXUS_DEEP_COLD }
 
 源码对应 node_modules 中精确 `0.2.0-rc.2` 发布包；图索引不覆盖这些符号后才回退读取发布源码。没有使用 private fields、另建 continuation manager、虚构 Symbol、空消息唤醒、parent 来源冒充或修改 Host 来绕过约束。
 
-最小后续适配范围建议：保留当前普通全局会话、live 子会话和普通冷 parent→冷 child 的已验证能力，将更深层冷 parent 的直接派活延后到宿主提供保持原 manager ownership 且不驱动 parent 的 typed Host activation/delivery 适配入口时完成。此方案会缩小原票 03 的全部会话要求，不能据此宣告原票验收通过；目前没有改 Spec/ticket，P2 必修仍未解决。本轮按用户要求在票 03 流程结束后停止，不开始票 04。
+最小后续适配范围建议：保留当前普通全局会话、live 子会话和普通冷 parent→冷 child 的已验证能力，将更深层冷 parent 的直接派活延后到宿主提供保持原 manager ownership 且不驱动 parent 的 typed Host activation/delivery 适配入口时完成。此方案会缩小原票 03 的全部会话要求，不能据此宣告原票验收通过；目前没有改 Spec/ticket，P2 必修仍未解决。本轮按用户要求在票 03 流程结束后停止，不开始票 04。（注：已按 2026-10-09 用户裁定不适用——Nexus 不管 subagent 会话。）
 
 ## 修复轮 2：重新核查合规路线（结论仍为 cannot_fix）
 
@@ -103,7 +103,7 @@ finally { Remove-Item Env:NEXUS_DEEP_COLD }
 
 ### 结论与后续
 
-rc.2 公开及已发布 typed 子路径中，冷孙会话的投递必须经过 exact live 直属 parent，而冷 parent 只能由其 live 直属 parent 在投递真实消息时恢复。原生 UI 对此情形同样只读。因此深层冷链上的直接指定投递在 rc.2 下没有合规实现。当前能力不变：普通会话、live 子会话、普通冷 parent→冷 child 可直接调度；更深层冷 parent 如实回填原生失败。
+rc.2 公开及已发布 typed 子路径中，冷孙会话的投递必须经过 exact live 直属 parent，而冷 parent 只能由其 live 直属 parent 在投递真实消息时恢复。原生 UI 对此情形同样只读。因此深层冷链上的直接指定投递在 rc.2 下没有合规实现。当前能力不变：普通会话、live 子会话、普通冷 parent→冷 child 可直接调度；更深层冷 parent 如实回填原生失败。（注：已按 2026-10-09 用户裁定不适用——Nexus 不管 subagent 会话。）
 
 本轮 `NEXUS_DEEP_COLD=1 node --test --test-name-pattern='deep cold' tests/dispatch.test.mjs` 仍为 1 failed、0 passed、退出码 1，错误为 `session "deep-parent" is owned by subagent routing`，证据 `.scratch/nexus-v1/dispatch-deep-cold-1791530233273/result.json`。本轮只改文档，所以没有新增回归，也没有重跑付费模型。该红测保留为规格缺口的显式验收，等待宿主提供保持 manager 所有权且不驱动 parent 的 typed 激活/投递入口后再实施。
 
