@@ -9,8 +9,8 @@ window.__ModuleLoader__.load({
     // descriptor with the same validation, so both ends accept exactly the same items.
     const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
     const uplink = value => {
-      if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (value.type === 'played' && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
-      throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played", samples }')
+      if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (['played', 'hangup'].includes(value.type) && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
+      throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played" | "hangup", samples }')
     }
     const frame = value => {
       if (value?.type === 'audio' && isAudio(value.audio)) return value
@@ -61,7 +61,7 @@ window.__ModuleLoader__.load({
       async start(remote) {
         if (this.active) return
         const cleanups = []
-        const attempt = { release: () => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() } }
+        const attempt = { hangup: undefined, release: () => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() } }
         this.attempt = attempt
         const current = () => this.attempt === attempt
         // Release this attempt; report a failure only while it is still the user's call.
@@ -91,7 +91,7 @@ window.__ModuleLoader__.load({
         if (!stream.getAudioTracks().length) return end('no-device')
         this.set('connecting')
         const handle = remote.call()
-        cleanups.push(() => handle.dispose())
+        // Keep the stream until the Host consumes the final playback report and ends it.
         const capture = new AudioContext({ sampleRate: 16000 })
         cleanups.push(() => capture.close().catch(() => {}))
         const source = capture.createMediaStreamSource(stream)
@@ -111,24 +111,30 @@ window.__ModuleLoader__.load({
         let nodes = []
         let finished = 0
         const retire = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
+        const flush = () => {
+          const now = playback.currentTime
+          retire(now)
+          let played = finished
+          for (const { node, start, samples } of nodes) {
+            const heard = Math.min(samples, Math.max(0, Math.round((now - start) * 24000)))
+            played += heard
+            this.discarded += samples - heard
+            node.stop()
+          }
+          nodes = []
+          finished = 0
+          next = now
+          return played
+        }
+        attempt.hangup = () => { const samples = flush(); if (this.state === 'live') handle.send({ type: 'hangup', samples }); else handle.dispose() }
+        cleanups.push(() => flush())
         try {
           for await (const frame of handle) {
-            if (!current()) return attempt.release()
+            if (!current()) continue // Let the Host consume the final report before disposing this stream.
             if (frame.type === 'state' && frame.state === 'live') this.set('live')
             else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
             else if (frame.type === 'flush') {
-              const now = playback.currentTime
-              retire(now)
-              let played = finished
-              for (const { node, start, samples } of nodes) {
-                const heard = Math.min(samples, Math.max(0, Math.round((now - start) * 24000)))
-                played += heard
-                this.discarded += samples - heard
-                node.stop()
-              }
-              nodes = []
-              finished = 0
-              next = now
+              const played = flush()
               this.flushes++
               handle.send({ type: 'played', samples: played })
               this.set(this.state, this.code)
@@ -152,10 +158,11 @@ window.__ModuleLoader__.load({
           end('failed', 'CALL_CLOSED')
         } catch (error) {
           end('failed', error?.code ?? 'CALL_CLOSED')
-        }
+        } finally { handle.dispose() }
       }
       hangup() {
         const attempt = this.attempt
+        attempt?.hangup?.()
         this.attempt = undefined
         this.set('idle')
         attempt?.release()
@@ -172,6 +179,7 @@ window.__ModuleLoader__.load({
     function CallBar({ sessionId, call, remote, t }) {
       const [, render] = React.useReducer(count => count + 1, 0)
       React.useEffect(() => call.subscribe(render), [call])
+      React.useEffect(() => { if (sessionId !== SUPERVISOR) call.hangup(); return () => call.hangup() }, [sessionId, call])
       if (sessionId !== SUPERVISOR) return null
       const busy = call.active
       return h('div', {

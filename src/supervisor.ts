@@ -27,7 +27,7 @@ export interface Config { credentialRef: string; endpoint: string; timeoutMs?: n
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
 export interface CallLink { audio(delta: string): void; flush(): void; failed(code: string): void }
 /** A live call as its Remote stream holds it; played reports the samples played before the client stopped at a flush. */
-export interface LiveCall { append(audio: string): void; played(samples: number): void; end(): void }
+export interface LiveCall { append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
 
 /** Settle with the promise, or reject as soon as the turn is cancelled. */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -40,10 +40,10 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 /** How long a committed utterance waits for its transcript once its reply has settled. */
 const TRANSCRIPT_GRACE_MS = 3000
-/** The record of a spoken reply that the user's speech stopped while it played. */
-function cutNotice({ text, heard, total }: Cut) {
+/** The record of a spoken reply the user stopped while it played. */
+function cutNotice({ text, heard, total, ended }: Cut) {
   const excerpt = text ? ` "${text.length > 80 ? `${text.slice(0, 80)}…` : text}"` : ''
-  return createUserMessage({ content: [{ type: 'text', text: `[The user started speaking over your spoken reply${excerpt}, which stopped it: about ${heard.toFixed(1)} s of its ${total.toFixed(1)} s of audio were played; the rest was not heard.]` }], source: { kind: 'nexus-voice', form: 'notice', summary: 'interrupted playback' } })
+  return createUserMessage({ content: [{ type: 'text', text: `[The user ${ended ? 'ended the call during' : 'started speaking over'} your spoken reply${excerpt}, which stopped it: about ${heard.toFixed(1)} s of its ${total.toFixed(1)} s of audio were played; the rest was not heard.]` }], source: { kind: 'nexus-voice', form: 'notice', summary: 'interrupted playback' } })
 }
 
 /** One live call: its model connection, and how it ends. */
@@ -234,7 +234,7 @@ export class Supervisor implements Agent {
         if (failure) link.failed(failure)
       },
     }
-    const hangUp = () => { if (call.connection) this.hungUp.add(call.connection); call.end() }
+    const hangUp = () => { if (call.connection) { this.hungUp.add(call.connection); call.connection.hangup() } call.end() }
     this.call = call
     signal.addEventListener('abort', hangUp, { once: true })
     try {
@@ -254,7 +254,9 @@ export class Supervisor implements Agent {
       })
       call.connection = connection
       await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
-      return { append: audio => connection.appendAudio(audio), played: samples => connection.played(samples), end: hangUp }
+      // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
+      for (const notice of this.notices) connection.insert(notice)
+      return { append: audio => connection.appendAudio(audio), played: samples => connection.played(samples), hangup: samples => { this.hungUp.add(connection); connection.hangup(samples); call.end() }, end: hangUp }
     } catch (error) {
       call.end()
       throw error instanceof RealtimeFailure ? error : call.abort.signal.aborted ? new RealtimeFailure('ABORTED') : error
@@ -263,6 +265,7 @@ export class Supervisor implements Agent {
   /** @param voice - the utterance whose server-started reply answers this step, with its native input. */
   private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[], voice?: { server: ServerTurn; said: UserMessage }): Promise<boolean> {
     // A turn keeps the connection it started on; a live call serves the turns that start during it.
+    if (this.connection && this.hungUp.has(this.connection)) this.connection = undefined
     if (voice) this.connection = voice.server.connection
     this.connection ??= this.call?.connection
     if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS) }, { surfaceOp: 'append' })
@@ -338,7 +341,7 @@ export class Supervisor implements Agent {
       const event = this.session.append('assistant/attempt', { turn, step, stream: [...stream.snapshot()] })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: event.seq } } })
       // Hanging up does not drop what the call was answering: the step continues in text.
-      if (!signal.aborted && this.hungUp.has(connection)) { this.connection = undefined; return this.request(turn, step, signal, []) }
+      if (!signal.aborted && this.hungUp.has(connection)) { this.connection = undefined; return this.request(turn, step, signal, this.notices.splice(0)) }
       throw error
     }
     let concluded = false

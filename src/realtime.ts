@@ -29,8 +29,8 @@ function errorDetail(error: unknown): string {
  */
 export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean; settledAt: number }
 
-/** A delivered spoken reply whose playback the user's speech stopped, in seconds of audio. */
-export interface Cut { text: string; heard: number; total: number }
+/** A delivered spoken reply whose playback the user stopped, in seconds of audio. */
+export interface Cut { text: string; heard: number; total: number; ended?: boolean }
 
 /** One model response being received: its text, tool calls and settlement. */
 class Reply {
@@ -259,6 +259,18 @@ export class RealtimeConnection {
       if (heard < total) this.hooks?.cut({ text: reply.text, heard: heard / 24000, total: total / 24000 })
     }
   }
+  /** The user ended the call: account for the final playback, cancel generation and close its connection. */
+  hangup(samples?: number) {
+    if (this.closed) return
+    let left = samples ?? 0
+    for (const { reply, samples: total } of samples === undefined ? [] : this.delivered) {
+      const heard = Math.min(left, total)
+      left -= heard
+      if (heard < total) this.hooks?.cut({ text: reply.text, heard: heard / 24000, total: total / 24000, ended: true })
+    }
+    if (this.active) { this.active.silenced = true; this.send({ type: 'response.cancel' }) }
+    this.close(new RealtimeFailure('ABORTED'))
+  }
   /** Nothing is being said or answered: ask again for an absorbed request, or let a waiting request go. */
   private idle() {
     if (this.active || this.speaking || this.unassigned.length || this.opening) return
@@ -268,7 +280,7 @@ export class RealtimeConnection {
   private ask() {
     this.asked = true
     this.arm(this.host!)
-    this.send({ type: 'response.create' })
+    this.send({ type: 'response.create', response: { modalities: this.voice ? ['text', 'audio'] : ['text'] } })
   }
   /**
    * An endpoint error. While configuring, or on a text turn that owns its connection, the connection

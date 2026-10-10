@@ -18,9 +18,9 @@ export type VoiceFrame =
   | { type: 'flush' }
 /**
  * Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono), and the answer to
- * each flush: how many samples of the audio received since the previous flush were played.
+ * each flush or hangup: how many samples of the audio received since the previous flush were played.
  */
-export type VoiceUplink = { type: 'audio'; audio: string } | { type: 'played'; samples: number }
+export type VoiceUplink = { type: 'audio'; audio: string } | { type: 'played' | 'hangup'; samples: number }
 
 /** Unbounded single-consumer frame queue ended by the call. */
 class Frames implements AsyncIterable<VoiceFrame> {
@@ -28,7 +28,7 @@ class Frames implements AsyncIterable<VoiceFrame> {
   private wake?: () => void
   private ended = false
   push(frame: VoiceFrame) { if (!this.ended) { this.items.push(frame); this.wake?.() } }
-  end() { this.ended = true; this.wake?.() }
+  end(discard = false) { if (discard) this.items = []; this.ended = true; this.wake?.() }
   async *[Symbol.asyncIterator]() {
     while (true) {
       if (this.items.length) { yield this.items.shift()!; continue }
@@ -61,7 +61,7 @@ export class VoiceController extends TypertRemoteService {
   @Remote({ mode: 'stream' })
   async *call(signal: AbortSignal): AsyncGenerator<VoiceFrame> {
     const frames = new Frames()
-    signal.addEventListener('abort', () => frames.end(), { once: true })
+    signal.addEventListener('abort', () => frames.end(true), { once: true })
     yield { type: 'state', state: 'connecting' }
     const supervisor = this.supervisor
     let live
@@ -79,6 +79,7 @@ export class VoiceController extends TypertRemoteService {
         for await (const item of uplink) {
           if (item.type === 'audio' && typeof item.audio === 'string') live.append(item.audio)
           else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples)
+          else if (item.type === 'hangup') { live.hangup(item.samples); frames.end(true); return }
         }
       })()
       pump.catch(() => frames.end())

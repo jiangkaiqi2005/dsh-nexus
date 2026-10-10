@@ -45,14 +45,14 @@ const UTTERANCES = {
   1: { transcript: 'UTT-ONE 请让文档会话开始编写接口文档。', call: { name: 'nexus_send_session', arguments: { sessionId: 'docs', text: 'DOC-TASK write the API reference' } } },
   2: { transcript: 'UTT-TWO 另外，一加一等于几？', text: 'VOICE-SECOND 一加一等于二。' },
 }
-function controlledModel({ withhold = false, utterances = UTTERANCES, result = 'speak', speechDelayMs = 0, onOnset } = {}) {
+function controlledModel({ withhold = false, utterances = UTTERANCES, result = 'speak', speechDelayMs = 0, onOnset, dispatchReply } = {}) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
   const wire = []
   const log = { connections: 0, closed: 0, utterances: [], appendedBytes: 0, voicedFrames: 0, responses: [], held: [], cancelled: [], late: [], absorbed: 0, onsets: 0, folded: [] }
   server.on('connection', socket => {
     const connection = ++log.connections
     socket.on('close', () => log.closed++)
-    const send = event => { if (socket.readyState === 1) socket.send(JSON.stringify(event)) }
+    const send = event => { wire.push({ direction: 's2c', connection, at: Date.now(), ...event, ...(event.delta && event.type === 'response.audio.delta' ? { delta: '[audio]' } : {}) }); if (socket.readyState === 1) socket.send(JSON.stringify(event)) }
     const items = []
     let answered = 0
     let responses = 0
@@ -73,7 +73,7 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
       const id = `resp-${connection}-${++responses}`
       const record = { connection, id, text, call: call?.name, deltas: 0, at: Date.now() }
       log.responses.push(record)
-      send({ type: 'response.created', response: { id, status: 'in_progress' } })
+      send({ type: 'response.created', response: { id, status: 'in_progress', modalities: audio ? ['text', 'audio'] : ['text'] } })
       if (late) {
         const old = late
         late = undefined
@@ -193,16 +193,19 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
         }
         return
       }
-      wire.push({ connection, at: Date.now(), ...event })
+      wire.push({ direction: 'c2s', connection, at: Date.now(), ...event })
       // withhold: the endpoint got the request but never confirmed the voice session.
       if (event.type === 'session.update') audio = event.session.modalities.includes('audio')
       if (event.type === 'session.update' && !withhold) send({ type: 'session.updated', session: event.session })
       if (event.type === 'conversation.item.create') items.push(event.item.type === 'function_call_output' ? `[function_call_output ${event.item.call_id}] ${event.item.output}` : event.item.content?.map(part => part.text).join('\n') ?? '')
+      if (event.type === 'response.cancel' && current) { const old = current; old.cancel(); log.cancelled.push(old.id); send({ type: 'response.done', response: { id: old.id, status: 'cancelled', output: [] } }); current = undefined; setTimeout(() => send({ type: 'response.audio.delta', response_id: old.id, delta: tone(0.4) }), 200) }
       if (event.type === 'response.create') {
         // A request that arrives while the user speaks is absorbed into the user's turn.
         if (speaking) { log.absorbed++; return }
         const fresh = items.slice(answered).join('\n')
         answered = items.length
+        if (fresh.includes('AFTER-HANGUP-TOOL') && !fresh.includes('TOOL-RESULT-77')) return respond({ call: { name: 'fixture_slow_lookup', arguments: { query: 'API' } } })
+        if (dispatchReply && audio && fresh.includes('function_call_output')) return respond(dispatchReply)
         if (fresh.includes('TEXT-AFTER-CALL')) return respond({ text: 'TEXT-REPLY' })
         if (fresh.includes('Automatic work-session result') && audio && result !== 'speak') {
           log.held.push({ connection, result })
@@ -874,7 +877,7 @@ test('voice call whose response stalls fails the call instead of hanging the sup
 })
 
 /** Run one call: Host, endpoint (controlled, or a relay to the real one with key) and a headless Edge whose fake microphone plays the capture. */
-async function controlledCall(t, scenario, model, capture, run, { key } = {}) {
+async function controlledCall(t, scenario, model, capture, run, { key, beforeStart } = {}) {
   t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const host = await voiceHost(scenario, { endpoint: `ws://127.0.0.1:${model.server.address().port}`, key })
@@ -885,6 +888,7 @@ async function controlledCall(t, scenario, model, capture, run, { key } = {}) {
   try {
     const opened = await openNexus(browser, host.url, [instrument, []])
     page = opened.page
+    await beforeStart?.({ host, page, bar: opened.bar })
     await opened.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
     await until(async () => (await state(opened.bar)) === 'live', 'live call')
     await run({ host, page, bar: opened.bar })
@@ -1045,8 +1049,9 @@ test('voice interleaving: a tool that finishes while the user speaks, and a work
     // Native turns follow input identity, so they are not in speaking order; the record keeps the order in which
     // the replies were actually generated in its stream chunk times, not the time each turn recorded them.
     const spokenAt = text => { const first = reply(text).data.stream.find(item => item.type === 'text-chunks' || item.chunk?.type === 'text-delta'); return first.time0 ?? first.time }
-    assert.ok(spokenAt('VOICE-WHILE-TOOL') < spokenAt('TOOL-CONTINUED'), 'reply 2 was generated before the tool continuation of turn 1')
-    assert.ok(spokenAt('VOICE-FOUR') < spokenAt('RESULT-HEARD'), 'the reply to utterance 4 was generated before the result reply')
+    // Millisecond chunk times can tie; strict protocol response order is asserted above.
+    assert.ok(spokenAt('VOICE-WHILE-TOOL') <= spokenAt('TOOL-CONTINUED'), 'reply 2 was generated no later than the tool continuation of turn 1')
+    assert.ok(spokenAt('VOICE-FOUR') <= spokenAt('RESULT-HEARD'), 'the reply to utterance 4 was generated no later than the result reply')
     assert.ok(Math.abs(spokenAt('VOICE-WHILE-TOOL') - response('VOICE-WHILE-TOOL').at) < 1000)
     // The Host cancelled no work: docs finished its dispatched turn normally.
     const docs = result.workers.find(worker => worker.id === 'docs')
@@ -1119,30 +1124,36 @@ test('voice edge timing: a reply the endpoint completes after the user spoke kee
 function relay(endpoint) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
   const wire = []
-  const log = { responses: [], cancelled: [], late: [], absorbed: 0 }
-  const record = (direction, data) => {
+  const log = { connections: 0, responses: [], cancelled: [], late: [], absorbed: 0 }
+  const record = (connection, direction, data) => {
     const event = JSON.parse(data.toString())
-    if (event.type === 'input_audio_buffer.append' || event.type === 'response.audio.delta' || event.type?.endsWith('transcript.delta')) return
-    const entry = { direction, at: Date.now(), type: event.type }
-    if (event.item) entry.item = { type: event.item.type, role: event.item.role, call_id: event.item.call_id, text: event.item.content?.map(part => part.text ?? '').join('\n').slice(0, 400) }
+    if (event.type === 'input_audio_buffer.append') return
+    const entry = { connection, direction, at: Date.now(), type: event.type }
+    if (event.session) entry.session = { modalities: event.session.modalities, model: event.session.model }
+    if (event.response_id) entry.response_id = event.response_id
+    if (event.call_id) entry.call_id = event.call_id
+    if (event.name) entry.name = event.name
+    if (event.type === 'response.audio.delta') entry.bytes = Buffer.byteLength(event.delta, 'base64')
+    if (event.item) entry.item = { type: event.item.type, role: event.item.role, call_id: event.item.call_id, text: event.item.content?.map(part => part.text ?? '').join('\n').slice(0, 4000) }
     if (event.item_id) entry.item_id = event.item_id
     if (event.transcript) entry.transcript = event.transcript
-    if (event.response) entry.response = { id: event.response.id, status: event.response.status, reason: event.response.status_details?.reason }
+    if (event.response) entry.response = { id: event.response.id, status: event.response.status, reason: event.response.status_details?.reason, modalities: event.response.modalities }
     if (event.error) entry.error = event.error
     if (event.type === 'response.created') log.responses.push({ id: event.response.id, at: entry.at })
     if (event.type === 'response.done' && event.response.status === 'cancelled') log.cancelled.push(event.response.id)
     wire.push(entry)
   }
   server.on('connection', (socket, request) => {
+    const connection = ++log.connections
     const url = new URL(endpoint)
     for (const [name, value] of new URL(request.url, 'http://relay').searchParams) url.searchParams.set(name, value)
     const upstream = new WebSocket(url, { headers: { Authorization: request.headers.authorization } })
     const pending = []
     upstream.on('open', () => { for (const data of pending.splice(0)) upstream.send(data) })
-    upstream.on('message', data => { record('s2c', data); if (socket.readyState === 1) socket.send(data.toString()) })
+    upstream.on('message', data => { record(connection, 's2c', data); if (socket.readyState === 1) socket.send(data.toString()) })
     upstream.on('close', () => socket.close())
     upstream.on('error', () => socket.close())
-    socket.on('message', data => { record('c2s', data); if (upstream.readyState === 1) upstream.send(data.toString()); else pending.push(data.toString()) })
+    socket.on('message', data => { record(connection, 'c2s', data); if (upstream.readyState === 1) upstream.send(data.toString()); else pending.push(data.toString()) })
     socket.on('close', () => upstream.close())
   })
   return { server, wire, log, ready: new Promise(accept => server.once('listening', accept)) }
@@ -1227,3 +1238,186 @@ for (const [scenario, gap, generating] of [['real-barge', 7, false], ['real-barg
     }, { key: process.env.NEXUS_VOICE_KEY })
   })
 }
+
+
+for (const [scenario, plan] of [['generating', { text: 'DISPATCH-LONG', paced: 60 }], ['playing', { text: 'DISPATCH-LONG', burst: 40 }]]) {
+  test('hangup text continuation: ' + scenario + ' stops media, preserves heard facts, dispatch and results, and reconnects only by hand', { timeout: 240000 }, async t => {
+    const model = controlledModel({ utterances: { 1: UTTERANCES[1] }, dispatchReply: plan })
+    const capture = await voiceFixture([{ silence: 1.5 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 60 }])
+    await controlledCall(t, 'hangup-' + scenario, model, capture, async ({ host, page, bar }) => {
+      await until(async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')?.status === 'running', 'worker running')
+      await until(async () => Number(await bar.getAttribute('data-played-samples')) >= 24000, 'long reply playing')
+      assert.ok(await audible(page) > 0)
+      await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      await until(async () => (await state(bar)) === 'idle', 'hung up')
+      await until(async () => (await trackStates(page)).every(value => value === 'ended'), 'capture ended')
+      assert.equal(await audible(page), 0, 'all queued and playing nodes stopped')
+      await until(() => model.log.closed >= 1, 'voice endpoint closed')
+      const bytes = model.log.appendedBytes
+      const nodes = await page.evaluate(() => window.__nodes.length)
+      await delay(700)
+      assert.equal(model.log.appendedBytes, bytes)
+      assert.equal(await page.evaluate(() => window.__nodes.length), nodes, 'late old audio schedules no nodes')
+      if (scenario === 'generating') assert.ok(model.wire.some(event => event.type === 'response.cancel'), 'active voice generation cancelled')
+      await host.release()
+      await until(() => model.log.responses.some(response => response.text?.startsWith('RESULT-HEARD')), 'result handled in text')
+      const textarea = page.getByRole('textbox').last()
+      await textarea.fill('AFTER-HANGUP-TOOL 请查一下资料。')
+      await textarea.press('Enter')
+      await until(async () => { try { await readFile(resolve(host.home, 'tool-started')); return true } catch { return false } }, 'text tool executing')
+      await writeFile(resolve(host.home, 'tool-release'), '')
+      await until(() => model.log.responses.some(response => response.text?.startsWith('TOOL-CONTINUED')), 'text tool continued')
+      await until(async () => (await supervisorOf(host))?.status === 'idle', 'text idle')
+      const textConnections = model.wire.filter(event => event.type === 'session.update' && !event.session.modalities.includes('audio')).map(event => event.connection)
+      assert.ok(textConnections.length > 0)
+      for (const connection of textConnections) {
+        assert.deepEqual(model.wire.find(event => event.type === 'session.update' && event.connection === connection).session.modalities, ['text'])
+        for (const event of model.wire.filter(event => event.connection === connection && event.type === 'response.created')) assert.deepEqual(event.response.modalities, ['text'])
+        assert.ok(!model.wire.some(event => event.connection === connection && event.type.startsWith('response.audio.')))
+      }
+      // Page lifecycle after hangup does not request media or connect another voice session.
+      const connections = model.log.connections
+      await page.getByRole('button', { name: /新建会话|New session/, exact: true }).last().click()
+      await until(async () => !(await bar.isVisible()), 'switched conversation')
+      await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click()
+      await until(async () => (await state(bar)) === 'idle', 'returned to voice off')
+      assert.ok((await trackStates(page)).every(value => value === 'ended'))
+      assert.equal(model.log.connections, connections)
+      await page.reload()
+      await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click()
+      await until(async () => (await state(bar)) === 'idle', 'remounted idle')
+      await delay(500)
+      assert.equal((await trackStates(page)).length, 0)
+      assert.equal(model.log.connections, connections)
+      await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+      await until(async () => (await state(bar)) === 'live', 'manually reconnected')
+      const last = model.log.connections
+      const replay = model.wire.filter(event => event.connection === last && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
+      assert.match(replay, /UTT-ONE/)
+      assert.match(replay, /DOC-READY-42/)
+      assert.match(replay, /TOOL-RESULT-77/)
+      assert.match(replay, /rest was not heard/)
+      await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      const result = await host.finish()
+      const events = result.events
+      assert.ok(events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice' && /rest was not heard/.test(textOf(event.data))))
+      assert.ok(events.some(event => event.type === 'tool/call' && event.data.name === 'fixture_slow_lookup'))
+      assert.equal(result.workers.find(worker => worker.id === 'docs').events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+      for (const event of events.filter(event => event.type === 'assistant/message')) assert.equal(event.data.message.source.model, MODEL)
+      assert.ok(events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+      console.log('hangup text evidence:', host.home)
+    })
+  })
+}
+
+
+const textOnlyConnection = (model, connection) => model.wire.some(event => event.connection === connection && event.type === 'session.update' && JSON.stringify(event.session.modalities) === '["text"]')
+
+test('accurate Realtime hangup: text-dispatched work continues through a voice call, text-only results and tools in the same conversation, then manual reconnect replays its facts', { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
+  const capture = await voiceFixture([{ silence: 5 }, { text: '另外，一加一等于几？', voice: ZH }, { silence: 90 }])
+  const model = relay(process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime')
+  await controlledCall(t, 'real-hangup', model, capture, async ({ host, page, bar }) => {
+    assert.equal((await host.status()).agents.find(agent => agent.id === 'docs').status, 'running')
+    await until(async () => Number(await bar.getAttribute('data-played-samples')) > 0, 'real spoken exchange during work', 60000)
+    const voiceConnection = model.log.connections
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    await until(async () => (await state(bar)) === 'idle', 'real hung up')
+    await until(async () => (await trackStates(page)).every(state => state === 'ended'), 'real fake capture released')
+    assert.equal(await audible(page), 0)
+    await host.release()
+    await until(() => model.wire.some(event => event.direction === 'c2s' && event.type === 'conversation.item.create' && event.item.text?.includes('DOC-READY-42') && textOnlyConnection(model, event.connection)), 'work result reached text-only model', 120000)
+    await until(async () => (await supervisorOf(host))?.status === 'idle' && (await host.status())?.agents?.find(agent => agent.id === 'docs')?.ends >= 1, 'work result processed in text', 120000)
+    assert.ok(model.wire.some(event => event.connection > voiceConnection && textOnlyConnection(model, event.connection) && event.direction === 's2c' && event.type === 'response.function_call_arguments.done' && event.name === 'nexus_read_session'), 'work result triggered an actual text-only read after hangup')
+    const editor = page.getByRole('textbox').last()
+    await editor.fill('请现在调用 nexus_read_session 读取 docs 的会话记录，告诉我刚刚的最终结果标记。')
+    await editor.press('Enter')
+    await until(async () => (await supervisorOf(host))?.status === 'running', 'text request running', 15000)
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'text tool chain settled', 120000)
+    const textConnections = [...new Set(model.wire.filter(event => event.connection > voiceConnection && event.type === 'session.update' && JSON.stringify(event.session.modalities) === '["text"]').map(event => event.connection))]
+    assert.ok(textConnections.length > 0)
+    for (const connection of textConnections) {
+      const incoming = model.wire.filter(event => event.connection === connection && event.direction === 's2c')
+      const responses = incoming.filter(event => event.type === 'response.created')
+      assert.ok(responses.length)
+      for (const response of responses) assert.deepEqual(response.response.modalities, ['text'])
+      assert.ok(!incoming.some(event => event.type.startsWith('response.audio.')), 'text response generated no output audio')
+    }
+    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await until(async () => (await state(bar)) === 'live', 'real manual reconnect', 30000)
+    const connection = model.log.connections
+    const replay = model.wire.filter(event => event.connection === connection && event.direction === 'c2s' && event.type === 'conversation.item.create').map(event => event.item.text).join('\n')
+    assert.match(replay, /接口文档/)
+    assert.match(replay, /DOC-READY-42/)
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    await until(async () => (await state(bar)) === 'idle', 'manual call ended')
+    const client = { state: await state(bar), tracks: await trackStates(page), audible: await audible(page) }
+    const result = await host.finish()
+    const events = result.events
+    const readIds = model.wire.filter(event => textConnections.includes(event.connection) && event.direction === 's2c' && event.type === 'response.function_call_arguments.done' && event.name === 'nexus_read_session').map(event => event.call_id)
+    const read = events.filter(event => event.type === 'tool/call' && event.data.name === 'nexus_read_session' && readIds.includes(event.data.callId))
+    assert.ok(read.length && read.some(event => events.some(output => output.type === 'tool/result' && output.data.message.toolCallId === event.data.callId && !output.data.message.isError)), 'real text-only read tool executed successfully')
+    assert.ok(read.every(event => model.wire.some(output => textConnections.includes(output.connection) && output.direction === 'c2s' && output.type === 'conversation.item.create' && output.item.call_id === event.data.callId)), 'each post-hangup text tool result returned on its original call id')
+    const work = events.find(event => event.type === 'user/message' && event.data.source.kind === 'nexus-work-result' && event.data.source.sessionId === 'docs')
+    assert.match(textOf(work.data), /DOC-READY-42/)
+    const replies = events.filter(event => event.type === 'assistant/message')
+    assert.ok(replies.some(event => event.seq > work.seq && /DOC-READY-42/.test(textOf(event.data.message))))
+    for (const event of replies) assert.equal(event.data.message.source.model, MODEL)
+    assert.ok(events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+    const summary = { model: MODEL, textConnections, tools: read.map(event => ({ name: event.data.name, arguments: event.data.arguments })), replies: replies.map(event => textOf(event.data.message)), turnEnds: events.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind), client }
+    await writeFile(resolve(host.home, 'output/summary.json'), JSON.stringify(summary, null, 2))
+    console.log('real hangup evidence:', host.home, JSON.stringify(summary))
+  }, { key: process.env.NEXUS_VOICE_KEY, beforeStart: async ({ host, page }) => {
+    const editor = page.getByRole('textbox').last()
+    await editor.fill('请调用 nexus_send_session，把编写接口文档的任务交给现有 docs 会话。它完成后，先读取它的会话记录，再向我说明最终结果。')
+    await editor.press('Enter')
+    await until(async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')?.status === 'running', 'real text dispatch admitted', 120000)
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'dispatch text turn completed', 60000)
+  } })
+})
+
+
+test('hangup during a native tool keeps it running, and a rapid manual reconnect receives its one result without executing it again', { timeout: 180000 }, async t => {
+  const model = controlledModel({ utterances: { 1: { transcript: 'UTT-ONE 请查一下API资料。', call: { name: 'fixture_slow_lookup', arguments: { query: 'API' } } } } })
+  const capture = await voiceFixture([{ silence: 1.5 }, { text: '请查一下API资料。', voice: ZH }, { silence: 30 }])
+  await controlledCall(t, 'hangup-tool', model, capture, async ({ host, page, bar }) => {
+    await until(async () => { try { await readFile(resolve(host.home, 'tool-started')); return true } catch { return false } }, 'native tool pending')
+    await bar.evaluate(async element => { element.querySelector('button').click(); await new Promise(accept => setTimeout(accept, 0)); element.querySelector('button').click() })
+    await until(async () => (await state(bar)) === 'live' && model.log.connections === 2, 'rapid manually reconnected')
+    await writeFile(resolve(host.home, 'tool-release'), '')
+    await until(() => model.log.responses.some(response => response.connection === 2 && response.text?.startsWith('TOOL-CONTINUED')), 'same tool result on new call')
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'tool turn completed')
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    const result = await host.finish()
+    const calls = result.events.filter(event => event.type === 'tool/call' && event.data.name === 'fixture_slow_lookup')
+    assert.equal(calls.length, 1, 'reconnect did not rerun the native tool')
+    const output = result.events.filter(event => event.type === 'tool/result' && event.data.message.toolCallId === calls[0].data.callId)
+    assert.equal(output.length, 1)
+    assert.equal(output[0].data.message.isError, false)
+    assert.ok(result.events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+    assert.ok((await trackStates(page)).every(state => state === 'ended'))
+    console.log('hangup native tool evidence:', host.home)
+  })
+})
+
+test('hangup idle playback then immediately reconnect preserves its notice before another native turn records it', { timeout: 180000 }, async t => {
+  const model = controlledModel({ utterances: { 1: { transcript: 'UTT-ONE 请介绍接口文档。', text: 'LONG-IDLE-REPLY', burst: 40 } } })
+  const capture = await voiceFixture([{ silence: 1.5 }, { text: '请介绍接口文档。', voice: ZH }, { silence: 30 }])
+  await controlledCall(t, 'hangup-idle-notice', model, capture, async ({ host, page, bar }) => {
+    await until(async () => Number(await bar.getAttribute('data-played-samples')) >= 384000 && (await supervisorOf(host))?.status === 'idle', 'generated idle reply still playing')
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await until(async () => (await state(bar)) === 'live' && model.log.connections === 2, 'immediate manual reconnect', 15000)
+    const replay = model.wire.filter(event => event.connection === 2 && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
+    assert.match(replay, /ended the call during/)
+    assert.match(replay, /rest was not heard/)
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    const editor = page.getByRole('textbox').last()
+    await editor.fill('TEXT-AFTER-CALL 请继续文字。')
+    await editor.press('Enter')
+    await until(() => model.log.responses.some(response => response.text === 'TEXT-REPLY'), 'notice recorded with next text turn')
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'text complete')
+    const result = await host.finish()
+    assert.equal(result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice').length, 1, 'repeated hangup kept one notice')
+    console.log('hangup pending notice evidence:', host.home)
+  })
+})

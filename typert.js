@@ -5,11 +5,11 @@
 
 const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
 
-/** Client-to-Host item: captured microphone audio, base64 PCM16 16 kHz mono; or the samples played before a flush. */
+/** Client-to-Host item: captured microphone audio, base64 PCM16 16 kHz mono; or the samples played before a flush or hangup. */
 const uplink = () => ({
   parse(value) {
-    if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (value.type === 'played' && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
-    throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played", samples }')
+    if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (['played', 'hangup'].includes(value.type) && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
+    throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played" | "hangup", samples }')
   },
 })
 
