@@ -9,7 +9,7 @@ const HEAD = 'You are Nexus, the single supervisor of DeepSeek Harness. Understa
 const TAIL = '. When the user names a project for a new conversation or task, first call nexus_list_workspaces to find it in the native registered projects by display title and path, then use its returned absolute path as cwd in nexus_create_session; use nexus_send_session for an existing conversation. Do not use glob to search for project directory names or web_search to guess local paths. If the project name is unknown or ambiguous, ask the user which project or absolute path they mean instead of guessing. An explicit absolute directory remains usable with nexus_create_session. When the user changes requirements while work is under way, decide which work sessions are affected and pass the change on with nexus_send_session, saying it is a changed requirement from the user; running sessions receive it as native steering at their next step, which neither undoes finished actions nor instantly stops a running tool; stop a session only when the goal of the user calls for it. Messages with source nexus-user-input mirror what the user typed directly into a work session: they are explicit user instructions for that session, which already has them (no need to resend), and they take priority over your earlier dispatches, so update your later arrangements accordingly. Results of turns that ran before a requirement changed report earlier work, not new instructions. Tool acceptance means admitted, not work completed. Never say that work was dispatched, started or is under way unless nexus_send_session or nexus_create_session returned success for it in this conversation; when you have not called the tool yet, call it before telling the user anything about the task, and when it failed, say that it was not arranged. You manage conversation sessions: delegate work to them with nexus_create_session and nexus_send_session, not through native subagent_fork or workflow children; subagent sessions belong to the agents that spawned them and are not yours to manage. Report failures and unfinished work honestly.'
 // "Always answer in text" exists because a text connection treats an empty response as EMPTY_RESPONSE; a voice call may stay silent.
 export const INSTRUCTIONS = `${HEAD}; always answer in text, briefly when there is nothing to tell the user${TAIL} This connection is text-only.`
-export const VOICE_INSTRUCTIONS = `${HEAD}; during the call you decide whether and what to tell the user now, and you may say nothing when the user need not hear about it yet${TAIL} You are in a live voice call with the user: the user's speech reaches you directly as audio and you answer by speaking, naturally and concisely in the user's language. Keep talking with the user while work sessions run; their results arrive automatically.`
+export const VOICE_INSTRUCTIONS = `${HEAD}; during the call you decide whether and what to tell the user now, and you may say nothing when the user need not hear about it yet${TAIL} You are in a live voice call with the user: the user's speech reaches you directly as audio and you answer by speaking, naturally and concisely in the user's language. Keep talking with the user while work sessions run; their results arrive automatically. When the user speaks over you, your reply stops there; a nexus-voice notice tells you how much of it the user actually heard, and the rest was not said to them.`
 
 export class RealtimeFailure extends Error {
   constructor(readonly code: string, detail?: string) { super(`Nexus Realtime: ${code}${detail ? ` (${detail})` : ''}`) }
@@ -23,10 +23,19 @@ function errorDetail(error: unknown): string {
   }).join(', ')
 }
 
-export interface Response { text: string; calls: ToolCallBlock[] }
+/** interrupted: the user's speech stopped the response; text is what arrived before that, and calls it never finished are absent. */
+export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean }
+
+/** A delivered spoken reply whose playback the user's speech stopped, in seconds of audio. */
+export interface Cut { text: string; heard: number; total: number }
 
 /** One model response being received: its text, tool calls and settlement. */
 class Reply {
+  /** The server's response id, once it started this response. */
+  id?: string
+  /** The user spoke while this response was live: what follows is neither played nor recorded. */
+  cut = false
+  interrupted = false
   text = ''
   readonly calls = new Map<string, ToolCallBlock>()
   readonly settled: Promise<Response>
@@ -53,9 +62,13 @@ export interface ServerTurn {
   listen(onText: (text: string) => void): void
 }
 
-/** Voice-call hooks: model audio for the client, committed utterances and connection failure. */
+/** Voice-call hooks: model audio for the client, interrupted playback, committed utterances and connection failure. */
 export interface VoiceHooks {
   audio(delta: string): void
+  /** The user started speaking while delivered audio may still play: the client stops it and reports what it played. */
+  flush(): void
+  /** What the client reported for a flushed reply that was not played to its end. */
+  cut(cut: Cut): void
   committed(turn: ServerTurn): void
   failed(error: RealtimeFailure): void
 }
@@ -84,9 +97,17 @@ export class RealtimeConnection {
   private next?: { respond: boolean }
   private opening?: { resolve: () => void; reject: (error: Error) => void }
   private host?: Reply
-  private awaitingCreated = false
+  /** response.create for the Host request is outstanding; a request absorbed into the user's turn is asked again. */
+  private asked = false
+  /** The response the server is producing, and every started response by id until it is done. */
   private active?: Reply
+  private readonly live = new Map<string, Reply>()
+  /** Committed utterances whose server-started response has not begun yet, in commit order. */
   private readonly unassigned: Reply[] = []
+  private speaking = false
+  /** Audio delivered to the client since its last flush, per reply in delivery order; flushed batches await the client's report. */
+  private delivered: { reply: Reply; samples: number }[] = []
+  private readonly flushed: { reply: Reply; samples: number }[][] = []
   private readonly transcripts = new Map<string, (text: string | undefined) => void>()
   private idleWaiters: (() => void)[] = []
 
@@ -108,11 +129,27 @@ export class RealtimeConnection {
   private abort = () => this.fail(new RealtimeFailure('ABORTED'))
   private send(event: object) { this.ws.send(JSON.stringify({ event_id: randomUUID(), ...event })) }
 
-  /** The reply the current response belongs to: a Host request, else the oldest committed utterance. */
-  private current() {
-    if (!this.active && this.awaitingCreated) { this.awaitingCreated = false; this.active = this.host }
-    else if (!this.active) this.active = this.unassigned.shift()
-    return this.active
+  /**
+   * A started response belongs to the oldest committed utterance still waiting for one: the server
+   * starts it right after the commit, ahead of any queued request. Otherwise it answers the Host
+   * request; a response nobody asked for is consumed without being played or recorded.
+   */
+  private started(id: unknown) {
+    if (typeof id !== 'string') throw new RealtimeFailure('INVALID_EVENT')
+    let reply = this.unassigned.shift() ?? (this.host && !this.host.id ? this.host : undefined)
+    if (reply === this.host) this.asked = false
+    if (!reply) { reply = new Reply(); reply.cut = true }
+    reply.id = id
+    this.live.set(id, reply)
+    this.active = reply
+  }
+  /** The response of an event without a response id; a text connection's only request also when its start was not announced. */
+  private unidentified() { return this.active ?? (!this.voice && this.host ? (this.active = this.host) : undefined) }
+  /** The live response an event belongs to; packets of a finished, unknown or cut response belong to none. */
+  private replyOf(event: any) {
+    const id = event.response_id ?? event.response?.id
+    const reply = typeof id === 'string' ? this.live.get(id) : this.unidentified()
+    return reply?.cut ? undefined : reply
   }
   private receive(event: any) {
     switch (event.type) {
@@ -127,31 +164,43 @@ export class RealtimeConnection {
         if (!respond) { const opening = this.opening; this.opening = undefined; opening?.resolve() }
         return
       }
-      case 'response.created': this.current(); return
-      case 'response.text.delta': case 'response.audio_transcript.delta': this.current()?.push(event.delta); return
+      case 'response.created': return this.started(event.response?.id)
+      case 'response.text.delta': case 'response.audio_transcript.delta': this.replyOf(event)?.push(event.delta); return
       case 'response.text.done': case 'response.audio_transcript.done': {
-        const reply = this.current()
+        const reply = this.replyOf(event)
         const text = event.type === 'response.text.done' ? event.text : event.transcript
         if (reply && !reply.text && typeof text === 'string') reply.push(text)
         return
       }
-      case 'response.function_call_arguments.done': { const reply = this.current(); if (reply) this.call(reply, event); return }
-      case 'response.audio.delta':
+      case 'response.function_call_arguments.done': { const reply = this.replyOf(event); if (reply) this.call(reply, event); return }
+      case 'response.audio.delta': {
         if (!this.hooks) throw new RealtimeFailure('UNEXPECTED_AUDIO')
-        this.current()
-        if (typeof event.delta === 'string' && event.delta) this.hooks.audio(event.delta)
+        const reply = this.replyOf(event)
+        if (reply && typeof event.delta === 'string' && event.delta) this.deliver(reply, event.delta)
         return
-      case 'input_audio_buffer.committed': if (this.hooks && typeof event.item_id === 'string') this.commit(event.item_id); return
+      }
+      case 'input_audio_buffer.speech_started': if (this.hooks) this.speech(); return
+      case 'input_audio_buffer.speech_stopped': if (this.hooks) { this.speaking = false; this.idle() } return
+      case 'input_audio_buffer.committed': if (this.hooks && typeof event.item_id === 'string') { this.speaking = false; this.commit(event.item_id) } return
       case 'conversation.item.input_audio_transcription.completed': this.transcripts.get(event.item_id)?.(typeof event.transcript === 'string' && event.transcript ? event.transcript : undefined); return
       case 'conversation.item.input_audio_transcription.failed': this.transcripts.get(event.item_id)?.(undefined); return
-      case 'error': throw new RealtimeFailure('RESPONSE_ERROR', errorDetail(event.error))
+      case 'error': return this.error(new RealtimeFailure('RESPONSE_ERROR', errorDetail(event.error)))
       case 'response.done': return this.done(event)
     }
   }
   private done(event: any) {
-    const reply = this.current()
-    this.active = undefined
-    if (reply) {
+    const id = event.response?.id
+    // A late or repeated response.done of a finished response changes nothing.
+    if (typeof id === 'string' && !this.live.has(id)) return
+    const reply = typeof id === 'string' ? this.live.get(id) : this.unidentified()
+    if (typeof id === 'string') this.live.delete(id)
+    if (this.active === reply) this.active = undefined
+    if (reply && this.voice && (event.response?.status === 'cancelled' || reply.cut)) {
+      // The user's speech stopped it: keep the text that arrived before; calls of a cancelled response are not dispatched.
+      if (event.response?.status === 'cancelled') reply.calls.clear()
+      reply.interrupted = true
+      this.settle(reply)
+    } else if (reply) {
       for (const item of event.response?.output ?? []) if (item.type === 'function_call' && !reply.calls.has(item.call_id)) this.call(reply, item)
       if (event.response?.status !== 'completed') {
         // A text turn owns its connection; a call keeps its connection when one response fails.
@@ -160,13 +209,66 @@ export class RealtimeConnection {
       } else if (!this.voice && !reply.text && !reply.calls.size) throw new RealtimeFailure('EMPTY_RESPONSE')
       else this.settle(reply)
     }
-    if (!this.active && !this.awaitingCreated) for (const wake of this.idleWaiters.splice(0)) wake()
+    this.idle()
   }
   private settle(reply: Reply, error?: Error) {
     clearTimeout(reply.timer)
-    if (reply === this.host) this.host = undefined
+    if (reply === this.host) { this.host = undefined; this.asked = false }
     if (error) reply.reject(error)
-    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()] })
+    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}) })
+  }
+  /**
+   * The server's VAD heard the user start speaking. The server cancels a response it is still
+   * producing by itself (a cancelled response.done); a Host request it has not started is absorbed
+   * into the user's turn and asked again afterwards. Audio already delivered may still be playing,
+   * so the client is told to stop it.
+   */
+  private speech() {
+    this.speaking = true
+    if (this.active) this.active.cut = true
+    if (this.host && !this.host.id && this.asked) { this.asked = false; clearTimeout(this.host.timer) }
+    if (!this.delivered.length) return
+    this.flushed.push(this.delivered)
+    this.delivered = []
+    this.hooks!.flush()
+  }
+  private deliver(reply: Reply, delta: string) {
+    const samples = Buffer.byteLength(delta, 'base64') >> 1
+    const last = this.delivered.at(-1)
+    if (last?.reply === reply) last.samples += samples
+    else this.delivered.push({ reply, samples })
+    this.hooks!.audio(delta)
+  }
+  /** The client stopped playback at the oldest unreported flush after playing this many 24 kHz samples of it. */
+  played(samples: number) {
+    let left = samples
+    for (const { reply, samples: total } of this.flushed.shift() ?? []) {
+      const heard = Math.min(left, total)
+      left -= heard
+      if (heard < total) this.hooks?.cut({ text: reply.text, heard: heard / 24000, total: total / 24000 })
+    }
+  }
+  /** Nothing is being said or answered: ask again for an absorbed request, or let a waiting request go. */
+  private idle() {
+    if (this.active || this.speaking || this.unassigned.length || this.opening) return
+    if (this.host && !this.host.id && !this.asked && !this.next) return this.ask()
+    for (const wake of this.idleWaiters.splice(0)) wake()
+  }
+  private ask() {
+    const reply = this.host!
+    this.asked = true
+    clearTimeout(reply.timer)
+    reply.timer = setTimeout(() => this.expire(reply), this.timeoutMs)
+    this.send({ type: 'response.create' })
+  }
+  /**
+   * An endpoint error. While configuring, or on a text turn that owns its connection, the connection
+   * failed. On a call it answers the Host request the server has not started, which fails alone; an
+   * error that concerns no pending request (such as a cancel with no active response) leaves the call up.
+   */
+  private error(failure: RealtimeFailure) {
+    if (!this.voice || this.next || this.opening) throw failure
+    if (this.host && !this.host.id && this.asked) { this.settle(this.host, failure); this.idle() }
   }
   private call(reply: Reply, item: { call_id: unknown; name: unknown; arguments: unknown }) {
     if (typeof item.call_id !== 'string' || typeof item.name !== 'string' || typeof item.arguments !== 'string') throw new RealtimeFailure('INVALID_FUNCTION_CALL')
@@ -175,7 +277,7 @@ export class RealtimeConnection {
   }
   private commit(itemId: string) {
     const reply = new Reply()
-    reply.timer = setTimeout(() => { const index = this.unassigned.indexOf(reply); if (index >= 0) this.unassigned.splice(index, 1); reply.reject(new RealtimeFailure('TIMEOUT')) }, this.timeoutMs)
+    reply.timer = setTimeout(() => { const index = this.unassigned.indexOf(reply); if (index >= 0) this.unassigned.splice(index, 1); reply.reject(new RealtimeFailure('TIMEOUT')); this.idle() }, this.timeoutMs)
     this.unassigned.push(reply)
     const transcript = new Promise<string | undefined>(resolve => this.transcripts.set(itemId, text => { this.transcripts.delete(itemId); resolve(text) }))
     this.hooks!.committed({ connection: this, itemId, transcript, response: reply.settled, listen: onText => reply.listen(onText) })
@@ -214,7 +316,7 @@ export class RealtimeConnection {
       if (text) this.message(message.role, message.id, source + text)
     }
     this.sentThrough = this.history.at(-1)?.seq ?? this.sentThrough
-    if (respond) { this.awaitingCreated = true; this.send({ type: 'response.create' }) }
+    if (respond) this.ask()
   }
   private message(role: string, id: string, text: string) {
     this.send({ type: 'conversation.item.create', item: { id, type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'text', text }] } })
@@ -237,8 +339,8 @@ export class RealtimeConnection {
   async request(history: readonly SessionEvent[], onText: (text: string) => void, tools: ToolSchema[], instructions: string): Promise<Response> {
     if (this.closed || this.signal.aborted) throw new RealtimeFailure('ABORTED')
     if (!this.voice && this.host) throw new Error('Nexus already has a pending model response')
-    // A call answers one response at a time; a server-started reply or an earlier request finishes first.
-    while (this.voice && (this.active || this.awaitingCreated || this.opening || this.host) && !this.closed) await new Promise<void>(wake => this.idleWaiters.push(wake))
+    // A call answers one response at a time: the user's speech, a server-started reply or an earlier request goes first.
+    while (this.voice && (this.active || this.host || this.opening || this.speaking || this.unassigned.length) && !this.closed) await new Promise<void>(wake => this.idleWaiters.push(wake))
     if (this.closed) throw this.closedWith
     const reply = new Reply()
     this.host = reply
@@ -271,9 +373,12 @@ export class RealtimeConnection {
     this.closedWith = error
     this.signal.removeEventListener('abort', this.abort)
     this.ws.close()
-    const replies = new Set([this.host, this.active, ...this.unassigned].filter(reply => reply !== undefined))
+    const replies = new Set([this.host, this.active, ...this.live.values(), ...this.unassigned].filter(reply => reply !== undefined))
     this.host = this.active = undefined
+    this.live.clear()
     this.unassigned.length = 0
+    this.delivered = []
+    this.flushed.length = 0
     for (const reply of replies) this.settle(reply, error)
     this.opening?.reject(error)
     this.opening = undefined

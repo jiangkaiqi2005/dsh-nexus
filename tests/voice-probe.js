@@ -1,8 +1,9 @@
 import { writeFile, access } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const inject = ['agents', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel']
+export const inject = ['agents', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools']
 const SUPERVISOR = 'nexus-supervisor'
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const exists = path => access(path).then(() => true, () => false)
@@ -10,7 +11,8 @@ const exists = path => access(path).then(() => true, () => false)
 /**
  * Host-side fixture for the voice scenario: a controlled native worker model that
  * holds its first step until the test releases it, an existing user-created
- * conversation session, live status for the test, and the final native logs.
+ * conversation session, a native tool whose execution the test holds open,
+ * live status for the test, and the final native logs.
  */
 export function apply(ctx, config) {
   const flag = name => resolve(config.dir, name)
@@ -24,6 +26,13 @@ export function apply(ctx, config) {
     }
   }
   ctx.llm.registerAdapter(['voice-worker'], new WorkerAdapter())
+  // A user-configured native capability that runs until the test releases it.
+  ctx.tools.register(defineTool({ name: 'fixture_slow_lookup', description: 'Look up reference material (fixture).', parameters: { query: { type: 'string', required: true } }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async (_args, exec) => {
+      await writeFile(flag('tool-started'), '')
+      while (!(await exists(flag('tool-release')))) { exec.signal.throwIfAborted(); await sleep(50) }
+      return 'TOOL-RESULT-77'
+    } }))
   ctx.effect(() => {
     let stopped = false
     const run = async () => {

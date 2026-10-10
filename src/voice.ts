@@ -7,13 +7,20 @@ declare module '@deepseek-ai/cordis' {
   interface Context { nexusVoice: VoiceController }
 }
 
-/** Host-to-client items of one call: actual call state, and model audio (base64 PCM16, 24 kHz mono). */
+/**
+ * Host-to-client items of one call: actual call state, model audio (base64 PCM16, 24 kHz mono), and
+ * flush: the user started speaking, so audio still queued or playing stops and is discarded.
+ */
 export type VoiceFrame =
   | { type: 'state'; state: 'connecting' | 'live' }
   | { type: 'state'; state: 'failed'; code: string }
   | { type: 'audio'; audio: string }
-/** Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono). */
-export type VoiceUplink = { type: 'audio'; audio: string }
+  | { type: 'flush' }
+/**
+ * Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono), and the answer to
+ * each flush: how many samples of the audio received since the previous flush were played.
+ */
+export type VoiceUplink = { type: 'audio'; audio: string } | { type: 'played'; samples: number }
 
 /** Unbounded single-consumer frame queue ended by the call. */
 class Frames implements AsyncIterable<VoiceFrame> {
@@ -60,7 +67,7 @@ export class VoiceController extends TypertRemoteService {
     let live
     try {
       if (!supervisor) throw new RealtimeFailure('UNAVAILABLE')
-      live = await supervisor.startCall({ audio: audio => frames.push({ type: 'audio', audio }), failed: code => { frames.push({ type: 'state', state: 'failed', code }); frames.end() } }, signal)
+      live = await supervisor.startCall({ audio: audio => frames.push({ type: 'audio', audio }), flush: () => frames.push({ type: 'flush' }), failed: code => { frames.push({ type: 'state', state: 'failed', code }); frames.end() } }, signal)
     } catch (error) {
       if (!signal.aborted) yield { type: 'state', state: 'failed', code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN' }
       return
@@ -68,7 +75,12 @@ export class VoiceController extends TypertRemoteService {
     try {
       yield { type: 'state', state: 'live' }
       const uplink = this.ctx.invocation!.uplink<VoiceUplink>()
-      const pump = (async () => { for await (const item of uplink) if (item.type === 'audio' && typeof item.audio === 'string') live.append(item.audio) })()
+      const pump = (async () => {
+        for await (const item of uplink) {
+          if (item.type === 'audio' && typeof item.audio === 'string') live.append(item.audio)
+          else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples)
+        }
+      })()
       pump.catch(() => frames.end())
       yield* frames
     } finally {

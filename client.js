@@ -9,11 +9,12 @@ window.__ModuleLoader__.load({
     // descriptor with the same validation, so both ends accept exactly the same items.
     const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
     const uplink = value => {
-      if (!value || typeof value !== 'object' || value.type !== 'audio' || !isAudio(value.audio) || Object.keys(value).length !== 2) throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 }')
-      return value
+      if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (value.type === 'played' && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
+      throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played", samples }')
     }
     const frame = value => {
       if (value?.type === 'audio' && isAudio(value.audio)) return value
+      if (value?.type === 'flush' && Object.keys(value).length === 1) return value
       if (value?.type === 'state' && ['connecting', 'live'].includes(value.state)) return value
       if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
       throw new TypeError('nexusVoice/call frame is malformed')
@@ -48,10 +49,12 @@ window.__ModuleLoader__.load({
      * audio at 24 kHz, and reports only states it actually reached: "live" is
      * set when the Host says the model accepted the voice session. Each start is
      * its own attempt: hanging up releases what that attempt acquired, and an
-     * ended attempt never touches the state or resources of a later one.
+     * ended attempt never touches the state or resources of a later one. When the
+     * user starts speaking the Host sends a flush: everything still queued or
+     * playing stops, and the client reports how much it actually played.
      */
     class Call {
-      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.listeners = new Set(); this.attempt = undefined }
+      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.flushes = 0; this.discarded = 0; this.listeners = new Set(); this.attempt = undefined }
       subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
       set(state, code) { this.state = state; this.code = code; for (const listener of this.listeners) listener() }
       get active() { return ['requesting-mic', 'connecting', 'live'].includes(this.state) }
@@ -69,6 +72,8 @@ window.__ModuleLoader__.load({
           this.set(state, code)
         }
         this.played = 0
+        this.flushes = 0
+        this.discarded = 0
         this.set('requesting-mic')
         // Created within the user's click so playback is allowed to start.
         let playback
@@ -102,12 +107,32 @@ window.__ModuleLoader__.load({
         source.connect(processor)
         processor.connect(capture.destination)
         let next = 0
+        // Scheduled playback since the last flush; finished nodes are counted as played and dropped.
+        let nodes = []
+        let finished = 0
+        const settle = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
         try {
           for await (const frame of handle) {
             if (!current()) return attempt.release()
             if (frame.type === 'state' && frame.state === 'live') this.set('live')
             else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
-            else if (frame.type === 'audio') {
+            else if (frame.type === 'flush') {
+              const now = playback.currentTime
+              settle(now)
+              let played = finished
+              for (const { node, start, samples } of nodes) {
+                const heard = Math.min(samples, Math.max(0, Math.round((now - start) * 24000)))
+                played += heard
+                this.discarded += samples - heard
+                node.stop()
+              }
+              nodes = []
+              finished = 0
+              next = now
+              this.flushes++
+              handle.send({ type: 'played', samples: played })
+              this.set(this.state, this.code)
+            } else if (frame.type === 'audio') {
               const samples = pcm(frame.audio)
               const buffer = playback.createBuffer(1, samples.length, 24000)
               const channel = buffer.getChannelData(0)
@@ -115,8 +140,10 @@ window.__ModuleLoader__.load({
               const node = playback.createBufferSource()
               node.buffer = buffer
               node.connect(playback.destination)
+              settle(playback.currentTime)
               next = Math.max(next, playback.currentTime)
               node.start(next)
+              nodes.push({ node, start: next, samples: samples.length })
               next += buffer.duration
               this.played += samples.length
               this.set(this.state, this.code)
@@ -148,7 +175,7 @@ window.__ModuleLoader__.load({
       if (sessionId !== SUPERVISOR) return null
       const busy = call.active
       return h('div', {
-        'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played,
+        'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played, 'data-flushes': call.flushes, 'data-discarded-samples': call.discarded,
         style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13 },
       },
       h('span', { role: 'status' }, t(`state-${call.state}`) + (call.code && !busy ? ` (${call.code})` : '')),

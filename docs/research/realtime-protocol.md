@@ -17,3 +17,14 @@
 此差异不证明旧适配失效，也不能据此保证直接复制旧适配可用于新插件。Nexus 在实现前需以实际可用配置做探针，确认建连、文字输入、text-only 与工具续答组合，并确认正在生成语音时挂断能停止音频生成及播放。
 
 长连接期限、断线后的服务端会话恢复、忙时注入工作结果与用户新一轮输入后的工具回填，同样不能只凭输出模态文档作承诺。
+
+## 票 07 实测（2026-10-10）
+
+准确型号真实端点探针（扁平配置、server_vad），证据 `.scratch/nexus-v1/protocol-07/probe-1.json`、`truncate-1.json`：
+
+- 用户开口时，生成中的回复以 `response.done{status:'cancelled', status_details.reason:'turn_detected'}` 结束，与 `speech_started` 同毫秒且先于它；之后无迟到增量。
+- 生成约为实时的 3.4 倍，回复常已生成完而仍在播放，停播与“听到多少”须由客户端和 Host 处理；真实 `speech_started` 比开口晚约 0.8 s。
+- `conversation.item.truncate` 静默忽略：无确认、无 error，模型仍能复述全文。
+- 无活动回复时 `response.cancel` 返回 `error{type:'invalid_request_error', message:'Conversation has none active response'}`，无 code；属单次请求错误，非连接失败。
+- 工具调用后插入用户语音轮，再回填 `function_call_output` + `response.create` 可正常续答。
+- 有活动回复时 `response.create` 排队；用户说话期间的 `response.create` 被吞并，commit 后只产生一个自动回复。

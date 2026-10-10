@@ -5,18 +5,19 @@
 
 const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
 
-/** Client-to-Host item: captured microphone audio, base64 PCM16 16 kHz mono. */
+/** Client-to-Host item: captured microphone audio, base64 PCM16 16 kHz mono; or the samples played before a flush. */
 const uplink = () => ({
   parse(value) {
-    if (!value || typeof value !== 'object' || value.type !== 'audio' || !isAudio(value.audio) || Object.keys(value).length !== 2) throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 }')
-    return value
+    if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (value.type === 'played' && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
+    throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played", samples }')
   },
 })
 
-/** Host-to-client item: actual call state, or model audio base64 PCM16 24 kHz mono. */
+/** Host-to-client item: actual call state, model audio base64 PCM16 24 kHz mono, or a flush of queued playback. */
 const frame = () => ({
   parse(value) {
     if (value?.type === 'audio' && isAudio(value.audio)) return value
+    if (value?.type === 'flush' && Object.keys(value).length === 1) return value
     if (value?.type === 'state' && ['connecting', 'live'].includes(value.state)) return value
     if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
     throw new TypeError('nexusVoice/call frame is malformed')
