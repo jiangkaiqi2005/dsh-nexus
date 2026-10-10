@@ -12,7 +12,7 @@ declare module '@deepseek-ai/cordis' {
  * flush: the user started speaking, so audio still queued or playing stops and is discarded.
  */
 export type VoiceFrame =
-  | { type: 'state'; state: 'connecting' | 'live' }
+  | { type: 'state'; state: 'ready' | 'connecting' | 'live' }
   | { type: 'state'; state: 'failed'; code: string }
   | { type: 'audio'; audio: string }
   | { type: 'flush' }
@@ -20,7 +20,7 @@ export type VoiceFrame =
  * Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono), and the answer to
  * each flush or hangup: how many samples of the audio received since the previous flush were played.
  */
-export type VoiceUplink = { type: 'audio'; audio: string } | { type: 'played' | 'hangup'; samples: number }
+export type VoiceUplink = { type: 'ready' } | { type: 'audio'; audio: string } | { type: 'played' | 'hangup'; samples: number }
 
 /** Unbounded single-consumer frame queue ended by the call. */
 class Frames implements AsyncIterable<VoiceFrame> {
@@ -48,6 +48,7 @@ export class VoiceController extends TypertRemoteService {
   private supervisor?: Supervisor
   private ready: Promise<void>
   private markReady!: () => void
+  private owner?: symbol
 
   constructor(ctx: Context, private startup: { enabled: boolean; attempted: boolean }) {
     super(ctx, 'nexusVoice')
@@ -81,23 +82,25 @@ export class VoiceController extends TypertRemoteService {
    */
   @Remote({ mode: 'stream' })
   async *call(signal: AbortSignal): AsyncGenerator<VoiceFrame> {
+    if (this.owner) { yield { type: 'state', state: 'failed', code: 'CALL_BUSY' }; return }
+    const owner = this.owner = Symbol()
     const frames = new Frames()
     signal.addEventListener('abort', () => frames.end(true), { once: true })
-    yield { type: 'state', state: 'connecting' }
     const supervisor = this.supervisor
     let live
+    const incoming = this.ctx.invocation!.uplink<VoiceUplink>()[Symbol.asyncIterator]()
     try {
       if (!supervisor) throw new RealtimeFailure('UNAVAILABLE')
-      live = await supervisor.startCall({ audio: audio => frames.push({ type: 'audio', audio }), flush: () => frames.push({ type: 'flush' }), failed: code => { frames.push({ type: 'state', state: 'failed', code }); frames.end() } }, signal)
-    } catch (error) {
-      if (!signal.aborted) yield { type: 'state', state: 'failed', code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN' }
-      return
-    }
-    try {
+      // Reserve the sole media owner before the client asks for microphone or playback.
+      yield { type: 'state', state: 'ready' }
+      const ready = await incoming.next()
+      if (signal.aborted || ready.done || ready.value.type !== 'ready') return
+      yield { type: 'state', state: 'connecting' }
+      live = await supervisor.startCall({ audio: audio => frames.push({ type: 'audio', audio }), flush: () => frames.push({ type: 'flush' }), state: state => frames.push({ type: 'state', state }), failed: code => { frames.push({ type: 'state', state: 'failed', code }); frames.end() } }, signal)
       yield { type: 'state', state: 'live' }
-      const uplink = this.ctx.invocation!.uplink<VoiceUplink>()
       const pump = (async () => {
-        for await (const item of uplink) {
+        for (let next = await incoming.next(); !next.done; next = await incoming.next()) {
+          const item = next.value
           if (item.type === 'audio' && typeof item.audio === 'string') live.append(item.audio)
           else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples)
           else if (item.type === 'hangup') { live.hangup(item.samples); frames.end(true); return }
@@ -105,8 +108,11 @@ export class VoiceController extends TypertRemoteService {
       })()
       pump.catch(() => frames.end())
       yield* frames
+    } catch (error) {
+      if (!signal.aborted) yield { type: 'state', state: 'failed', code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN' }
     } finally {
-      live.end()
+      live?.end()
+      if (this.owner === owner) this.owner = undefined
     }
   }
 }

@@ -45,7 +45,7 @@ const UTTERANCES = {
   1: { transcript: 'UTT-ONE 请让文档会话开始编写接口文档。', call: { name: 'nexus_send_session', arguments: { sessionId: 'docs', text: 'DOC-TASK write the API reference' } } },
   2: { transcript: 'UTT-TWO 另外，一加一等于几？', text: 'VOICE-SECOND 一加一等于二。' },
 }
-function controlledModel({ withhold = false, utterances = UTTERANCES, result = 'speak', speechDelayMs = 0, onOnset, dispatchReply } = {}) {
+function controlledModel({ withhold = false, utterances = UTTERANCES, result = 'speak', speechDelayMs = 0, onOnset, dispatchReply, onRequest, handshakeDelay = () => 0 } = {}) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
   const wire = []
   const log = { connections: 0, closed: 0, utterances: [], appendedBytes: 0, voicedFrames: 0, responses: [], held: [], cancelled: [], late: [], absorbed: 0, onsets: 0, folded: [] }
@@ -82,7 +82,7 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
         send({ type: 'response.audio_transcript.delta', response_id: old, delta: 'LATE-TEXT' })
         send({ type: 'response.done', response: { id: old, status: 'completed', output: [] } })
       }
-      const item = call && { type: 'function_call', call_id: `call-${id}`, name: call.name, arguments: JSON.stringify(call.arguments) }
+      const item = call && { type: 'function_call', call_id: call.id ?? `call-${id}`, name: call.name, arguments: JSON.stringify(call.arguments) }
       if (item && !text) {
         send({ type: 'response.output_item.added', response_id: id, item: { id: `item-${id}`, ...item } })
         send({ type: 'response.function_call_arguments.done', response_id: id, item_id: `item-${id}`, ...item })
@@ -156,7 +156,10 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
       send({ type: 'input_audio_buffer.committed', item_id: itemId })
       send({ type: 'conversation.item.created', item: { id: itemId, type: 'message', role: 'user', content: [{ type: 'input_audio' }] } })
       const plan = utterances[index] ?? { transcript: `UTT-${index}`, text: `VOICE-${index}` }
-      if (plan.hold) return
+      if (plan.hold) {
+        if (plan.transcript) send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
+        return
+      }
       const answer = () => {
         if (plan.call || plan.paced || plan.burst) {
           send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
@@ -196,10 +199,15 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
       wire.push({ direction: 'c2s', connection, at: Date.now(), ...event })
       // withhold: the endpoint got the request but never confirmed the voice session.
       if (event.type === 'session.update') audio = event.session.modalities.includes('audio')
-      if (event.type === 'session.update' && !withhold) send({ type: 'session.updated', session: event.session })
+      if (event.type === 'session.update' && !withhold) {
+        const wait = handshakeDelay(connection)
+        if (wait) setTimeout(() => send({ type: 'session.updated', session: event.session }), wait)
+        else send({ type: 'session.updated', session: event.session })
+      }
       if (event.type === 'conversation.item.create') items.push(event.item.type === 'function_call_output' ? `[function_call_output ${event.item.call_id}] ${event.item.output}` : event.item.content?.map(part => part.text).join('\n') ?? '')
       if (event.type === 'response.cancel' && current) { const old = current; old.cancel(); log.cancelled.push(old.id); send({ type: 'response.done', response: { id: old.id, status: 'cancelled', output: [] } }); current = undefined; setTimeout(() => send({ type: 'response.audio.delta', response_id: old.id, delta: tone(0.4) }), 200) }
       if (event.type === 'response.create') {
+        if (onRequest?.({ connection, socket, send, items, audio, respond })) return
         // A request that arrives while the user speaks is absorbed into the user's turn.
         if (speaking) { log.absorbed++; return }
         const fresh = items.slice(answered).join('\n')
@@ -221,6 +229,204 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
   })
   return { server, wire, log, ready: new Promise(accept => server.once('listening', accept)) }
 }
+
+test('disconnect recovery: accepted text and incomplete calls survive a broken model connection without executing an unfinished tool', { timeout: 120000 }, async t => {
+  const model = controlledModel({ onRequest({ connection, socket, send, respond }) {
+    if (connection === 1) {
+      send({ type: 'response.created', response: { id: 'broken-text', status: 'in_progress' } })
+      send({ type: 'response.text.delta', response_id: 'broken-text', delta: 'PARTIAL-NOT-COMPLETE' })
+      send({ type: 'response.function_call_arguments.done', response_id: 'broken-text', call_id: 'unfinished-call', name: 'fixture_slow_lookup', arguments: '{"query":"API"}' })
+      socket.close()
+    } else {
+      // Events bearing the previous connection's unfinished response id must not revive its tool.
+      send({ type: 'response.text.delta', response_id: 'broken-text', delta: 'LATE-NOT-A-REPLY' })
+      send({ type: 'response.function_call_arguments.done', response_id: 'broken-text', call_id: 'unfinished-call', name: 'fixture_slow_lookup', arguments: '{"query":"API"}' })
+      send({ type: 'response.done', response: { id: 'broken-text', status: 'completed', output: [{ type: 'function_call', call_id: 'unfinished-call', name: 'fixture_slow_lookup', arguments: '{"query":"API"}' }] } })
+      respond({ text: 'RECOVERED-TEXT' })
+    }
+    return true
+  } })
+  await model.ready
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); await new Promise(accept => model.server.close(accept)) })
+  const host = await voiceHost('disconnect-text', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
+  const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true })
+  t.after(() => browser.close())
+  const { page } = await openNexus(browser, host.url)
+  await page.getByRole('textbox').last().fill('TEXT-BEFORE-DISCONNECT 请保留这个目标。')
+  await page.getByRole('textbox').last().press('Enter')
+  await until(() => model.log.responses.some(response => response.text === 'RECOVERED-TEXT'), 'same turn recovered', 15000)
+  await until(async () => (await supervisorOf(host))?.status === 'idle', 'recovery idle')
+  const result = await host.finish()
+  const replay = model.wire.filter(event => event.connection === 2 && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
+  assert.match(replay, /TEXT-BEFORE-DISCONNECT/)
+  assert.match(replay, /unfinished-call/)
+  assert.match(replay, /not executed/)
+  assert.equal(result.events.filter(event => event.type === 'tool/call').length, 0)
+  assert.ok(!result.events.some(event => event.type === 'assistant/message' && textOf(event.data.message).includes('LATE-NOT-A-REPLY')))
+  assert.equal(result.events.filter(event => event.type === 'user/message' && textOf(event.data).includes('TEXT-BEFORE-DISCONNECT')).length, 1)
+  assert.ok(result.events.some(event => event.type === 'assistant/attempt'))
+  assert.ok(result.events.some(event => event.type === 'assistant/message' && textOf(event.data.message) === 'RECOVERED-TEXT'))
+  assert.ok(result.events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+  await writeFile(resolve(host.home, 'wire.json'), JSON.stringify(model.wire))
+  console.log('disconnect text evidence:', host.home)
+})
+
+test('disconnect recovery: a live call rebuilds context while a native tool runs, and a repeated completed call is never executed twice', { timeout: 120000 }, async t => {
+  const seen = new Map()
+  const model = controlledModel({ handshakeDelay: connection => connection === 2 ? 700 : 0, onRequest({ connection, respond }) {
+    const count = (seen.get(connection) ?? 0) + 1
+    seen.set(connection, count)
+    if ((connection === 1 || connection === 2) && count === 1) respond({ ...(connection === 2 ? { text: 'REPEATED-CALL' } : {}), call: { id: 'stable-lookup', name: 'fixture_slow_lookup', arguments: { query: 'API' } } })
+    else respond({ text: 'NETWORK-TOOL-CONTINUED' })
+    return true
+  } })
+  const capture = await voiceFixture([{ silence: 60 }])
+  await controlledCall(t, 'disconnect-tool', model, capture, async ({ host, page, bar }) => {
+    await page.getByRole('textbox').last().fill('LOOKUP-BEFORE-NETWORK 查询资料。')
+    await page.getByRole('textbox').last().press('Enter')
+    await until(async () => { try { await readFile(resolve(host.home, 'tool-started')); return true } catch { return false } }, 'tool started')
+    const old = [...model.server.clients][0]
+    old.close()
+    await until(async () => (await state(bar)) === 'connecting', 'actual recovery state')
+    await until(async () => (await state(bar)) === 'live' && model.log.connections === 2, 'call recovered')
+    assert.equal((await trackStates(page)).length, 1, 'network recovery keeps the existing microphone choice')
+    await writeFile(resolve(host.home, 'tool-release'), '')
+    await until(() => model.log.responses.some(response => response.connection === 2 && response.text === 'NETWORK-TOOL-CONTINUED'), 'completed result continued')
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'tool recovery idle')
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    const result = await host.finish()
+    assert.equal(result.events.filter(event => event.type === 'tool/call' && event.data.callId === 'stable-lookup').length, 1)
+    assert.equal(result.events.filter(event => event.type === 'tool/result' && event.data.message.toolCallId === 'stable-lookup').length, 1)
+    const replay = model.wire.filter(event => event.connection === 2 && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
+    assert.match(replay, /LOOKUP-BEFORE-NETWORK/)
+    assert.match(replay, /TOOL-RESULT-77/)
+    assert.ok(model.wire.some(event => event.connection === 2 && event.item?.type === 'function_call_output' && event.item.call_id === 'stable-lookup'), 'repeated call receives the existing result')
+    assert.ok(result.events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+    await writeFile(resolve(host.home, 'wire.json'), JSON.stringify(model.wire))
+    console.log('disconnect native tool evidence:', host.home)
+  })
+})
+
+test('disconnect failure: an endpoint that also breaks the rebuilt request leaves an error turn and all unexecuted call facts', { timeout: 120000 }, async t => {
+  const model = controlledModel({ onRequest({ connection, socket, send }) {
+    const id = `unanswered-${connection}`
+    send({ type: 'response.created', response: { id, status: 'in_progress' } })
+    send({ type: 'response.function_call_arguments.done', response_id: id, call_id: `unexecuted-${connection}`, name: 'fixture_slow_lookup', arguments: '{"query":"API"}' })
+    socket.close()
+    return true
+  } })
+  await model.ready
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); await new Promise(accept => model.server.close(accept)) })
+  const host = await voiceHost('disconnect-unavailable', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
+  const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true })
+  t.after(() => browser.close())
+  const { page } = await openNexus(browser, host.url)
+  await page.getByRole('textbox').last().fill('OFFLINE-INPUT 保留失败事实。')
+  await page.getByRole('textbox').last().press('Enter')
+  await until(async () => (await supervisorOf(host))?.ends === 1, 'failed turn settled')
+  const result = await host.finish()
+  assert.equal(model.log.connections, 2, 'one bounded reconstruction, no endless hidden retry')
+  assert.equal(result.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'error')
+  assert.equal(result.events.filter(event => event.type === 'tool/call').length, 0)
+  const notices = result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-connection').map(event => textOf(event.data)).join('\n')
+  assert.match(notices, /unexecuted-1/)
+  assert.match(notices, /unexecuted-2/)
+  assert.equal(result.events.filter(event => event.type === 'assistant/message').length, 0, 'failed connection never becomes an invented answer')
+  await writeFile(resolve(host.home, 'wire.json'), JSON.stringify(model.wire))
+  console.log('unavailable model evidence:', host.home)
+})
+
+for (const ending of ['hangup', 'reload']) {
+  test(`disconnect lifecycle: ${ending} during model recovery stays in text and never reopens the microphone`, { timeout: 120000 }, async t => {
+    const model = controlledModel({ handshakeDelay: connection => connection === 2 ? 2000 : 0 })
+    const capture = await voiceFixture([{ silence: 60 }])
+    await controlledCall(t, 'disconnect-' + ending, model, capture, async ({ host, page, bar }) => {
+      ;[...model.server.clients][0].close()
+      await until(async () => (await state(bar)) === 'connecting', 'reconnecting call')
+      if (ending === 'hangup') await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      else await page.reload()
+      await until(async () => (await state(bar)) === 'idle', 'voice remains off')
+      await delay(2300)
+      assert.equal(await state(bar), 'idle')
+      assert.ok((await trackStates(page)).every(track => track === 'ended'))
+      assert.equal(await audible(page), 0)
+      const voiceCount = model.wire.filter(event => event.type === 'session.update' && event.session.modalities.includes('audio')).length
+      await page.getByRole('textbox').last().fill('TEXT-AFTER-CALL 保持文字。')
+      await page.getByRole('textbox').last().press('Enter')
+      await until(() => model.log.responses.some(response => response.text === 'TEXT-REPLY'), 'text after recovery ended')
+      assert.equal(model.wire.filter(event => event.type === 'session.update' && event.session.modalities.includes('audio')).length, voiceCount)
+      const result = await host.finish()
+      assert.ok(result.events.some(event => event.type === 'assistant/message' && textOf(event.data.message) === 'TEXT-REPLY'))
+      await writeFile(resolve(host.home, 'wire.json'), JSON.stringify(model.wire))
+      console.log('disconnect end evidence:', ending, host.home)
+    })
+  })
+}
+
+for (const mode of ['transcribed', 'untranscribed', 'timeout']) {
+  const transcribed = mode === 'transcribed'
+  const timeout = mode === 'timeout'
+  test(`disconnect recovery: committed speech ${transcribed ? 'keeps its received transcription' : timeout ? 'records unavailable words after an unanswered commit times out' : 'records unavailable words honestly'} before the endpoint answers`, { timeout: 120000 }, async t => {
+    const model = controlledModel({ utterances: { 1: { hold: true, ...(transcribed ? { transcript: 'SPEECH-BEFORE-DISCONNECT 请保留目标。' } : {}) } } })
+    const capture = await voiceFixture([{ silence: 1.5 }, { text: '请保留目标。', voice: ZH }, { silence: 30 }])
+    await controlledCall(t, 'disconnect-speech-' + mode, model, capture, async ({ host, page, bar }) => {
+      await until(() => model.log.utterances.length === 1, 'speech committed')
+      if (!timeout) [...model.server.clients][0].close()
+      await until(() => model.log.responses.some(response => response.connection === 2 && response.text === 'HOST-REPLY'), 'interrupted input continued', 15000)
+      await until(async () => (await supervisorOf(host))?.status === 'idle', 'speech recovery idle')
+      if (timeout) {
+        await until(async () => (await state(bar)) === 'failed', 'unanswering call failed')
+        assert.match(await bar.getByRole('status').textContent(), /TIMEOUT/)
+        assert.ok((await trackStates(page)).every(track => track === 'ended'))
+      } else await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      const result = await host.finish()
+      const replay = model.wire.filter(event => event.connection === 2 && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
+      const input = result.events.find(event => event.type === 'user/message' && (transcribed ? textOf(event.data).includes('SPEECH-BEFORE-DISCONNECT') : event.data.source.summary === 'untranscribed interrupted input'))
+      assert.ok(input)
+      assert.equal(input.data.source.kind, transcribed ? 'user' : 'nexus-voice')
+      assert.match(replay, transcribed ? /SPEECH-BEFORE-DISCONNECT/ : /words are unavailable/)
+      assert.ok(result.events.some(event => event.type === 'assistant/attempt'), 'the lost response is recorded as an attempt')
+      assert.ok(result.events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+      console.log('interrupted speech evidence:', mode, host.home)
+    }, { timeoutMs: timeout ? 2500 : 30000 })
+  })
+}
+
+test('disconnect lifecycle: another client cannot acquire media, closing the owner keeps background text and manual reentry', { timeout: 120000 }, async t => {
+  const model = controlledModel()
+  const capture = await voiceFixture([{ silence: 1.5 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 60 }])
+  await controlledCall(t, 'disconnect-client-close', model, capture, async ({ host, page, bar, browser }) => {
+    await until(async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')?.status === 'running', 'worker running before close')
+    const second = await openNexus(browser, host.url, [instrument, []])
+    await second.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await until(async () => (await state(second.bar)) === 'failed', 'second client rejected')
+    assert.match(await second.bar.getByRole('status').textContent(), /CALL_BUSY/)
+    assert.equal((await trackStates(second.page)).length, 0, 'second client never captures')
+    assert.equal(await audible(second.page), 0)
+    // Hiding the page leaves its call alive; closing its actual context ends the media owner.
+    await second.page.bringToFront()
+    assert.equal(await state(bar), 'live')
+    await page.context().close()
+    await host.release()
+    await until(() => model.log.responses.some(response => response.text?.startsWith('RESULT-HEARD') && response.connection > 1), 'Host text work after page closed')
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'background text settled')
+    assert.equal((await trackStates(second.page)).length, 0)
+    await second.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await until(async () => (await state(second.bar)) === 'live', 'manual reentry')
+    const connection = model.log.connections
+    const replay = model.wire.filter(event => event.connection === connection && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
+    assert.match(replay, /DOC-READY-42/)
+    await second.bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    const result = await host.finish()
+    assert.equal(result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-work-result' && event.data.source.sessionId === 'docs').length, 1)
+    assert.ok(result.events.some(event => event.type === 'assistant/message' && textOf(event.data.message).startsWith('RESULT-HEARD')))
+    assert.equal(result.workers.find(worker => worker.id === 'docs').events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
+    await writeFile(resolve(host.home, 'wire.json'), JSON.stringify(model.wire))
+    console.log('closed client evidence:', host.home)
+  })
+})
 
 async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY', key = 'fixture-not-a-secret', timeoutMs = 30000 } = {}) {
   const home = resolve('.scratch/nexus-v1', `voice-${scenario}-${Date.now()}`)
@@ -878,10 +1084,10 @@ test('voice call whose response stalls fails the call instead of hanging the sup
 })
 
 /** Run one call: Host, endpoint (controlled, or a relay to the real one with key) and a headless Edge whose fake microphone plays the capture. */
-async function controlledCall(t, scenario, model, capture, run, { key, beforeStart, preparePage } = {}) {
-  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
+async function controlledCall(t, scenario, model, capture, run, { key, beforeStart, preparePage, timeoutMs } = {}) {
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); await new Promise(accept => model.server.close(accept)) })
   await model.ready
-  const host = await voiceHost(scenario, { endpoint: `ws://127.0.0.1:${model.server.address().port}`, key })
+  const host = await voiceHost(scenario, { endpoint: `ws://127.0.0.1:${model.server.address().port}`, key, timeoutMs })
   t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
   t.after(() => browser.close())
@@ -892,13 +1098,16 @@ async function controlledCall(t, scenario, model, capture, run, { key, beforeSta
     await beforeStart?.({ host, page, bar: opened.bar })
     await opened.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
     await until(async () => (await state(opened.bar)) === 'live', 'live call')
-    await run({ host, page, bar: opened.bar })
+    await run({ host, page, bar: opened.bar, browser })
     await writeFile(resolve(host.home, 'wire.json'), JSON.stringify({ wire: model.wire, log: model.log }))
   } catch (error) {
     if (page) await page.screenshot({ path: resolve(host.home, 'output/failure.png') }).catch(() => {})
     console.log(host.output().slice(-4000))
     console.log('controlled model:', JSON.stringify(model.log.responses), JSON.stringify({ cancelled: model.log.cancelled, late: model.log.late, absorbed: model.log.absorbed }))
     await writeFile(resolve(host.home, 'wire.json'), JSON.stringify({ wire: model.wire, log: model.log })).catch(() => {})
+    // A failed observation must still release the workers/tools this fixture owns before durable cleanup.
+    await host.release()
+    await writeFile(resolve(host.home, 'tool-release'), '')
     const record = await host.finish().catch(() => undefined)
     if (record) await writeFile(resolve(host.home, 'output/failure-events.json'), JSON.stringify(record, null, 1))
     throw error

@@ -19,13 +19,14 @@ declare module '@deepseek-ai/dsh-llm' {
      * spoken reply whose playback the user's speech stopped, with how much of it was played.
      */
     'nexus-voice': { kind: 'nexus-voice'; form: 'notice'; summary: string }
+    'nexus-connection': { kind: 'nexus-connection'; form: 'notice'; summary: string }
   }
 }
 
 export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
-export interface CallLink { audio(delta: string): void; flush(): void; failed(code: string): void }
+export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void }
 /** A live call as its Remote stream holds it; played reports the samples played before the client stopped at a flush. */
 export interface LiveCall { append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
 
@@ -50,6 +51,7 @@ function cutNotice({ text, heard, total, ended }: Cut) {
 interface Call {
   readonly abort: AbortController
   connection?: RealtimeConnection
+  recovering?: Promise<void>
   /** End the call; a failure code is reported to the client, whose stream is still open. */
   end(failure?: string): void
 }
@@ -136,7 +138,7 @@ export class Supervisor implements Agent {
   private async drive(signal: AbortSignal) {
     do {
       // A committed utterance opens its own turn; the server is already answering it.
-      // One the call ended before anything was heard or answered leaves no record.
+      // An unheard commit the user abandoned leaves no record; endpoint failure retains its unavailable-input fact.
       const server = this.voiceTurns.shift()
       const said = server && await this.utterance(server, signal).catch(() => undefined)
       if (server && !said && !signal.aborted) continue
@@ -187,14 +189,17 @@ export class Supervisor implements Agent {
   /**
    * The native input of one committed utterance: the user's own words when transcribed.
    * Speech the model answered without a transcript is recorded as a Nexus notice, not
-   * as words the user said; speech neither transcribed nor answered gives undefined.
+   * as words the user said; an unheard commit abandoned by the client gives undefined.
    */
   private async utterance(voice: ServerTurn, signal: AbortSignal): Promise<UserMessage | undefined> {
     const answered = voice.response.then(() => true, () => false)
     const settled = answered.then(() => new Promise<undefined>(resolve => setTimeout(resolve, TRANSCRIPT_GRACE_MS)))
     const transcript = await abortable(Promise.race([voice.transcript, settled]), signal)
     if (transcript) return createUserMessage({ content: [{ type: 'text', text: transcript }], source: { kind: 'user' } })
-    if (!(await answered)) return undefined
+    if (!(await answered)) {
+      if (this.hungUp.has(voice.connection) || !(voice.connection.failure instanceof RealtimeFailure) || !['CONNECTION_CLOSED', 'CONNECTION_FAILED', 'TIMEOUT'].includes(voice.connection.failure.code)) return undefined
+      return createUserMessage({ content: [{ type: 'text', text: '[The endpoint committed audio input, but its connection failed before a transcription or complete answer arrived. The words are unavailable; do not invent them.]' }], source: { kind: 'nexus-voice', form: 'notice', summary: 'untranscribed interrupted input' } })
+    }
     return createUserMessage({ content: [{ type: 'text', text: '[The user spoke during the call; the endpoint returned no transcription of it.]' }], source: { kind: 'nexus-voice', form: 'notice', summary: 'untranscribed voice input' } })
   }
   private compose() {
@@ -221,6 +226,7 @@ export class Supervisor implements Agent {
    * voice session and the native context.
    */
   async startCall(link: CallLink, signal: AbortSignal): Promise<LiveCall> {
+    signal.throwIfAborted()
     if (this.disposed) throw new RealtimeFailure('UNAVAILABLE')
     if (this.call) throw new RealtimeFailure('CALL_BUSY')
     const call: Call = {
@@ -234,38 +240,56 @@ export class Supervisor implements Agent {
         if (failure) link.failed(failure)
       },
     }
-    const hangUp = () => { if (call.connection) { this.hungUp.add(call.connection); call.connection.hangup() } call.end() }
+    const lostPlayback = (connection: RealtimeConnection) => {
+      if (connection.unconfirmedPlayback) this.notices.push(createUserMessage({ content: [{ type: 'text', text: '[The audio transport closed; pending playback stopped. The final client playback acknowledgement is unavailable, so do not assume the complete spoken reply was heard.]' }], source: { kind: 'nexus-voice', form: 'notice', summary: 'unconfirmed playback after disconnect' } }))
+    }
+    const hangUp = () => { if (this.call !== call) return; if (call.connection) { lostPlayback(call.connection); this.hungUp.add(call.connection); call.connection.hangup() } call.end() }
     this.call = call
     signal.addEventListener('abort', hangUp, { once: true })
     try {
       await this.compose()
-      const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
-      const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
-      if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
-      call.abort.signal.throwIfAborted()
-      const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
-        audio: link.audio,
-        flush: link.flush,
-        // The model learns what was heard before it answers the speech that stopped the playback.
-        cut: cut => { const notice = cutNotice(cut); this.notices.push(notice); connection.insert(notice) },
-        committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
-        ignored: error => this.ctx.logger.info(`nexus voice: endpoint error left the call up: ${error.message}`),
-        failed: error => call.end(error.code),
-      })
-      call.connection = connection
-      await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
-      // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
-      for (const notice of this.notices) connection.insert(notice)
-      return { append: audio => connection.appendAudio(audio), played: samples => connection.played(samples), hangup: samples => { this.hungUp.add(connection); connection.hangup(samples); call.end() }, end: hangUp }
+      let recovered = false
+      let accepted = false
+      const connect = async () => {
+        const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
+        const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
+        if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
+        call.abort.signal.throwIfAborted()
+        const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
+          audio: link.audio,
+          flush: link.flush,
+          // The model learns what was heard before it answers the speech that stopped the playback.
+          cut: cut => { const notice = cutNotice(cut); this.notices.push(notice); connection.insert(notice) },
+          committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
+          ignored: error => this.ctx.logger.info(`nexus voice: endpoint error left the call up: ${error.message}`),
+          failed: error => {
+            lostPlayback(connection)
+            // Only a live call recovers transport failure; the user's end aborts this owner first.
+            if (!accepted || recovered || this.call !== call || !['CONNECTION_CLOSED', 'CONNECTION_FAILED'].includes(error.code)) return call.end(error.code)
+            recovered = true
+            link.flush()
+            link.state('connecting')
+            call.recovering = connect().then(() => { if (this.call === call) link.state('live') }).catch(failure => call.end(failure instanceof RealtimeFailure ? failure.code : 'CONNECTION_FAILED'))
+          },
+        })
+        call.connection = connection
+        await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
+        // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
+        for (const notice of this.notices) connection.insert(notice)
+      }
+      await connect()
+      accepted = true
+      return { append: audio => call.connection?.appendAudio(audio), played: samples => call.connection?.played(samples), hangup: samples => { if (call.connection) { this.hungUp.add(call.connection); call.connection.hangup(samples) } call.end() }, end: hangUp }
     } catch (error) {
       call.end()
       throw error instanceof RealtimeFailure ? error : call.abort.signal.aborted ? new RealtimeFailure('ABORTED') : error
     }
   }
   /** @param voice - the utterance whose server-started reply answers this step, with its native input. */
-  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[], voice?: { server: ServerTurn; said: UserMessage }): Promise<boolean> {
+  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[], voice?: { server: ServerTurn; said: UserMessage }, recovered = false): Promise<boolean> {
     // A turn keeps the connection it started on; a live call serves the turns that start during it.
-    if (this.connection && this.hungUp.has(this.connection)) this.connection = undefined
+    if (this.connection && (this.hungUp.has(this.connection) || this.connection.failure)) this.connection = undefined
+    if (this.call?.recovering) await abortable(this.call.recovering, signal)
     if (voice) this.connection = voice.server.connection
     this.connection ??= this.call?.connection
     if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS) }, { surfaceOp: 'append' })
@@ -300,6 +324,7 @@ export class Supervisor implements Agent {
     let index = 0
     let text = ''
     let calls: ToolCallBlock[] = []
+    let requestedTools = false
     // Chunk times are when the model produced them, also for a reply received before its turn recorded it.
     const push = (chunk: StreamChunk, time = Date.now()) => {
       stream.push({ time, chunk })
@@ -320,16 +345,23 @@ export class Supervisor implements Agent {
         this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
         return false
       }
-      calls = response.calls
+      const completed = new Set(this.session.snapshotEvents().flatMap(event => event.type === 'tool/result' ? [event.data.message.toolCallId] : []))
+      calls = response.calls.filter(call => !completed.has(call.id))
+      requestedTools = response.calls.length > 0
+      if (calls.length !== response.calls.length) this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: `[The model repeated completed tool calls; reuse their native results without executing them again: ${response.calls.filter(call => completed.has(call.id)).map(call => call.id).join(', ')}.]` }], source: { kind: 'nexus-connection', form: 'notice', summary: 'reused completed tool results' } }), { surfaceOp: 'append' })
       begin(response.settledAt)
       push({ type: 'block-end', index: 0, block: { type: 'text', text } }, response.settledAt)
-      for (const [offset, call] of response.calls.entries()) {
+      for (const [offset, call] of calls.entries()) {
         push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' }, response.settledAt)
         push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.settledAt)
         push({ type: 'block-end', index: offset + 1, block: call }, response.settledAt)
       }
       push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.settledAt)
-      const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...response.calls], source: this.options })
+      if (!text && !calls.length) {
+        this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
+        return response.calls.length > 0
+      }
+      const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...calls], source: this.options })
       connection.markPresent(message.id)
       // Cancelled streams retain the delivered prefix; a commit folded into later speech may be empty.
       const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
@@ -342,11 +374,21 @@ export class Supervisor implements Agent {
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: event.seq } } })
       // Hanging up does not drop what the call was answering: the step continues in text.
       if (!signal.aborted && this.hungUp.has(connection)) { this.connection = undefined; return this.request(turn, step, signal, this.notices.splice(0)) }
+      if (!signal.aborted && error instanceof RealtimeFailure && ['CONNECTION_CLOSED', 'CONNECTION_FAILED', 'TIMEOUT'].includes(error.code)) {
+        const pending = connection.unfinishedCalls.map(call => `${call.id}: ${call.name} ${call.arguments}`).join('\n')
+        const notice = createUserMessage({ content: [{ type: 'text', text: `[Model connection interrupted (${error.code}); the previous response did not complete.${pending ? ` These tool calls were not executed because their response never completed:\n${pending}` : ''} Continue from the native input and completed tool results; do not claim the interrupted response completed.]` }], source: { kind: 'nexus-connection', form: 'notice', summary: 'interrupted model response' } })
+        this.session.append('user/message', notice, { surfaceOp: 'append' })
+        if (!recovered) {
+          this.connection = undefined
+          if (this.call?.recovering) await abortable(this.call.recovering, signal)
+          return this.request(turn, step, signal, this.notices.splice(0), undefined, true)
+        }
+      }
       throw error
     }
     let concluded = false
     for (const call of calls) concluded = (await this.execute(call, turn, step, signal)) || concluded
-    return calls.length > 0 && !concluded
+    return requestedTools && !concluded
   }
   private async execute(call: ToolCallBlock, turn: number, step: number, signal: AbortSignal) {
     this.session.append('tool/call', { turn, step, callId: call.id, name: call.name, arguments: call.arguments })

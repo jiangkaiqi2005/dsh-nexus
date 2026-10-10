@@ -96,6 +96,7 @@ export class RealtimeConnection {
   private sentThrough = -1
   private readonly present = new Set<string>()
   private readonly issued = new Set<string>()
+  private readonly answered = new Set<string>()
   private tools: ToolSchema[] = []
   private wanted = INSTRUCTIONS
   private held = INSTRUCTIONS
@@ -103,6 +104,7 @@ export class RealtimeConnection {
   /** Pending session.update: whether its acknowledgement submits with a response request. */
   private next?: { respond: boolean }
   private opening?: { resolve: () => void; reject: (error: Error) => void }
+  private openTimer?: ReturnType<typeof setTimeout>
   private host?: Reply
   /** response.create for the Host request is outstanding; a request absorbed into the user's turn is asked again. */
   private asked = false
@@ -117,6 +119,9 @@ export class RealtimeConnection {
   private readonly flushed: { reply: Reply; samples: number }[][] = []
   private readonly transcripts = new Map<string, (text: string | undefined) => void>()
   private idleWaiters: (() => void)[] = []
+  /** Calls whose response never completed: their arguments arrived, but the Host must not dispatch them. */
+  readonly unfinishedCalls: ToolCallBlock[] = []
+  private lostPlayback = false
 
   constructor(endpoint: string, key: string, private signal: AbortSignal, private timeoutMs: number, private hooks?: VoiceHooks) {
     this.voice = !!hooks
@@ -167,7 +172,7 @@ export class RealtimeConnection {
         const { respond } = this.next
         this.next = undefined
         this.submit(respond)
-        if (!respond) { const opening = this.opening; this.opening = undefined; opening?.resolve() }
+        if (!respond) { clearTimeout(this.openTimer); const opening = this.opening; this.opening = undefined; opening?.resolve() }
         return
       }
       case 'response.created': return this.started(event.response?.id)
@@ -299,16 +304,17 @@ export class RealtimeConnection {
   /** Start the deadline of the Host request anew. */
   private arm(reply: Reply) {
     clearTimeout(reply.timer)
-    reply.timer = setTimeout(() => this.expire(reply), this.timeoutMs)
+    reply.timer = setTimeout(() => this.expire(), this.timeoutMs)
   }
   private call(reply: Reply, item: { call_id: unknown; name: unknown; arguments: unknown }) {
     if (typeof item.call_id !== 'string' || typeof item.name !== 'string' || typeof item.arguments !== 'string') throw new RealtimeFailure('INVALID_FUNCTION_CALL')
     this.issued.add(item.call_id)
+    this.answered.delete(item.call_id)
     reply.calls.set(item.call_id, { type: 'tool-call', id: ToolCallId(item.call_id), name: item.name, arguments: item.arguments })
   }
   private commit(itemId: string) {
     const reply = new Reply()
-    reply.timer = setTimeout(() => { const index = this.unassigned.indexOf(reply); if (index >= 0) this.unassigned.splice(index, 1); reply.reject(new RealtimeFailure('TIMEOUT')); this.idle() }, this.timeoutMs)
+    reply.timer = setTimeout(() => this.fail(new RealtimeFailure('TIMEOUT')), this.timeoutMs)
     this.unassigned.push(reply)
     const transcript = new Promise<string | undefined>(resolve => this.transcripts.set(itemId, text => { this.transcripts.delete(itemId); resolve(text) }))
     this.hooks!.committed({ connection: this, itemId, transcript, response: reply.settled, listen: onText => reply.listen(onText) })
@@ -332,10 +338,10 @@ export class RealtimeConnection {
   private submit(respond: boolean) {
     const initial = this.sentThrough === -1
     for (const event of this.history) {
-      if (!initial && event.seq <= this.sentThrough) continue
+      if (!initial && event.seq <= this.sentThrough && !(event.type === 'tool/result' && this.issued.has(event.data.message.toolCallId) && !this.answered.has(event.data.message.toolCallId))) continue
       if (event.type === 'tool/result') {
         const output = JSON.stringify({ isError: !!event.data.message.isError, content: event.data.message.content })
-        if (this.issued.has(event.data.message.toolCallId)) this.send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: event.data.message.toolCallId, output } })
+        if (this.issued.has(event.data.message.toolCallId)) { this.send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: event.data.message.toolCallId, output } }); this.answered.add(event.data.message.toolCallId) }
         else this.message('user', event.data.message.id, `[Previous native tool result ${event.data.message.toolCallId}]: ${output}`)
         continue
       }
@@ -371,11 +377,13 @@ export class RealtimeConnection {
     this.history = history; this.tools = tools; this.wanted = instructions
     return new Promise((resolve, reject) => {
       this.opening = { resolve, reject }
+      this.openTimer = setTimeout(() => this.fail(new RealtimeFailure('TIMEOUT')), this.timeoutMs)
       this.next = { respond: false }
       if (this.created) this.configure()
     })
   }
-  appendAudio(audio: string) { if (!this.closed) this.send({ type: 'input_audio_buffer.append', audio }) }
+  appendAudio(audio: string) { if (!this.closed && !this.opening && this.ws.readyState === WebSocket.OPEN) this.send({ type: 'input_audio_buffer.append', audio }) }
+  get failure() { return this.closedWith }
   async request(history: readonly SessionEvent[], onText: (text: string) => void, tools: ToolSchema[], instructions: string): Promise<Response> {
     if (this.closed || this.signal.aborted) throw new RealtimeFailure('ABORTED')
     if (!this.voice && this.host) throw new Error('Nexus already has a pending model response')
@@ -385,23 +393,14 @@ export class RealtimeConnection {
     const reply = new Reply()
     this.host = reply
     reply.listen(onText)
-    reply.timer = setTimeout(() => this.expire(reply), this.timeoutMs)
+    reply.timer = setTimeout(() => this.expire(), this.timeoutMs)
     this.history = history; this.tools = tools; this.wanted = instructions
     if (this.voice && this.configured === JSON.stringify(this.session())) this.submit(true)
     else { this.next = { respond: true }; if (this.created) this.configure() }
     return reply.settled
   }
-  /**
-   * A request missed its deadline. A text turn owns its connection, which fails. On a call, a response
-   * the server is producing fails alone, as in done(), and stays attached so its late events are consumed
-   * in order; the server must still finish it within one more deadline. A request the server never
-   * started, or a response it never finishes, means the connection stopped answering.
-   */
-  private expire(reply: Reply) {
-    if (!this.voice || this.active !== reply) return this.fail(new RealtimeFailure('TIMEOUT'))
-    this.settle(reply, new RealtimeFailure('TIMEOUT'))
-    reply.timer = setTimeout(() => { if (this.active === reply) this.fail(new RealtimeFailure('TIMEOUT')) }, this.timeoutMs)
-  }
+  /** An uncompleted response cannot accept late tool calls after its deadline. Rebuild from native facts. */
+  private expire() { this.fail(new RealtimeFailure('TIMEOUT')) }
   private fail(error: Error) {
     if (this.closed) return
     this.close(error)
@@ -411,12 +410,15 @@ export class RealtimeConnection {
     if (this.closed) return
     this.closed = true
     this.closedWith = error
+    clearTimeout(this.openTimer)
     this.signal.removeEventListener('abort', this.abort)
     this.ws.close()
     const replies = new Set([this.host, this.active, ...this.live.values(), ...this.unassigned].filter(reply => reply !== undefined))
+    for (const reply of replies) this.unfinishedCalls.push(...reply.calls.values())
     this.host = this.active = undefined
     this.live.clear()
     this.unassigned.length = 0
+    this.lostPlayback = !!(this.delivered.length || this.flushed.length)
     this.delivered = []
     this.flushed.length = 0
     for (const reply of replies) this.settle(reply, error)
@@ -425,4 +427,6 @@ export class RealtimeConnection {
     for (const resolve of [...this.transcripts.values()]) resolve(undefined)
     for (const wake of this.idleWaiters.splice(0)) wake()
   }
+  /** The client may have received audio, but its final playback report is unavailable. */
+  get unconfirmedPlayback() { return this.lostPlayback || !!(this.delivered.length || this.flushed.length) }
 }
