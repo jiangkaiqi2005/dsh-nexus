@@ -8,25 +8,37 @@ import { startHost } from './host-process.mjs'
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
 const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
 
-for (const startupFailure of [false, true]) {
-  test(`test Host cleanup removes only its process tree${startupFailure ? ' when readiness fails' : ''}`, { timeout: 20000 }, async () => {
+for (const scenario of ['close', 'readiness-failure', 'root-exit', 'root-exit-success', 'root-exit-inherited-pipes']) {
+  test(`test Host cleanup removes only its process tree: ${scenario}`, { timeout: 20000 }, async () => {
     await mkdir(resolve('.scratch/nexus-v1'), { recursive: true })
     const dir = await mkdtemp(resolve('.scratch/nexus-v1/process-cleanup-'))
     const report = resolve(dir, 'pid.json')
     const sibling = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' })
-    const source = `const {spawn}=require('node:child_process'); const {writeFileSync}=require('node:fs'); const leaf=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore',detached:process.platform==='win32'}); writeFileSync(${JSON.stringify(report)},JSON.stringify({root:process.pid,leaf:leaf.pid})); setInterval(()=>{},1000)`
+    const marker = 'owned-中文-"quoted"'
+    const source = `const {spawn}=require('node:child_process'); const {writeFileSync}=require('node:fs'); const leaf=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:${scenario === 'root-exit-inherited-pipes' ? "['ignore','inherit','inherit']" : "'ignore'"},detached:process.platform==='win32'}); console.log(${JSON.stringify(marker)}); writeFileSync(${JSON.stringify(report)},JSON.stringify({root:process.pid,leaf:leaf.pid})); ${scenario.startsWith('root-exit') ? `leaf.unref(); process.exit(${scenario === 'root-exit-success' ? 0 : 1})` : 'setInterval(()=>{},1000)'}`
     let pids
     let host
     try {
-      const start = () => startHost(process.execPath, ['-e', source], {}, async () => {
-        for (const begin = Date.now(); !pids; await delay(25)) {
+      const start = () => startHost(process.execPath, ['-e', source], {}, async child => {
+        let output = ''
+        child.stdout.on('data', bytes => { output += bytes })
+        for (const begin = Date.now(); !pids || !output.includes(marker); await delay(25)) {
           try { pids = JSON.parse(await readFile(report, 'utf8')) } catch {}
           if (Date.now() - begin > 5000) throw new Error('fixture did not start')
         }
-        if (startupFailure) throw new Error('readiness fixture failed')
+        assert.ok(output.includes(marker), 'quoted arguments and UTF-8 output survive the launcher')
+        if (scenario.startsWith('root-exit')) {
+          for (let i = 0; i < 100 && alive(pids.root); i++) await delay(25)
+          assert.equal(alive(pids.root), false, 'root exited before readiness')
+          if (process.platform === 'win32') {
+            for (let i = 0; i < 200 && child.exitCode === null; i++) await delay(25)
+            assert.equal(child.exitCode, scenario === 'root-exit-success' ? 0 : 1, 'launcher preserves the completed root status')
+          }
+        }
+        if (scenario !== 'close' && scenario !== 'root-exit-success') throw new Error('readiness fixture failed')
         return {}
       })
-      if (startupFailure) await assert.rejects(start, /readiness fixture failed/)
+      if (scenario !== 'close' && scenario !== 'root-exit-success') await assert.rejects(start, /readiness fixture failed/)
       else { host = await start(); await host.close() }
       for (let i = 0; i < 40 && (alive(pids.root) || alive(pids.leaf)); i++) await delay(25)
       assert.equal(alive(pids.root), false, 'owned Host root exited')

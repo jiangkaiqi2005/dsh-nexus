@@ -31,3 +31,18 @@ rc.2 的官方初始化会设置 `nodeLinker: hoisted`、`autoInstallPeers: fals
 主管使用的 `SessionPersistenceNotFoundError` 是唯一相关 Host 错误类判定；正确官方 peer 环境中验证了首启与恢复，因此保留原实现。其余 `instanceof` 均为插件本地 `RealtimeFailure`，不跨 Host SDK 构造器。错误类公开 `name`、`sessionId` 可用于诊断，但没有采用字符串兼容兜底。
 
 本次仅受控模型和无头原生界面；未验证实际模型、物理麦克风/扬声器或用户 Desktop 通话，未安装用户 profile。票 05/06 的原有真实模型与实机边界不变，票 07–11 未实施。新的 opt-in 缺少固定官方 CLI 时明确 skip；不能将 skip 解释为 Desktop 验收。
+
+## 修复轮 1：根进程提前退出的清理缺口
+
+标准轴与规格轴均提出同一 P2：初版 helper 仅在根仍存活时运行 `taskkill /T`，根在 readiness 前退出后跳过清理，detached 后代仍存活。两份意见分别处置为已修复、待原评审者复审确认；没有用一轴结论替代另一轴。
+
+红测：`node --test --test-name-pattern='root-exit' tests/host-process.test.mjs`，根先 exit 1，ready 随后失败，断言 `owned descendant exited` 得到 `true !== false`；`.scratch/nexus-v1/cleanup-round1-red.txt`。fixture 的 finally 仅清理它自己记录的 PID。
+
+Windows 改为测试专用 `host-process.ps1` 生命周期 launcher。它先创建匿名 Job、设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 并把自身加入，再创建 Host，因此没有先启动后扫描/追认 PID 的竞态。Job handle 不可继承，不设置 breakaway；Host 根提前或正常退出时 launcher 跟随退出，操作系统关闭最后一个 Job handle、终止其后代。主动关闭只终止自己启动的 launcher，也触发同一清理。Job 创建、设置或分配失败会在创建 Host 之前报错，无静默降级或通用进程名兜底。依据微软[Job Objects 公开契约](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)，嵌套 Job 支持 Windows 8 / Server 2012 起；本轮实测 Windows 11。
+
+launcher 显式转发 UTF-8 stdout/stderr，保留调用方 argv 或已有 cmd.exe verbatim 引号，以及根退出状态。根结束后各等待输出 EOF 最多 1 秒；后代继承管道也不会让 launcher 永久等待。实际 Host 的实时输出仍由本次 Host 产生。POSIX 分支在根已退出时仍清理自己的独立进程组；当前 Windows 主机不能实测该分支，仅覆盖同组后代，不声称涵盖自行脱离进程组的 Unix daemon。
+
+- `node --test tests/host-process.test.mjs`：5 通过，覆盖主动关闭、readiness 失败、根提前 exit 1、根正常 exit 0、提前退出且后代继承管道；每项均验证自有根/后代消失、无关兄弟存活、中文与嵌套引号输出正确；`.scratch/nexus-v1/cleanup-round1-green.txt`。
+- PowerShell `$env:NEXUS_DESKTOP_SMOKE='1'; node --test tests/desktop.test.mjs`：1 通过，12.667 秒；`.scratch/nexus-v1/cleanup-round1-desktop.txt`、`desktop-smoke-7IDiFy/result.json`。通过真实官方 CLI 打包/安装及原生输入、新进程恢复，沿用所有包身份/hash/主管型号/历史/无自动请求断言，证明 launcher 的 cmd 引号与输出转发兼容。
+- `npm run typecheck`、`npm run build`：通过。
+- 本轮最终 `npm test`：53 项，45 通过、0 失败、8 跳过，113.908 秒，正常退出；`.scratch/nexus-v1/cleanup-round1-full.txt`。`git diff --check` 通过；未重跑付费模型或操作用户安装。
