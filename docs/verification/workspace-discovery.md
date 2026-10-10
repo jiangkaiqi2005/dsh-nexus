@@ -36,3 +36,16 @@
 所有 Host 使用本次独立 DSH_HOME/DSH_AGENTS_HOME、隐藏进程及既有 Windows Job Object 清理。没有操作用户 Desktop/浏览器、安装用户 profile、读用户 journal 或凭据、修改宿主或 Qiyu，也没有调用付费模型。包版本的已有未提交修改不属于本单元提交。
 
 受控 Realtime 验证了模型工具调用链与原生项目/普通会话的实际执行；它没有证明真实模型自然语言名称选择、未知/重名时主动询问、真实语音派活或物理音频。共用指引的模型可见性已自动检查，真实文字/语音选择与用户 Desktop 行为仍由用户验收。
+
+## 后续更正：项目名与会话工作区（2026-10-10）
+
+票 07 的真实语音回归中，用户说“就用 docs 会话所在的工作区”新建会话。准确型号按本单元新增的指引先调用 `nexus_list_workspaces`，然后在列出的唯一已登记项目（仓库根）建会话，没有用 docs 会话的 cwd（`.scratch/nexus-v1/voice-real-create-1791624703624`，failed）。原指引只讲了“用户点名项目”，没有区分“某个会话的工作区”。
+
+修正：共用指引补充一句。项目名不等于会话的工作区；用户要求在某个已有会话的工作区新建会话时，调用 `nexus_list_sessions`，使用该会话的 cwd，它不必是已登记项目。项目名仍按已登记项目查询。
+
+修正后，`tests/voice.test.mjs` 中“creates a new work session from speech”真实用例连续跑 3 次，3/3 passed。模型都先 `nexus_list_sessions`，再在 docs 的工作区建会话：
+- `voice-real-create-1791625912320`
+- `voice-real-create-1791625938598`
+- `voice-real-create-1791625963383`
+
+日志为 `.scratch/nexus-v1/fix07-guidance-create-{1,2,3}.txt`。受控 `tests/workspace.test.mjs` 仍为 1 passed。真实模型按项目名选项目、遇到未知或重名时先询问，仍待用户验收。
