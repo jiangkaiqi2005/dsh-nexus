@@ -70,3 +70,28 @@ node --test --test-name-pattern='accurate Realtime hangup' tests/voice.test.mjs
 ```
 
 每个真实测试有 420 s 总 timeout，并复用 Host 所有权清理。未运行无关票据的真实全套。凭据只从 provider.json 顶层读入子进程环境；不修改宿主设置。物理设备、回声与 Desktop 实机验收仍待用户完成，且不能把票 07 的用户实测直接转记为票 08 通过。
+
+## 修复轮 1：挂断结算尚未确认的 flush
+
+两轴在 `3bbd909c3fdb448d152c2ce0c532f61c763dd9fd` 上均提出同一 P2，独立判断均为 **fixed**，没有 rejected 或未决项。标准轴指出 `hangup(samples)` 只核算 delivered，而 speech_started 已把音频转入 flushed；示例 24000 samples 音频、flush 未确认、hangup(4800)，应通知听到 0.2 / 1.0 s，却 cuts=[]。规格轴同样指出 completed 回复、未消费 flush 后挂断会丢失未听尾部事实，违反交接“已剪切/未送达的通知不丢”。客户端退出后不再回复旧流 played，因此不能依赖晚到报告挽回。两项都是实际丢事实的问题，接受修复。
+
+最高边界回归使用同样的隔离官方 Host 和真实 headless 客户端，Playwright routeWebSocket 在网关处保留有序报文，精确阻挡下行 flush 或上行 played，而不是绕过 VoiceController 调用内部方法。模型端发送可控的一秒音频；Web Audio 仍使用实际播放节点，只冻结播放时钟到确定的 0.2 / 0.3 s 样本边界，保证批次归属断言可重复。
+
+- 红：`fix08-red-pending.txt`，旧代码 + 回归测试，10.5 s，通知数 0 ≠ 1。Host 证据 `voice-hangup-flush-pending-1791631941147`；已复现本次评审所指错误，无额外产品故障。
+- 最小修复：挂断从尚未确认的 flushed 批次到最后 delivered 批次按发送顺序分配最终播放样本，发出剪切通知后才 close。已处理的 played 会先移除对应批次，重复 hangup 因连接已关闭不再记账。上行 played / hangup 属同一有序 Remote / WebSocket 流，回归延迟 played 时保持 FIFO，没有模拟协议不允许的重排；无需引入批次 ID 或额外重连状态。
+- 绿：`fix08-green-pending.txt`，4 passed / 0 failed，39.8 s。每例都继续文字 turn、手动再接通并再挂断，校验原生通知和重放上下文各只有一份。移除无需延迟场景的网关拦截后，现版 `fix08-green-pending-final.txt` 再次 4 passed / 0 failed，43.4 s。
+
+| 传输时机 | 本地 Host 证据 | 通知核算 |
+| --- | --- | --- |
+| 单个 flush 尚未到客户端 | `voice-hangup-flush-pending-1791632000212` | BATCH-1 为 0.2 / 1.0 s；挂断后释放迟到 flush 不增加第二份通知。 |
+| 两个未确认 flush，另有最后一批音频 | `voice-hangup-several-flushes-pending-1791632010249` | BATCH-1 为 0.2 / 1.0 s，BATCH-2 / 3 各为 0.0 / 1.0 s；后两批的客户端报文尚未消费，没有把前批样本错分给后批。 |
+| flush 已消费、played 上行在途，随后新批次挂断 | `voice-hangup-played-in-transit-1791632020123` | 保留上行 FIFO，到 Host 时先结算 BATCH-1 的 0.2 / 1.0 s，再结算 BATCH-2 的 0.3 / 1.0 s；不重复记第一批。 |
+| played 已由 Host 确认，随后新批次挂断 | `voice-hangup-played-consumed-1791632029765` | 已确认 BATCH-1 的 0.2 / 1.0 s 保留，挂断只新增 BATCH-2 的 0.3 / 1.0 s。 |
+
+本轮 `npm run typecheck` / `npm run build` 通过（`fix08-typecheck.txt` / `fix08-build.txt`），`git diff --check` 通过。相关单文件的四条新增回归已通过。全量第一轮 `fix08-npm-test.txt` 为 56 passed / 1 failed / 11 skipped：played-consumed 用例的两条通知都已进入旧模型，随后测试网关处于重连中，文字输入留在编辑框，没有成为原生 turn，等待 TEXT-REPLY 超时（失败截图和 wire 位于 `voice-hangup-played-consumed-1791632394740`）。该场景不需要任何传输延迟，移除对它的 routeWebSocket 拦截，改走原生网关；没有修改产品或放宽通知断言。现版四例复核通过，不把该次失败改记为全量通过。
+
+全量最终 `fix08-npm-test-final.txt`：68 项、57 passed / 0 failed / 11 skipped，330.9 s，进程正常结束。新增四例在该次全量再次全部通过（`voice-hangup-{flush-pending-1791633260583,several-flushes-pending-1791633268379,played-in-transit-1791633276613,played-consumed-1791633285523}`），同时原有打断、工具交错、工作结果、纯文字与恢复测试通过；真实 opt-in 和 Desktop 检查按约定跳过。
+
+最终凭据扫描 `fix08-secret-scan.txt`：仓库与本轮证据/输出共 3486 个文件，原始 key 与 base64 形式均 0 命中。版本文件既有改动保留，不归入修复提交。
+
+本轮不重复付费真实检查：产品变更只扩大挂断时本地播放账本的结算范围，未修改 session / response modalities、模型请求、主管队列、上下文重放或工具身份。上述最高边界已直接验证新增通知进入后续文字 turn 与手动再接通上下文，原真实 conn 3 / 4 的 text-only 工具闭环仍是相应协议路径证据。准确型号的不可控 VAD 时机无法稳定制造本次网关传输延迟，重复真实链路不能替代这四项回归。物理媒体和票 10 TIMEOUT 的限制仍与本节前一致。

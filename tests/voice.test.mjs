@@ -262,10 +262,11 @@ async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY'
 }
 
 /** Open the native UI, enter Nexus and return the call bar of the main conversation. */
-async function openNexus(browser, url, init) {
+async function openNexus(browser, url, init, preparePage) {
   const context = await browser.newContext({ locale: 'zh-CN', viewport: { width: 1360, height: 900 } })
   const page = await context.newPage()
   if (init) await (Array.isArray(init) ? page.addInitScript(...init) : page.addInitScript(init))
+  await preparePage?.(page)
   await page.goto(url)
   // Preview and setup dialogs may appear at any point while the UI loads; dismiss them until Nexus opens.
   const nexus = page.getByRole('button', { name: /打开 Nexus|Open Nexus/ })
@@ -877,7 +878,7 @@ test('voice call whose response stalls fails the call instead of hanging the sup
 })
 
 /** Run one call: Host, endpoint (controlled, or a relay to the real one with key) and a headless Edge whose fake microphone plays the capture. */
-async function controlledCall(t, scenario, model, capture, run, { key, beforeStart } = {}) {
+async function controlledCall(t, scenario, model, capture, run, { key, beforeStart, preparePage } = {}) {
   t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const host = await voiceHost(scenario, { endpoint: `ws://127.0.0.1:${model.server.address().port}`, key })
@@ -886,7 +887,7 @@ async function controlledCall(t, scenario, model, capture, run, { key, beforeSta
   t.after(() => browser.close())
   let page
   try {
-    const opened = await openNexus(browser, host.url, [instrument, []])
+    const opened = await openNexus(browser, host.url, [instrument, []], preparePage)
     page = opened.page
     await beforeStart?.({ host, page, bar: opened.bar })
     await opened.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
@@ -1421,3 +1422,86 @@ test('hangup idle playback then immediately reconnect preserves its notice befor
     console.log('hangup pending notice evidence:', host.home)
   })
 })
+
+for (const scenario of ['flush-pending', 'several-flushes-pending', 'played-in-transit', 'played-consumed']) {
+  test('hangup playback accounting: ' + scenario + ' preserves each unplayed tail exactly once', { timeout: 180000 }, async t => {
+    const model = controlledModel()
+    const capture = await voiceFixture([{ silence: 60 }])
+    const down = [], up = []
+    let blockedDown = false, blockedUp = false
+    const pending = scenario.includes('pending')
+    const emit = event => {
+      model.wire.push({ direction: 's2c', connection: 1, at: Date.now(), ...event, ...(event.type === 'response.audio.delta' ? { delta: '[audio]' } : {}) })
+      for (const socket of model.server.clients) if (socket.readyState === 1) socket.send(JSON.stringify(event))
+    }
+    const reply = index => {
+      const id = `batch-${index}`
+      emit({ type: 'input_audio_buffer.speech_stopped' })
+      emit({ type: 'input_audio_buffer.committed', item_id: id })
+      emit({ type: 'conversation.item.input_audio_transcription.completed', item_id: id, transcript: `INPUT-${index}` })
+      emit({ type: 'response.created', response: { id, status: 'in_progress', modalities: ['text', 'audio'] } })
+      emit({ type: 'response.audio_transcript.delta', response_id: id, delta: `BATCH-${index}` })
+      emit({ type: 'response.audio.delta', response_id: id, delta: tone(1) })
+      emit({ type: 'response.done', response: { id, status: 'completed', output: [] } })
+    }
+    const release = queue => { for (const [socket, data] of queue.splice(0)) socket.send(data) }
+    await controlledCall(t, 'hangup-' + scenario, model, capture, async ({ host, page, bar }) => {
+      reply(1)
+      await until(async () => (await supervisorOf(host))?.status === 'idle' && await audible(page) > 0, 'first batch playing')
+      // Freeze the playback clock at a known sample boundary, without replacing the playback implementation.
+      await page.evaluate(() => { const first = window.__nodes[0]; Object.defineProperty(first.node.context, 'currentTime', { get: () => first.when + 0.2, configurable: true }) })
+      emit({ type: 'input_audio_buffer.speech_started' })
+      if (pending) await until(() => down.length > 0, 'flush held before client consumption')
+      else await until(async () => Number(await bar.getAttribute('data-flushes')) === 1, 'client consumed flush')
+      if (scenario === 'played-in-transit') await until(() => up.length > 0, 'played report held in transport')
+      if (scenario === 'played-consumed') await until(() => model.wire.some(event => event.type === 'conversation.item.create' && JSON.stringify(event.item).includes('rest was not heard')), 'played report accounted by Host')
+      if (scenario === 'several-flushes-pending') {
+        reply(2)
+        emit({ type: 'input_audio_buffer.speech_started' })
+        reply(3)
+        await until(() => down.filter(([, data]) => String(data).includes('"type":"flush"')).length === 2, 'two pending flush batches')
+      } else if (!pending) {
+        reply(2)
+        await until(async () => (await supervisorOf(host))?.status === 'idle' && (await page.evaluate(() => window.__nodes.length)) === 2, 'second batch reached client')
+        await page.evaluate(() => { const last = window.__nodes.at(-1); Object.defineProperty(last.node.context, 'currentTime', { get: () => last.when + 0.3, configurable: true }) })
+      }
+      await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      assert.equal(await audible(page), 0)
+      if (scenario === 'played-in-transit') {
+        await until(() => up.some(([, data]) => String(data).includes('"type":"hangup"')), 'hangup queued behind played')
+        blockedUp = false
+        release(up) // Preserve real WebSocket FIFO: played reaches the Host before hangup.
+      }
+      await until(() => model.log.closed === 1, 'old model closed')
+      blockedDown = false
+      release(down)
+      const editor = page.getByRole('textbox').last()
+      await editor.fill('TEXT-AFTER-CALL 请继续。')
+      await editor.press('Enter')
+      await until(() => model.log.responses.some(response => response.text === 'TEXT-REPLY'), 'text continuation recorded notices')
+      await until(async () => (await supervisorOf(host))?.status === 'idle', 'text continuation idle')
+      await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+      await until(async () => (await state(bar)) === 'live', 'manual reconnect')
+      await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      const result = await host.finish()
+      const notices = result.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice').map(event => textOf(event.data))
+      const expected = scenario === 'several-flushes-pending' ? [0.2, 0, 0] : pending ? [0.2] : [0.2, 0.3]
+      assert.equal(notices.length, expected.length, 'each batch is accounted once, including repeated hangup')
+      for (let index = 0; index < expected.length; index++) {
+        assert.match(notices[index], new RegExp(`BATCH-${index + 1}.*about ${expected[index].toFixed(1)} s of its 1.0 s`))
+        assert.equal(model.wire.filter(event => event.connection === 3 && event.type === 'conversation.item.create' && JSON.stringify(event.item).includes(`BATCH-${index + 1}`) && JSON.stringify(event.item).includes('rest was not heard')).length, 1, 'manual replay retains one notice per batch')
+      }
+      console.log('hangup pending batch evidence:', host.home, JSON.stringify({ scenario, notices }))
+    }, { preparePage: scenario === 'played-consumed' ? undefined : page => page.routeWebSocket(/.*/, socket => {
+      const server = socket.connectToServer()
+      server.onMessage(data => {
+        if (pending && String(data).includes('"type":"flush"')) blockedDown = true
+        if (blockedDown) down.push([socket, data]); else socket.send(data)
+      })
+      socket.onMessage(data => {
+        if (scenario === 'played-in-transit' && String(data).includes('"type":"played"')) blockedUp = true
+        if (blockedUp) up.push([server, data]); else server.send(data)
+      })
+    }) })
+  })
+}

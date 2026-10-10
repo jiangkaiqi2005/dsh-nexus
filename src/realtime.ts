@@ -263,7 +263,9 @@ export class RealtimeConnection {
   hangup(samples?: number) {
     if (this.closed) return
     let left = samples ?? 0
-    for (const { reply, samples: total } of samples === undefined ? [] : this.delivered) {
+    // A flush can still be in transit. Its audio precedes later batches in the same ordered stream;
+    // played reports already consumed by the Host have removed their batches before this hangup.
+    for (const { reply, samples: total } of samples === undefined ? [] : [...this.flushed.flat(), ...this.delivered]) {
       const heard = Math.min(left, total)
       left -= heard
       if (heard < total) this.hooks?.cut({ text: reply.text, heard: heard / 24000, total: total / 24000, ended: true })
