@@ -112,7 +112,7 @@ test('official Host discovers registered projects across cwd and dispatches to t
   assert.ok(result.final.workspaces.find(item => item.id === result.targetId).sessionIds.includes(worker.id), 'created session belongs to the registered project')
   assert.deepEqual(result.final.workspaces.find(item => item.id === result.emptyId), result.before.workspaces.find(item => item.id === result.emptyId))
   assert.deepEqual(await readdir(empty), [], 'blank registered project remains blank')
-  assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch' && event.data.content[0].text === 'run-workspace-discovery'))
+  assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus' && event.data.content[0].text === 'run-workspace-discovery'))
   assert.equal(worker.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
   assert.equal(await readFile(resolve(target, 'workspace-task.txt'), 'utf8'), 'run-workspace-discovery')
   assert.match(worker.events.findLast(event => event.type === 'assistant/message').data.message.content[0].text, /Executed in target workspace/)

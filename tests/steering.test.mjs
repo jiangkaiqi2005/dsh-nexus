@@ -131,7 +131,7 @@ test('user steering: main-conversation change and direct worker steering reach t
   const change = events.find(event => event.type === 'tool/call' && event.seq > result.marks.aChange)
   assert.deepEqual([change.data.name, JSON.parse(change.data.arguments).sessionId], ['nexus_send_session', 'alpha'])
   assert.equal(JSON.parse(events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === change.data.callId).data.message.content[0].text).delivery, 'steer')
-  const alphaSteer = placed('alpha', message => message.source.kind === 'nexus-dispatch' && textOf(message).includes('THEME-AMBER'))
+  const alphaSteer = placed('alpha', message => message.source.kind === 'user' && message.source.via === 'nexus' && textOf(message).includes('THEME-AMBER'))
   assert.deepEqual(alphaSteer.step, { turn: 1, step: 2 })
   assert.ok(worker('alpha').events.some(event => event.type === 'tool/result' && event.data.turn === 1 && event.data.step === 1 && !event.data.message.isError), 'the running native tool finished; steering did not interrupt it')
   assert.deepEqual(finals('alpha'), ['Built alpha with THEME-AMBER (the build step began with THEME-BLUE)'])
@@ -183,7 +183,7 @@ test('accurate Realtime model applies a natural-language change to the affected 
   assert.ok(assistant.length && assistant.every(event => event.data.message.source.model === MODEL))
   assert.ok(events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
   const text = (from, to = Infinity) => assistant.filter(event => event.seq > from && event.seq < to).map(event => textOf(event.data.message)).join('\n')
-  const dispatched = id => worker(id).events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch')
+  const dispatched = id => worker(id).events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus')
   console.log('real assistant texts:', JSON.stringify(assistant.map(event => [event.seq, textOf(event.data.message)])))
   console.log('real tool calls:', JSON.stringify(events.filter(event => event.type === 'tool/call').map(event => [event.seq, event.data.name, event.data.arguments])))
 
@@ -192,7 +192,7 @@ test('accurate Realtime model applies a natural-language change to the affected 
   for (const entry of notices) assert.ok(received(entry) && replyAfter(received(entry).seq))
 
   // The natural-language change named no tool, session or message: the model chose site-worker, steered it, and left doc-worker alone.
-  const siteSteer = placed('site-worker', message => message.source.kind === 'nexus-dispatch' && textOf(message).includes('THEME-AMBER'))
+  const siteSteer = placed('site-worker', message => message.source.kind === 'user' && message.source.via === 'nexus' && textOf(message).includes('THEME-AMBER'))
   assert.ok(siteSteer, 'the model relayed the changed requirement to the affected session')
   assert.equal(siteSteer.step.turn, 1)
   assert.ok(siteSteer.step.step > 1, 'claimed at a later native step of the running turn')

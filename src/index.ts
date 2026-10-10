@@ -4,12 +4,13 @@ import { SessionId, SessionLogOffset, interruptedTurnClosers, type Session } fro
 import { SessionPersistenceNotFoundError, type SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
+import type {} from '@deepseek-ai/dsh-session-title'
 import { Supervisor, type Config as SupervisorConfig } from './supervisor.js'
 import { ResultRelay } from './results.js'
 import { VoiceController } from './voice.js'
 import { SUMMARY_MODEL } from './compaction.js'
 
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'agentDefaultModel']
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'agentDefaultModel', 'sessionTitle']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
 
 export interface Config extends SupervisorConfig { autoVoice: Volatile<boolean> }
@@ -67,6 +68,10 @@ export async function apply(ctx: Context, config: Config) {
     if (suffix.length) await handle.append(suffix)
     await handle.flush()
     yield ctx.sessions.enter(session)
+    // The main session is named Nexus while it is untitled or only carries the native fallback; a title the user gave stays.
+    // The native rename records a user title, which also keeps first prompts from deriving another fallback.
+    const title = ctx.sessionTitle.get(session)
+    if (!title || title.source.kind === 'fallback') ctx.sessionTitle.rename(session, 'Nexus')
     yield ctx.agents.enter(agent, undefined)
     // Reverse teardown: stop/idle → close durable writer → registry → session → scope.
     yield () => handle.close()

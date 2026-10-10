@@ -96,7 +96,7 @@ async function dispatchProfile(real = false) {
     assert.equal(existing.ownedByNexus, false)
     assert.equal(existing.header.parentSession, undefined)
     assert.ok(existing.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.content[0].text.includes('ANCHOR-19')))
-    assert.ok(existing.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch' && event.data.content[0].text === (real ? 'run-existing-real' : 'run-existing')))
+    assert.ok(existing.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus' && event.data.content[0].text === (real ? 'run-existing-real' : 'run-existing')))
     const created = result.workers.find(item => item.id.startsWith('session-'))
     assert.ok(created)
     assert.equal(created.header.cwd.toLowerCase(), workspace.toLowerCase())
@@ -126,7 +126,7 @@ test('official Host native dispatch, complete capabilities, source, steering, ca
   assert.ok(results.find(event => event.data.message.toolCallId === 'dispatch-call-11').data.message.content.some(part => part.type === 'text' && part.text.includes('run-existing')))
   assert.ok(results.some(event => event.data.message.content[0].text === 'full-native-ability'))
   const busy = result.workers.find(item => item.id === 'busy-worker')
-  assert.ok(busy.events.some(event => event.type === 'agent/inbox/spliced' && event.data.target === 'next-step' && event.data.inserted.some(message => message.source.kind === 'nexus-dispatch')))
+  assert.ok(busy.events.some(event => event.type === 'agent/inbox/spliced' && event.data.target === 'next-step' && event.data.inserted.some(message => message.source.kind === 'user' && message.source.via === 'nexus')))
   assert.match(busy.events.findLast(event => event.type === 'assistant/message').data.message.content[0].text, /steered-task/)
   const stopped = result.workers.find(item => item.id === 'stop-worker')
   assert.equal(stopped.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'aborted')
@@ -139,7 +139,7 @@ test('official Host native dispatch, complete capabilities, source, steering, ca
   const child = result.workers.find(item => item.id === 'cold-child')
   assert.equal(child.header.origin, 'subagent')
   assert.equal(child.status, 'inactive', 'the rejected target was not activated')
-  assert.ok(!child.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch'), 'nothing was delivered to the subagent session')
+  assert.ok(!child.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus'), 'nothing was delivered to the subagent session')
 })
 
 test('accurate Realtime model dispatches existing and new native workers and reports a failed target', { skip: process.env.NEXUS_REAL_DISPATCH !== '1', timeout: 240000 }, async () => {

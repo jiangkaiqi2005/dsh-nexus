@@ -598,7 +598,7 @@ test('voice call: client audio reaches the Host-held model, which speaks, dispat
     assert.ok(events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
     // The worker really executed the dispatched task with Nexus as its source.
     const docs = result.workers.find(worker => worker.id === 'docs')
-    assert.ok(docs.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch' && textOf(event.data).includes('DOC-TASK')))
+    assert.ok(docs.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus' && textOf(event.data).includes('DOC-TASK')))
     assert.equal(docs.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
     assert.ok(result.released)
     console.log('voice evidence:', host.home)
@@ -745,7 +745,7 @@ test('accurate Realtime voice call: real model hears synthesized speech, dispatc
     assert.equal(output.data.message.isError, false)
     assert.ok(summary.call.turnOfFirstUtterance)
     const worker = result.workers.find(item => item.id === 'docs')
-    assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch'))
+    assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus'))
     assert.equal(worker.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
     // The finished work reached the model during the call; speaking about it was the model's choice.
     assert.match(textOf(notice.data), /DOC-READY-42/)
@@ -866,7 +866,7 @@ test('voice call creates a new work session, may stay silent on its result, and 
     assert.equal(turnOf(call.seq), turnOf(spoken.seq))
     assert.equal(events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === call.data.callId).data.message.isError, false)
     const worker = result.workers.find(item => item.header.cwd === host.workspace && item.id !== 'docs')
-    assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch' && textOf(event.data).includes('NEW-TASK')))
+    assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus' && textOf(event.data).includes('NEW-TASK')))
     assert.equal(worker.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
     // The voice turn records the instructions the voice connection actually holds, never the text-only ones.
     const voiceTurn = inTurn(turnOf(spoken.seq))
@@ -1022,7 +1022,7 @@ test('accurate Realtime voice call: real model creates a new work session from s
     assert.equal(turnOf(create.seq), turnOf(spoken.seq))
     assert.equal(summary.createResult.isError, false)
     assert.equal(worker.header.cwd, host.workspace, 'created in the workspace the user named')
-    assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch'))
+    assert.ok(worker.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus'))
     assert.equal(summary.worker.end, 'completed')
     assert.ok(played > 0, 'the client played real model audio')
     for (const reply of summary.replies) assert.equal(reply.model, MODEL)

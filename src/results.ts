@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { InboxTarget } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { isNexusDispatch } from './work-sessions.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -40,8 +41,8 @@ function outcome(event: Extract<SessionEvent, { type: 'turn/end' }>) {
   }
 }
 
-/** Within conversation sessions, user-kind input is the user's own, whichever Host entry carried it; Nexus dispatches, agent messages and results carry their own kinds. */
-const isDirectUserInput = (message: UserMessage) => message.source.kind === 'user'
+/** Within conversation sessions, user-kind input is the user's own, whichever Host entry carried it, unless it carries the Nexus dispatch marker; agent messages and results carry their own kinds. */
+const isDirectUserInput = (message: UserMessage) => message.source.kind === 'user' && !isNexusDispatch(message)
 
 const digestOf = (message: UserMessage) => createHash('sha256').update(JSON.stringify(message.content)).digest('hex').slice(0, 16)
 

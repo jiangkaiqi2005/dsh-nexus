@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -9,10 +9,16 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
+    /** A Nexus dispatch: natively a user message, marked as delivered by the supervisor through one tool call (ADR 0004). */
+    'nexus-dispatch-user': { kind: 'user'; via: 'nexus'; supervisorId: string; callId: string }
+    /** Dispatches logged before ADR 0004; still read from existing logs. */
     'nexus-dispatch': { kind: 'nexus-dispatch'; sessionId: string; callId: string }
     'nexus-runtime': { kind: 'nexus-runtime'; form: 'snapshot' }
   }
 }
+
+/** Whether a work-session input came from Nexus, in its current or its older logged form. */
+export const isNexusDispatch = ({ source }: UserMessage) => source.kind === 'nexus-dispatch' || (source.kind === 'user' && 'via' in source && source.via === 'nexus')
 
 /**
  * Add conversation-session operations to the caller's existing native capability set.
@@ -37,7 +43,7 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
     return target.agent
   }
   const send = (agent: Agent, message: string, callId: string) => {
-    const input = createUserMessage({ content: [{ type: 'text', text: message }], source: { kind: 'nexus-dispatch', sessionId: supervisor.id, callId } })
+    const input = createUserMessage({ content: [{ type: 'text', text: message }], source: { kind: 'user', via: 'nexus', supervisorId: supervisor.id, callId } })
     const delivery = agent.status === 'running' ? 'steer' : 'followup'
     agent[delivery](input)
     return { sessionId: agent.id, messageId: input.id, delivery, accepted: true, completed: false }

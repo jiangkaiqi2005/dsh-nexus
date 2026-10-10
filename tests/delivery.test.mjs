@@ -129,7 +129,7 @@ test('official Host relays every work-session terminal to the supervisor: idle w
   const idle = find('user-existing', 2)[0]
   assert.match(idle.text, /Outcome: completed/)
   assert.match(idle.text, /Report ok-idle: finished/)
-  assert.ok(!/nexus-dispatch/.test(JSON.stringify(result.workers.find(worker => worker.id === 'user-existing').events)))
+  assert.ok(!/nexus-dispatch|"via":"nexus"/.test(JSON.stringify(result.workers.find(worker => worker.id === 'user-existing').events)))
   assert.match(textOf(processed(idle).data.message), /ok-idle/)
   assert.notEqual(received(idle)[0].data.source.kind, 'user')
   const idleTurn = turnOf(received(idle)[0].seq)
@@ -183,7 +183,7 @@ test('official Host relays every work-session terminal to the supervisor: idle w
   assert.ok(call && call.seq > find('review-target', 1)[0].splicedSeq)
   const review = result.workers.find(worker => worker.id === 'review-target')
   assert.equal(review.events.filter(event => event.type === 'turn/end').length, 2)
-  assert.ok(review.events.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch' && textOf(event.data) === 'ok-secondpass'))
+  assert.ok(review.events.some(event => event.type === 'user/message' && event.data.source.kind === 'user' && event.data.source.via === 'nexus' && textOf(event.data) === 'ok-secondpass'))
   assert.ok(find('review-target', 2)[0].text.includes('ok-secondpass'))
 })
 
