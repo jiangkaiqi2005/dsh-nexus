@@ -42,6 +42,12 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
     agent[delivery](input)
     return { sessionId: agent.id, messageId: input.id, delivery, accepted: true, completed: false }
   }
+  tools.register(defineTool({ name: 'nexus_list_workspaces', description: 'Read all projects registered in the native sidebar, including blank projects, regardless of the supervisor current directory. Returns their stable id, display title and absolute path without changing projects or sessions. Use the returned path to create a conversation in a named project; ask the user when the name is unknown or ambiguous.', parameters: {}, output,
+    execute: async (_args, exec) => {
+      exec.signal.throwIfAborted()
+      return { items: ctx.workspaceRegistry.list().map(({ id, title, path }) => ({ id, title, path })) }
+    },
+  }))
   tools.register(defineTool({ name: 'nexus_list_sessions', description: 'List all native conversation sessions, including existing user-created sessions, without activating them. Subagent sessions are not listed.', parameters: {}, output,
     execute: async (_args, exec) => JSON.parse(JSON.stringify({ items: (await ctx.sessionController.list({}, exec.signal)).items.filter(item => item.sessionId !== supervisor.id && item.origin !== 'subagent') })) as JsonValue,
   }))

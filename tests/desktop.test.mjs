@@ -30,7 +30,7 @@ async function command(args, env, log) {
   await host.close()
 }
 
-test('Desktop bundled CLI activates the packed Nexus in an empty home and restores its native journal', { skip: process.env.NEXUS_DESKTOP_SMOKE !== '1', timeout: 300000 }, async t => {
+test('Desktop bundled CLI activates the packed Nexus, queries registered projects and restores its native journal', { skip: process.env.NEXUS_DESKTOP_SMOKE !== '1', timeout: 300000 }, async t => {
   if (process.platform !== 'win32' || !(await access(cli).then(() => true, () => false))) return t.skip('official Desktop dsh.cmd is not installed')
   await mkdir(resolve('.scratch/nexus-v1'), { recursive: true })
   const dir = await mkdtemp(resolve('.scratch/nexus-v1/desktop-smoke-'))
@@ -41,13 +41,20 @@ test('Desktop bundled CLI activates the packed Nexus in an empty home and restor
   t.after(async () => { for (const socket of server.clients) socket.terminate(); await new Promise(accept => server.close(accept)) })
   await new Promise(accept => server.once('listening', accept))
   let requests = 0
+  const wire = []
   server.on('connection', socket => {
     socket.send(JSON.stringify({ type: 'session.created' }))
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString())
+      wire.push(event)
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'response.create') {
         requests++
+        if (requests === 1) {
+          const item = { type: 'function_call', call_id: 'desktop-workspaces', name: 'nexus_list_workspaces', arguments: '{}' }
+          socket.send(JSON.stringify({ type: 'response.function_call_arguments.done', ...item }))
+          return socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed', output: [item] } }))
+        }
         socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'DESKTOP-RESTORE-ACK' }))
         socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))
       }
@@ -161,7 +168,11 @@ test('Desktop bundled CLI activates the packed Nexus in an empty home and restor
   assert.ok(second.events.slice(first.events.length).every(event => event.type === 'session/end-seed'))
   assert.equal(second.events.filter(event => event.type === 'user/message' && event.data.content[0]?.text === 'DESKTOP-RESTORE-MARKER').length, 1)
   assert.equal(second.events.filter(event => event.type === 'turn/start').length, 1, 'restart stays idle without replaying the saved input')
-  assert.equal(requests, 1, 'restore makes no unsolicited model request')
-  await writeFile(resolve(dir, 'result.json'), JSON.stringify({ cli, tgz: packed.tgz, requests, reports }))
+  assert.equal(requests, 2, 'one query and its continuation; restore makes no unsolicited model request')
+  assert.ok(wire.find(event => event.type === 'session.update').session.tools.some(tool => tool.name === 'nexus_list_workspaces'))
+  const query = first.events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === 'desktop-workspaces').data.message
+  assert.equal(query.isError, false)
+  assert.ok(JSON.parse(query.content[0].text).items.some(item => item.path === first.header.cwd && item.id && item.title))
+  await writeFile(resolve(dir, 'result.json'), JSON.stringify({ cli, tgz: packed.tgz, requests, reports, wire }))
   console.log('Desktop activation evidence:', dir)
 })
