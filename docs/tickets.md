@@ -20,7 +20,9 @@
 | [08](tickets/08-hangup-text-and-reconnect.md) | 挂断后继续文字调度并可手动再接通 | 06 | 同型号纯文字工具续答，无音频，手动接通延续上下文 |
 | [09](tickets/09-startup-auto-voice.md) | 按默认关闭的选项每次启动自动接通一次 | 08 | 设置保存、启动一次，挂断和刷新不再开麦 |
 | [10](tickets/10-disconnect-and-client-lifecycle.md) | 断线或关闭客户端后保留主管工作 | 08 | Host 后台文字工作、上下文恢复与单一音频客户端 |
-| [11](tickets/11-clean-install-and-full-scenario.md) | 在干净 profile 安装并完成首版使用场景 | 07、09、10 | 独立 bundle、安装说明与实际完整场景验收 |
+| [12](tickets/12-supervisor-context-compaction.md) | 主会话自动与手动上下文压缩 | 10 | 预算触发与 `/compact` 压缩、Nexus 设置、用量记录 |
+| [13](tickets/13-dispatch-as-user-and-session-titles.md) | 派活以用户消息发出并自动命名会话 | 10 | 派活为用户消息带 Nexus 标记、原生自动命名、主会话名为 Nexus |
+| [11](tickets/11-clean-install-and-full-scenario.md) | 在干净 profile 安装并完成首版使用场景 | 07、09、10、12、13 | 独立 bundle、安装说明与实际完整场景验收 |
 
 ## 为什么这样拆
 
@@ -43,7 +45,8 @@
 5. 06。
 6. 07、08。
 7. 09、10。
-8. 11。
+8. 12、13（2026-10-10 追加，均待 10 收尾）。
+9. 11。
 
 这些是依赖层级，不要求上一层所有无关票完成才推进。比如 02 未完成时，只要 03 完成就可开始 04；07 未完成时，只要 08 完成就可开始 09、10。能并行表示依赖上不相互阻塞；共享代码的改动仍需协调。
 
