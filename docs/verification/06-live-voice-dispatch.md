@@ -58,6 +58,7 @@
   - 仍留给 08：被打断的语音回答在文字里重答的措辞与去重；挂断时客户端尚未播完的音频直接丢弃；挂断后的文字续行策略。
 - 09（自动接通）：只能手动接通。
 - 10（断线、多客户端）：第二个客户端同时接通会得到 `CALL_BUSY`（单客户端限制属票 10 范围提前出现，评审认为可接受）；没有重连。
+  - 已知风险（修复轮 3 记录，行为未改）：通话因 `TIMEOUT` 等连接失败结束时，正在语音连接上等待回答的 step 随 turn 以 error 结束。该 step 已认领的工作结果留在原生记录里，但不会改用文字重答，实际上没有被处理（挂断时会转文字续答，连接失败时不会）。留给票 10 的断线处理。
 
 ## 验证
 
@@ -254,3 +255,15 @@ node --test --test-name-pattern='accurate Realtime' tests/dispatch.test.mjs     
 - 指令约束后 5/5 未再虚报，但样本有限，不能排除残留概率。若今后再出现，应记为已知模型局限，待用户裁定。
 - 派活成功后对 worker 进展的推测性描述，未处理。
 - 物理麦克风、扬声器、操作系统许可弹窗与 Desktop 外壳仍未验证。
+
+## 修复轮 3
+
+评审基线 `d410201`：标准轴 approve，规格轴 changes_requested。
+
+| 项 | 处置 | 依据 |
+| --- | --- | --- |
+| 规格 P2 补跑票 05 真实 steering | 已跑，passed | 命令 `node --test --test-name-pattern='accurate Realtime' tests/steering.test.mjs`，凭据方式与票 05 相同（临时包装脚本把 `NEXUS_STEERING_KEY` 只放入子进程环境，配合 `NEXUS_REAL_STEERING=1`）。结果 1 passed、0 failed，证据 `.scratch/nexus-v1/steering-real-1791603142365/result.json`（PID 108508）。扫描该证据与运行输出共 20 个文件，未出现密钥。 |
+| 规格 P3(a) Host 停止断言 | 说明理由，未恢复 | 插件停用后，主管会话不可用，客户端通话条随之卸载，客户端 `Call` 的最终状态无法再从页面读取。只有在产品代码里额外暴露状态才能读到，这不属于低成本改动。现有断言覆盖要求本身：(1) Host 确实向该通话发送了 `UNAVAILABLE` 失败帧（页内记录网关帧，旧代码不发，会失败）；(2) 麦克风轨道全部 `ended`；(3) 通话条卸载前若已渲染失败状态，必须是 `failed:UNAVAILABLE`。单独运行时，卸载前通常已记录到 `failed:UNAVAILABLE`。 |
+| 规格 P3(b) 超时失败时已认领结果丢失 | 记录为票 10 接缝 | 见“接缝”中票 10 的已知风险，行为未改。 |
+
+本轮只改文档：`git diff --check` 无问题。代码与测试未变，沿用修复轮 2 的 typecheck、build 与 `npm test` 结果（45 项，38 passed、0 failed、7 skipped）。
