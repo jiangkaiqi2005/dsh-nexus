@@ -30,6 +30,11 @@ export const TYPERT = {
   schemas: [],
   model: { services: [], events: [], objects: [] },
   invocations: [{
+    id: 'dsh-nexus#nexusVoice/claimStartup', service: 'nexusVoice', namespace: 'nexusVoice', method: 'claimStartup',
+    invocation: { kind: 'direct' }, parameters: [],
+    cancellation: { parameter: 'signal' },
+    result: { mode: 'strict', typeSymbol: 'boolean', create: () => ({ parse(value) { if (typeof value === 'boolean') return value; throw new TypeError('startup claim must be boolean') } }) },
+  }, {
     id: 'dsh-nexus#nexusVoice/call',
     service: 'nexusVoice',
     namespace: 'nexusVoice',

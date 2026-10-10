@@ -46,12 +46,33 @@ class Frames implements AsyncIterable<VoiceFrame> {
  */
 export class VoiceController extends TypertRemoteService {
   private supervisor?: Supervisor
+  private ready: Promise<void>
+  private markReady!: () => void
 
-  constructor(ctx: Context) { super(ctx, 'nexusVoice') }
+  constructor(ctx: Context, private startup: { enabled: boolean; attempted: boolean }) {
+    super(ctx, 'nexusVoice')
+    this.ready = new Promise(resolve => { this.markReady = resolve })
+  }
 
   attach(supervisor: Supervisor) {
     this.supervisor = supervisor
+    this.markReady()
     return () => { if (this.supervisor === supervisor) this.supervisor = undefined }
+  }
+
+  /** Claim this Host launch's sole automatic attempt before any client requests media. */
+  @Remote
+  async claimStartup(signal: AbortSignal): Promise<boolean> {
+    if (!this.startup.enabled) return false
+    await new Promise<void>(resolve => {
+      const done = () => { signal.removeEventListener('abort', done); resolve() }
+      if (signal.aborted) return done()
+      signal.addEventListener('abort', done, { once: true })
+      void this.ready.then(done)
+    })
+    if (signal.aborted || this.startup.attempted || !this.supervisor) return false
+    this.startup.attempted = true
+    return true
   }
 
   /**

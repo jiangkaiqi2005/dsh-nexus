@@ -1,21 +1,35 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import { SessionId, SessionLogOffset, interruptedTurnClosers, type Session } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceNotFoundError, type SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
-import { Supervisor, type Config } from './supervisor.js'
+import { Supervisor, type Config as SupervisorConfig } from './supervisor.js'
 import { ResultRelay } from './results.js'
 import { VoiceController } from './voice.js'
 
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
 
+export interface Config extends SupervisorConfig { autoVoice: Volatile<boolean> }
+export const Config = z.object({
+  credentialRef: z.string().required(),
+  endpoint: z.string().required(),
+  timeoutMs: z.number().step(1).min(1),
+  autoVoice: z.boolean().default(false).volatile(),
+})
+
+// Keep the launch choice and its consumption through plugin reactivation in this Host.
+const STARTUP = Symbol.for('dsh-nexus.startup')
+type StartupProcess = NodeJS.Process & { [STARTUP]?: { enabled: boolean; attempted: boolean } }
+
 export async function apply(ctx: Context, config: Config) {
   if (!config.credentialRef || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.credentialRef)) throw new Error('Nexus requires a Host credential reference')
   const endpoint = new URL(config.endpoint)
   if (!['wss:', 'ws:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw new Error('Nexus requires a WebSocket endpoint without embedded credentials')
   if (config.timeoutMs !== undefined && (!Number.isSafeInteger(config.timeoutMs) || config.timeoutMs <= 0)) throw new Error('Nexus timeout must be a positive integer')
-  const voice = new VoiceController(ctx)
+  const startup = (process as StartupProcess)[STARTUP] ??= { enabled: config.autoVoice?.get() ?? false, attempted: false }
+  const voice = new VoiceController(ctx, startup)
   return ctx.effect(async function* () {
     let session: Session | undefined
     let handle: SessionHandle
@@ -55,8 +69,6 @@ export async function apply(ctx: Context, config: Config) {
     yield () => handle.close()
     startupOwnsWriter = false
     yield () => agent.stop()
-    // Calls reach the supervisor only while it can work; detached before it stops.
-    yield voice.attach(agent)
     // Observe only after the supervisor can accept inbox work; disposed first on teardown.
     yield new ResultRelay(ctx, agent).start()
     // The native blank-session composer requires durable Workspace membership.
@@ -64,5 +76,7 @@ export async function apply(ctx: Context, config: Config) {
     await workspace.attachSession(session.id)
     ctx.sessions.announce(session)
     await ctx.agents.announce(agent, storedCount ? 'resume' : 'startup')
+    // Media clients may claim startup only after the native session and Host are ready.
+    yield voice.attach(agent)
   }, 'nexus supervisor')
 }

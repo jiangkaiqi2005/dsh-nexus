@@ -23,6 +23,11 @@ window.__ModuleLoader__.load({
     const CONTRIBUTION = {
       package: 'dsh-nexus',
       descriptors: [{
+        id: 'dsh-nexus#nexusVoice/claimStartup', service: 'nexusVoice', namespace: 'nexusVoice', method: 'claimStartup',
+        invocation: { kind: 'direct' }, parameters: [],
+        cancellation: { parameter: 'signal' },
+        result: strict('boolean', value => { if (typeof value === 'boolean') return value; throw new TypeError('startup claim must be boolean') }),
+      }, {
         id: 'dsh-nexus#nexusVoice/call', service: 'nexusVoice', namespace: 'nexusVoice', method: 'call', mode: 'stream',
         invocation: { kind: 'direct' }, parameters: [], cancellation: { parameter: 'signal' },
         uplink: { codec: strict('dsh-nexus/voice#VoiceUplink', uplink) },
@@ -54,7 +59,7 @@ window.__ModuleLoader__.load({
      * playing stops, and the client reports how much it actually played.
      */
     class Call {
-      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.flushes = 0; this.discarded = 0; this.listeners = new Set(); this.attempt = undefined }
+      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.flushes = 0; this.discarded = 0; this.listeners = new Set(); this.attempt = undefined; this.autoPending = false }
       subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
       set(state, code) { this.state = state; this.code = code; for (const listener of this.listeners) listener() }
       get active() { return ['requesting-mic', 'connecting', 'live'].includes(this.state) }
@@ -75,7 +80,7 @@ window.__ModuleLoader__.load({
         this.flushes = 0
         this.discarded = 0
         this.set('requesting-mic')
-        // Created within the user's click so playback is allowed to start.
+        // A startup attempt also checks actual playback permission before claiming to be live.
         let playback
         try { playback = new AudioContext({ sampleRate: 24000 }) } catch { return end('playback-blocked') }
         cleanups.push(() => playback.close().catch(() => {}))
@@ -180,6 +185,9 @@ window.__ModuleLoader__.load({
       const [, render] = React.useReducer(count => count + 1, 0)
       React.useEffect(() => call.subscribe(render), [call])
       React.useEffect(() => { if (sessionId !== SUPERVISOR) call.hangup(); return () => call.hangup() }, [sessionId, call])
+      React.useEffect(() => {
+        if (sessionId === SUPERVISOR && call.autoPending) { call.autoPending = false; call.start(remote) }
+      }, [sessionId, call, remote, call.autoPending])
       if (sessionId !== SUPERVISOR) return null
       const busy = call.active
       return h('div', {
@@ -188,16 +196,43 @@ window.__ModuleLoader__.load({
       },
       h('span', { role: 'status' }, t(`state-${call.state}`) + (call.code && !busy ? ` (${call.code})` : '')),
       h('button', {
-        type: 'button', onClick: () => busy ? call.hangup() : call.start(remote),
+        type: 'button', onClick: () => { call.autoPending = false; busy ? call.hangup() : call.start(remote) },
         style: { color: 'inherit', background: 'transparent', border: '1px solid currentColor', borderRadius: 6, cursor: 'pointer', padding: '2px 10px' },
       }, busy ? t('hangup') : t('start')))
+    }
+
+    function Settings({ form, t }) {
+      const snapshot = React.useSyncExternalStore(listener => form.subscribe(listener), () => form.getSnapshot())
+      const [error, setError] = React.useState(false)
+      const [saving, setSaving] = React.useState(false)
+      return h('div', { style: { padding: 16 } },
+        h('h2', null, 'Nexus'),
+        h('label', null, h('input', {
+          type: 'checkbox', checked: snapshot.value?.autoVoice ?? false,
+          disabled: snapshot.status !== 'ready' || !snapshot.writable || saving,
+          onChange: async event => {
+            const enabled = event.target.checked
+            setSaving(true)
+            try { setError(!(await form.set('autoVoice', enabled))) } catch { setError(true) }
+            finally { setSaving(false) }
+          },
+        }), t('auto-voice')),
+        h('p', null, t('next-startup')),
+        error ? h('p', { role: 'alert' }, t('save-failed')) : null)
     }
 
     return {
       inject: ['slots', 'uiWorkspace', 'locale'],
       apply(ctx) {
-        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', ...states(STATES.en) })
-        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', ...states(STATES.zh) })
+        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', ...states(STATES.en) })
+        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', ...states(STATES.zh) })
+        ctx.inject(['configForms'], settingsCtx => {
+          const form = settingsCtx.configForms.get('nexus')
+          settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
+            name: 'settings.section', id: 'nexus', label: 'Nexus', locale: 'nexus',
+            inject: () => ({ form }),
+          }, Settings))
+        })
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
           name: 'sidebar.footer.action', id: 'nexus', order: -10, locale: 'nexus',
           inject: () => ({ open: () => ctx.uiWorkspace.openSession(SUPERVISOR) }),
@@ -206,14 +241,25 @@ window.__ModuleLoader__.load({
           style: { color: 'inherit', background: 'transparent', border: 0, cursor: 'pointer', padding: 8 },
         }, wide ? 'Nexus' : 'N')))
         const call = new Call()
-        ctx.effect(() => () => call.hangup())
+        ctx.effect(() => () => { call.autoPending = false; call.hangup() })
         ctx.inject(['remote'], async remoteCtx => {
           await remoteCtx.remote.$mount(CONTRIBUTION)
           remoteCtx.inject(['remote.nexusVoice', 'slots'], uiCtx => {
+            let disposed = false
+            uiCtx.effect(() => () => { disposed = true })
             uiCtx.slots.inject('conversation.input.dock', () => uiCtx.slots.register({
               name: 'conversation.input.dock', id: 'nexus-voice', locale: 'nexus',
               inject: sessionId => ({ sessionId, call, remote: uiCtx.remote.nexusVoice }),
             }, CallBar))
+            uiCtx.remote.nexusVoice.claimStartup().then(async response => {
+              if (disposed) return
+              if (!response.ok) { call.set('failed', response.error.code); return }
+              if (!response.value) return
+              call.autoPending = true
+              await uiCtx.uiWorkspace.openSession(SUPERVISOR)
+              if (disposed) { call.autoPending = false; return }
+              call.set(call.state, call.code)
+            }).catch(error => call.set('failed', error?.code ?? 'UNAVAILABLE'))
           })
         })
       },
