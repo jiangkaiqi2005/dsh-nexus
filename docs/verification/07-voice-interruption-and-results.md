@@ -61,8 +61,8 @@
 
 - 语句 1 的 LONG-ONE 一边生成一边播放，每 150 ms 一个增量。语句 2 开口时，端点取消该回复（`cancelled: resp-1-1`）。客户端在 1.5 s 内没有可闻节点，并且有提前停止的节点。
 - 语句 2 的回复中，端点注入了被取消回复的迟到音频、`LATE-TEXT` 和迟到 done，还在 `speech_started` 后注入了一条无关 error。结果：迟到包没有排程，排程样本等于 9600 × 有效增量数；记录中没有 LATE-TEXT；通话保持 live。
-- 原生记录：turn 1 的 LONG-ONE 带 `interrupted: true`。turn 2 先是通知“about 2.7 s of its 7.2 s”，再是用户原话，再是完整的 VOICE-TWO。
-- 语句 3 的 LONG-THREE 突发生成完（服务端已结束），播放中被语句 4 打断。turn 4 开头通知“about 3.3 s of its 8.0 s”。
+- 原生记录：**初轮历史记录，通知位置已被修复轮 1 取代：** turn 1 的 LONG-ONE 带 `interrupted: true`。turn 2 先是通知“about 2.7 s of its 7.2 s”，再是用户原话，再是完整的 VOICE-TWO。
+- 语句 3 的 LONG-THREE 突发生成完（服务端已结束），播放中被语句 4 打断。初轮 turn 4 开头通知（修复轮 1 改为用户原话之后）“about 3.3 s of its 8.0 s”。
 - 语句 5 正常往返，共 2 条通知，5 个 turn 全部 completed，挂断前通话仍为 live。
 
 **交错**：第 6 项，证据 `.scratch/nexus-v1/voice-interleave-1791624505762`。端点的 `speech_started` 在开口后 2 s 才发出。
@@ -89,7 +89,7 @@ opt-in 方式为 `NEXUS_REAL_VOICE=1` 加临时 `NEXUS_VOICE_KEY`。凭据由临
 
 - 三句转写都正确。
 - 长回复在服务端已生成完（没有 cancelled），客户端播放到约 6.7 s 时被第二句打断。客户端 flush 后丢弃 895744 个样本（约 37 s），118 个节点提前停止。
-- turn 2 开头的通知写明“about 6.7 s of its 44.0 s of audio were played”，排在长回复之后、问题之前。
+- **初轮历史记录，位置描述已被修复轮 1 取代：** turn 2 开头的通知写明“about 6.7 s of its 44.0 s of audio were played”，排在长回复之后、问题之前。
 - 模型回答“一加一等于二。”。第三句得到“不客气，随时可以聊。”，没有被打断，之前也没有剪切通知。客户端共 flush 2 次：第二次时回复已经播完，所以不产生通知。
 - 3 个 turn 全部 completed，全部回复来自准确型号。
 
@@ -99,7 +99,7 @@ opt-in 方式为 `NEXUS_REAL_VOICE=1` 加临时 `NEXUS_VOICE_KEY`。凭据由临
 - 语音新建会话：
   - 第 1 次 **failed**，`voice-real-create-1791624703624`。模型按 `3fb7956` 新增的项目发现指引，先调用 `nexus_list_workspaces`，然后在列出的唯一已登记项目（仓库根，标题“Nexus”）中新建会话，没有用 docs 会话的工作区；新会话已执行完成。失败在“目标工作区”断言，与打断改动无关。本票对指令的唯一改动是通话指令末尾加了一句打断说明。
   - 重跑 1 次 passed，`voice-real-create-1791624848509`（日志 `ticket07-real-create-rerun.txt`）：模型先 `nexus_list_sessions`，再在 docs 的工作区新建会话。
-  - 结论：这是真实模型在两种查询路径之间的选择差异，没有改断言。
+  - 初轮结论已被修复轮 1 的项目名与会话工作区指引修复取代（bc2def0）；没有改目标工作区断言。
 
 ### 命令与结果
 
@@ -213,3 +213,11 @@ NEXUS_REAL_STEERING=1   node --test --test-name-pattern='accurate Realtime' test
 - 原生 turn 序按输入身份，交错时与播放序不同。实际次序由 stream 块时间保留；是否接受这种 turn 结构，需用户裁定。
 - 修复轮 1 代码下，“已生成完、播放中打断”的真实路径没有再出现（两次都在生成中被取消），只有受控证据。
 - 物理扬声器外放、回声与 Desktop 实机通话，仍待用户实机验证。
+
+## 票 08 前置整理
+
+交接指定的 P3 已整理：交错回复先后改用受控响应序号，不以可能相同的毫秒戳判定；真实打断 7 秒间隔名称不再声称必然已生成完。Response.settledAt 标明结算时刻，消息映射使用原生消息类型。
+
+拒绝项依据的原始协议探针现保存在 `tests/probes/voice-protocol.mjs`。凭据仅经临时子进程环境 `NEXUS_PROBE_KEY` 注入后，从仓库根执行 `node tests/probes/voice-protocol.mjs .scratch/nexus-v1/protocol-07/queued-rerun.json queuedBarge`；不打印凭据、不向文件写凭据。其它模式见脚本末尾。探针只记录协议事件与音频字节数，不记录音频或请求头。
+
+按 2026-10-10 最新交接，用户已完成票 07 Desktop 实测，并接受原生 turn 按输入身份排列；以上历史未决保留为当时记录，不代替票 08 实机验证。

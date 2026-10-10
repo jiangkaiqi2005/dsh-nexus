@@ -1033,10 +1033,10 @@ test('voice interleaving: a tool that finishes while the user speaks, and a work
     assert.equal(turnOf(reply('VOICE-WHILE-TOOL').seq), two)
     const outputSent = model.wire.find(event => event.type === 'conversation.item.create' && event.item.type === 'function_call_output' && event.item.call_id === call.data.callId)
     assert.ok(outputSent.at < response('VOICE-WHILE-TOOL').at, 'the tool output was sent while the user was speaking')
-    assert.ok(response('VOICE-WHILE-TOOL').at < response('TOOL-CONTINUED').at)
+    assert.ok(model.log.responses.indexOf(response('VOICE-WHILE-TOOL')) < model.log.responses.indexOf(response('TOOL-CONTINUED')))
     // The result request also reached the endpoint while the user spoke and was asked again after the user's turn.
     assert.equal(model.log.absorbed, 2, 'the tool continuation and the result request each arrived while the user was speaking')
-    assert.ok(response('VOICE-FOUR').at < response('RESULT-HEARD').at)
+    assert.ok(model.log.responses.indexOf(response('VOICE-FOUR')) < model.log.responses.indexOf(response('RESULT-HEARD')))
     const notice = events.find(event => event.type === 'user/message' && event.data.source.kind === 'nexus-work-result' && event.data.source.sessionId === 'docs')
     assert.match(textOf(notice.data), /DOC-READY-42/)
     assert.equal(turnOf(reply('RESULT-HEARD').seq), turnOf(notice.seq))
@@ -1152,7 +1152,7 @@ function relay(endpoint) {
 // capture device. The gap after the first request decides whether the user speaks while the long reply is still
 // being generated (the endpoint cancels it) or after it was generated, while it plays (only playback stops).
 for (const [scenario, gap, generating] of [['real-barge', 7, false], ['real-barge-generating', 2, true]]) {
-  test(`accurate Realtime voice call: the user speaks over a long reply ${generating ? 'still being generated' : 'already generated and playing'}; playback stops, the model is told what was heard before it answers, and the question is answered`, { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
+  test(`accurate Realtime voice call: the user speaks over a long reply ${generating ? 'still being generated' : 'at the seven-second gap'}; playback stops, the model is told what was heard before it answers, and the question is answered`, { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
     const capture = await voiceFixture([{ silence: 5 }, { text: '请详细讲一讲长城的历史，多讲一些细节。', voice: ZH }, { silence: gap }, { text: '先停一下，一加一等于几？', voice: ZH }, { silence: 20 }, { text: '好的，谢谢你。', voice: ZH }, { silence: 25 }])
     const model = relay(process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime')
     await controlledCall(t, scenario, model, capture, async ({ host, page, bar }) => {

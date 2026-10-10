@@ -318,17 +318,17 @@ export class Supervisor implements Agent {
         return false
       }
       calls = response.calls
-      begin(response.at)
-      push({ type: 'block-end', index: 0, block: { type: 'text', text } }, response.at)
+      begin(response.settledAt)
+      push({ type: 'block-end', index: 0, block: { type: 'text', text } }, response.settledAt)
       for (const [offset, call] of response.calls.entries()) {
-        push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' }, response.at)
-        push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.at)
-        push({ type: 'block-end', index: offset + 1, block: call }, response.at)
+        push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' }, response.settledAt)
+        push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.settledAt)
+        push({ type: 'block-end', index: offset + 1, block: call }, response.settledAt)
       }
-      push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.at)
+      push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.settledAt)
       const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...response.calls], source: this.options })
       connection.markPresent(message.id)
-      // As natively for a cancelled stream: the delivered prefix, marked interrupted.
+      // Cancelled streams retain the delivered prefix; a commit folded into later speech may be empty.
       const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {

@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { randomUUID } from 'node:crypto'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { ToolCallId, type ToolCallBlock, type ToolSchema, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, type ToolCallBlock, type ToolSchema, type UserMessage, type AssistantMessage } from '@deepseek-ai/dsh-llm'
 
 export const MODEL = 'qwen3.8-omni-flash-realtime'
 // Text and voice instructions share these two halves and differ only in the clause between them and the closing line.
@@ -25,9 +25,9 @@ function errorDetail(error: unknown): string {
 
 /**
  * interrupted: the server cancelled the response because the user started speaking; text is what arrived
- * before that, and calls it never finished are absent. at: when the server finished the response.
+ * before that, and calls it never finished are absent. settledAt: when the response settled.
  */
-export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean; at: number }
+export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean; settledAt: number }
 
 /** A delivered spoken reply whose playback the user's speech stopped, in seconds of audio. */
 export interface Cut { text: string; heard: number; total: number }
@@ -223,7 +223,7 @@ export class RealtimeConnection {
     clearTimeout(reply.timer)
     if (reply === this.host) { this.host = undefined; this.asked = false }
     if (error) reply.reject(error)
-    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}), at: Date.now() })
+    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}), settledAt: Date.now() })
   }
   /**
    * The server's VAD heard the user start speaking. The server cancels a response it is still
@@ -333,7 +333,7 @@ export class RealtimeConnection {
     this.sentThrough = this.history.at(-1)?.seq ?? this.sentThrough
     if (respond) this.ask()
   }
-  private item(message: { id: string; role: string; source: { kind: string }; content: readonly { type: string; text?: string; id?: string; name?: string; arguments?: string }[] }) {
+  private item(message: UserMessage | AssistantMessage) {
     const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : part.type === 'tool-call' ? [`[Previous native tool call ${part.id}: ${part.name} ${part.arguments}]`] : []).join('\n')
     const source = message.role === 'user' && message.source.kind !== 'user' ? `[Context source: ${JSON.stringify(message.source)}]\n` : ''
     if (text) this.message(message.role, message.id, source + text)
