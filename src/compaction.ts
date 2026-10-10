@@ -39,11 +39,12 @@ interface BasicEngine {
  */
 export function withSummaryModel(engine: CompactionEngine, target: () => ModelTarget): CompactionEngine {
   const native = engine as unknown as Partial<BasicEngine>
-  if (typeof native.summarize !== 'function' || !native.config) throw new Error('Nexus compaction requires the native basic compaction engine')
-  const { summarize, config } = native as BasicEngine
-  const cleared = { summarizationProvider: undefined, summarizationModel: undefined }
   // The engine's own context: read through a service, `ctx` is the reader's context, which cannot reach the engine's injected services.
   const ctx = Object.getOwnPropertyDescriptor(engine, 'ctx')?.value
+  if (typeof native.summarize !== 'function' || !native.config || !ctx) throw new Error('Nexus compaction requires the native basic compaction engine')
+  const { summarize, config } = native as BasicEngine
+  // A policy's fields fall through (`??`) to the top level; the top level is resolved config, where an empty pair, not undefined, means "summarize with the routed target".
+  const cleared = { summarizationProvider: undefined, summarizationModel: undefined }
   const summarizer = Object.create(engine, {
     ctx: { value: ctx },
     config: { value: { ...config, summarizationProvider: '', summarizationModel: '', modelPolicies: config.modelPolicies.map(policy => ({ ...policy, ...cleared })) } },

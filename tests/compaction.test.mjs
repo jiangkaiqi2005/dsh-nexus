@@ -465,3 +465,27 @@ test('during a call speech while a replacement opens keeps the old connection; a
   assert.equal(requestConnections[requests.findIndex(items => items.includes('user: After rebuild.'))], 2)
   assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
 })
+
+test('during a call a replacement discarded once the agent is idle is retried at once, not at the next turn', { timeout: 180000 }, async () => {
+  const report = await scenario('call-discarded', {
+    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    model: { opening: { 1: 'delay' } },
+    // The manual compaction runs between turns while the first replacement opens, so no turn ends after it is discarded.
+    steps: [{ call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 6 }, { command: '/compact' }, { until: 'rebuilt' }, { prompt: 'After rebuild.' }, { call: 'end' }],
+  })
+  const { events, requests, requestConnections, connections, closed, link, commands } = report
+  assert.equal(commands[0].result.kind, 'success')
+  const starts = of(events, 'compaction/start')
+  assert.ok(starts.some(event => typeof event.data.turn === 'number') && starts.some(event => event.data.turn === null))
+  // The first replacement replayed the conversation before the manual checkpoint: it was discarded unused.
+  assert.ok(closed[1])
+  assert.ok(!requestConnections.includes(1))
+  assert.equal(connections[1].filter(item => item.includes(CHECKPOINT)).length, 1)
+  // Its retry replays the latest checkpoint before the next prompt.
+  assert.equal(connections[2].findIndex(item => item.includes(CHECKPOINT)), 0)
+  assert.ok(connections[2][0].includes(`SUMMARY-${report.summaries.length}`))
+  assert.equal(requestConnections[requests.findIndex(items => items.includes('user: After rebuild.'))], 2)
+  assert.deepEqual(link.failed, [])
+  assert.deepEqual(link.states, [])
+  assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
+})

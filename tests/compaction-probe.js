@@ -101,7 +101,7 @@ export function apply(ctx, config) {
             const watch = setInterval(() => { if (agent.call?.recovering) { clearInterval(watch); report.spokeOnRebuild = true; live.append(Buffer.alloc(3200).toString('base64')) } }, 5)
           }
           if (step.call === 'end') { live.end(); await settle() }
-          if (step.until === 'rebuilt') while (agent.call?.connection === firstConnection) await sleep(20)
+          if (step.until === 'rebuilt') for (const deadline = Date.now() + 15000; agent.call?.connection === firstConnection && Date.now() < deadline; ) await sleep(20)
           if (step.speak) {
             // Speech on the rebuilt connection stops playback; the client heard half of the first connection's last reply.
             const flushes = link.flushes

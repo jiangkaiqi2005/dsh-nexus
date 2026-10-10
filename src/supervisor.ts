@@ -306,14 +306,20 @@ export class Supervisor implements Agent {
       abort: new AbortController(),
       since: 0,
       reconnect: previous => {
+        let discarded = false
         const recovering: Promise<void> = connect(previous)
-          .then(() => { if (!previous && this.call === call) link.state('live') })
+          .then(replaced => { discarded = !replaced; if (!previous && this.call === call) link.state('live') })
           .catch(failure => {
             // A replacement that could not open leaves the call on its connection; the next boundary tries again.
             if (previous && this.call === call && call.connection === previous) return this.ctx.logger.warn(`nexus voice: the compacted conversation could not be replayed on a new connection: ${failure instanceof Error ? failure.message : String(failure)}`)
             call.end(failure instanceof RealtimeFailure ? failure.code : 'CONNECTION_FAILED')
           })
-          .finally(() => { if (call.recovering === recovering) call.recovering = undefined })
+          .finally(() => {
+            if (call.recovering !== recovering) return
+            call.recovering = undefined
+            // A turn ending later retries a discarded replacement; between turns no boundary follows, so retry now.
+            if (discarded && this.status === 'idle' && !this.maintenance) this.refreshCall()
+          })
         call.recovering = recovering
       },
       end: failure => {
@@ -331,7 +337,8 @@ export class Supervisor implements Agent {
     const hangUp = () => { if (this.call !== call) return; if (call.connection) { lostPlayback(call.connection); this.hungUp.add(call.connection); call.connection.hangup() } call.end() }
     let recovered = false
     let accepted = false
-    const connect = async (previous?: RealtimeConnection) => {
+    /** Resolves false when a replacement for `previous` was discarded. */
+    const connect = async (previous?: RealtimeConnection): Promise<boolean> => {
       const exchanges = previous?.exchanges
       const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
       const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
@@ -363,7 +370,7 @@ export class Supervisor implements Agent {
       catch (error) { connection.close(); throw error }
       if (previous) {
         // Its replay lacks whatever was said, answered or recorded while it opened: keep the call as it is.
-        if (call.connection !== previous || !previous.quiet || previous.exchanges !== exchanges || this.voiceTurns.length || this.session.surface.nodes.join() !== surface) return connection.close()
+        if (call.connection !== previous || !previous.quiet || previous.exchanges !== exchanges || this.voiceTurns.length || this.session.surface.nodes.join() !== surface) { connection.close(); return false }
         // The call stays live throughout; audio the client may still be playing is accounted for on the new connection, nothing is flushed.
         connection.takeOver(previous.retire())
         call.connection = connection
@@ -371,6 +378,7 @@ export class Supervisor implements Agent {
       call.since = since
       // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
       for (const notice of this.notices) connection.insert(notice)
+      return true
     }
     this.call = call
     signal.addEventListener('abort', hangUp, { once: true })
