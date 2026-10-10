@@ -12,6 +12,8 @@ Nexus 是 DeepSeek Harness 的实时语音管家插件，项目与包名为 `dsh
 
 构建：`npm ci --ignore-scripts`，`npm run build`，`npm test`，`npm pack`。测试使用 Windows 已安装的 Edge 无头模式；其他环境可通过 `NEXUS_TEST_BROWSER` 选择已安装的 Playwright 浏览器 channel。只安装打包后的 `.tgz`。Desktop 先正常退出，再通过其自带 `resources/runtime/cli/bin/dsh.cmd plugin --profile desktop add <tgz绝对路径>` 安装并重新打开；npm 版 CLI 不管理保留的 desktop profile。
 
+本机打包安装冒烟可在构建后运行（PowerShell）：`$env:NEXUS_DESKTOP_SMOKE='1'; node --test tests/desktop.test.mjs`。它使用 `D:/DeepSeekHarness/resources/runtime/cli/bin/dsh.cmd`，在隔离目录由官方插件管理器初始化 profile 并安装当前 tgz，以无头浏览器验证原生文字输入、原生记录与重启恢复；模型为本地受控端点，不需要凭据或付费调用。未安装该 Desktop 时明确跳过。详见[本机冒烟与测试清理验证](docs/verification/desktop-activation-test-cleanup.md)。
+
 Host 配置使用凭据引用 `credentialRef`，默认 `DASHSCOPE_API_KEY`；`endpoint` 默认 `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`，专属地域或 Workspace 接入应配置完整地址。密钥由 Harness 原生 credentials 服务读取，浏览器不接收明文密钥。若首次未配置或建连失败，主会话保留用户输入并记录失败，不生成假回复。
 
 重新启动 Host 后，插件恢复同一主管的原生记录，下一轮继续使用既有交流上下文。恢复保持闲置，未闭轮次和工具调用按 Harness 原生中断语义收束，不自动重跑。普通工作会话仍沿用原生工厂。票 02 已在后台隔离官方 Host 的真实退出、新进程启动和准确型号续答中验证；新版尚未安装到用户 Desktop，其当前非空会话未修改。详见[票 02 验证记录](docs/verification/02-native-supervisor-restore.md)。

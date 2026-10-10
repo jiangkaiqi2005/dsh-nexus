@@ -1,11 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile, symlink, copyFile } from 'node:fs/promises'
-import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { chromium } from 'playwright'
 import { WebSocketServer } from 'ws'
 import { voiceFixture } from './voice-audio.mjs'
+import { startHost } from './host-process.mjs'
 
 const root = resolve('.')
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
@@ -146,30 +146,30 @@ async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY'
   await symlink(fixture, resolve(profile, 'node_modules/nexus-voice-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-voice-probe'] } } }))
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${credentialRef}\n    endpoint: ${endpoint}\n    timeoutMs: ${timeoutMs}\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
-  const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-voice', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), [credentialRef]: key, DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-  let output = ''
-  child.stdout.on('data', data => { output += data })
-  child.stderr.on('data', data => { output += data })
-  let url
-  for (let i = 0; i < 300 && !url; i++) { url = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]; if (!url) await delay(100) }
-  assert.ok(url, 'official Host did not start: ' + output.slice(-3000))
-  // The probe rewrites status.json continuously; retry reads that catch a partial write.
-  const status = async () => { for (let i = 0; i < 20; i++) { try { return JSON.parse(await readFile(resolve(home, 'status.json'), 'utf8')) } catch { await delay(25) } } }
-  await until(async () => (await status())?.ready, 'probe ready')
-  return {
-    home, url, status, workspace,
-    output: () => output.replace(/\?token=\S+/g, '?token=[redacted]'),
-    async finish() {
-      await writeFile(resolve(home, 'finish'), '')
-      let result
-      await until(async () => { try { result = JSON.parse(await readFile(resolve(home, 'result.json'), 'utf8')); return true } catch { return child.exitCode !== null } }, 'native report', 60000)
-      assert.ok(result, 'no native report: ' + output.slice(-3000))
-      assert.equal(result.error, undefined, result.stack)
-      return result
-    },
-    release: () => writeFile(resolve(home, 'release'), ''),
-    async close() { child.kill('SIGTERM'); await Promise.race([new Promise(accept => child.once('exit', accept)), delay(5000)]) },
-  }
+  return startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-voice', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), [credentialRef]: key, DSH_TELEMETRY: '0' } }, async child => {
+    let output = ''
+    child.stdout.on('data', data => { output += data })
+    child.stderr.on('data', data => { output += data })
+    let url
+    for (let i = 0; i < 300 && !url; i++) { url = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]; if (!url) await delay(100) }
+    assert.ok(url, 'official Host did not start: ' + output.slice(-3000))
+    // The probe rewrites status.json continuously; retry reads that catch a partial write.
+    const status = async () => { for (let i = 0; i < 20; i++) { try { return JSON.parse(await readFile(resolve(home, 'status.json'), 'utf8')) } catch { await delay(25) } } }
+    await until(async () => (await status())?.ready, 'probe ready')
+    return {
+      home, url, status, workspace,
+      output: () => output.replace(/\?token=\S+/g, '?token=[redacted]'),
+      async finish() {
+        await writeFile(resolve(home, 'finish'), '')
+        let result
+        await until(async () => { try { result = JSON.parse(await readFile(resolve(home, 'result.json'), 'utf8')); return true } catch { return child.exitCode !== null } }, 'native report', 60000)
+        assert.ok(result, 'no native report: ' + output.slice(-3000))
+        assert.equal(result.error, undefined, result.stack)
+        return result
+      },
+      release: () => writeFile(resolve(home, 'release'), ''),
+    }
+  })
 }
 
 /** Open the native UI, enter Nexus and return the call bar of the main conversation. */
@@ -214,12 +214,15 @@ const instrument = delays => {
 }
 const trackStates = page => page.evaluate(() => window.__streams.flatMap(stream => stream.getTracks().map(track => track.readyState)))
 
-test('voice call: client audio reaches the Host-held model, which speaks, dispatches work and keeps talking while it runs', { timeout: 240000 }, async () => {
+test('voice call: client audio reaches the Host-held model, which speaks, dispatches work and keeps talking while it runs', { timeout: 240000 }, async t => {
   const model = controlledModel()
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const capture = await voiceFixture([{ silence: 1.5 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 9 }, { text: '另外，一加一等于几？', voice: ZH }, { silence: 40 }])
   const host = await voiceHost('controlled', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   let page
   try {
     const opened = await openNexus(browser, host.url)
@@ -304,14 +307,18 @@ test('voice call: client audio reaches the Host-held model, which speaks, dispat
   }
 })
 
-test('voice call states: no device, denied permission and blocked playback never reach the model; a sent request is not live', { timeout: 180000 }, async () => {
+test('voice call states: no device, denied permission and blocked playback never reach the model; a sent request is not live', { timeout: 180000 }, async t => {
   const model = controlledModel({ withhold: true })
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const host = await voiceHost('states', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
   // Always the fake capture device: the physical microphone is never opened.
   const fake = ['--use-fake-device-for-media-stream']
   const granting = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: [...fake, '--use-fake-ui-for-media-stream', '--autoplay-policy=document-user-activation-required'] })
+  t.after(() => granting.close())
   const denying = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: [...fake, '--deny-permission-prompts'] })
+  t.after(() => denying.close())
   const start = bar => bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
   const settled = async (bar, expected) => { await until(async () => (await state(bar)) === expected, `state ${expected}`, 15000); return bar.getByRole('status').textContent() }
   const states = {}
@@ -369,11 +376,13 @@ test('voice call states: no device, denied permission and blocked playback never
   }
 })
 
-test('accurate Realtime voice call: real model hears synthesized speech, dispatches work, keeps talking and receives the result', { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async () => {
+test('accurate Realtime voice call: real model hears synthesized speech, dispatches work, keeps talking and receives the result', { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
   // Real model and real client code; the speech is offline SAPI audio fed through Chromium's fake capture device.
   const capture = await voiceFixture([{ silence: 5 }, { text: '请让现有的 docs 会话开始编写接口文档。', voice: ZH }, { silence: 14 }, { text: '另外，一加一等于几？', voice: ZH }, { silence: 90 }])
   const host = await voiceHost('real', { endpoint: process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', key: process.env.NEXUS_VOICE_KEY })
+  t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   const supervisor = async () => (await host.status())?.agents?.find(agent => agent.id === 'nexus-supervisor')
   const docs = async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')
   let page
@@ -449,12 +458,15 @@ test('accurate Realtime voice call: real model hears synthesized speech, dispatc
   }
 })
 
-test('voice call races: hanging up during the microphone request or rapidly restarting keeps only the call the user wants', { timeout: 180000 }, async () => {
+test('voice call races: hanging up during the microphone request or rapidly restarting keeps only the call the user wants', { timeout: 180000 }, async t => {
   const model = controlledModel()
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const capture = await voiceFixture([{ silence: 120 }])
   const host = await voiceHost('races', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   try {
     // Controlled in page: the first real capture stream arrives 1.5 s late, like a pending permission prompt; every call-bar state is recorded.
     const { page, bar } = await openNexus(browser, host.url, [instrument, [1500]])
@@ -501,14 +513,17 @@ test('voice call races: hanging up during the microphone request or rapidly rest
 const supervisorOf = async host => (await host.status())?.agents?.find(agent => agent.id === 'nexus-supervisor')
 const sessionUpdate = (model, connection) => model.wire.find(event => event.connection === connection && event.type === 'session.update')
 
-test('voice call creates a new work session, may stay silent on its result, and later text turns use a text connection', { timeout: 240000 }, async () => {
+test('voice call creates a new work session, may stay silent on its result, and later text turns use a text connection', { timeout: 240000 }, async t => {
   const create = { name: 'nexus_create_session', arguments: { text: 'NEW-TASK write the deployment guide' } }
   const model = controlledModel({ utterances: { 1: { transcript: 'UTT-NEW 新建一个会话编写部署说明。', call: create } }, result: 'silent' })
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const capture = await voiceFixture([{ silence: 1.5 }, { text: '请新建一个会话编写部署说明。', voice: ZH }, { silence: 60 }])
   const host = await voiceHost('create', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
   create.arguments.cwd = host.workspace
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   let page
   try {
     const opened = await openNexus(browser, host.url)
@@ -583,12 +598,15 @@ test('voice call creates a new work session, may stay silent on its result, and 
   }
 })
 
-test('voice hang-up keeps no unheard utterance, continues a pending result in text, and a stopping Host ends the call', { timeout: 240000 }, async () => {
+test('voice hang-up keeps no unheard utterance, continues a pending result in text, and a stopping Host ends the call', { timeout: 240000 }, async t => {
   const model = controlledModel({ utterances: { 1: { hold: true }, 2: UTTERANCES[1] }, result: 'hold' })
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const capture = await voiceFixture([{ silence: 1.5 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 4 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 90 }])
   const host = await voiceHost('hangup', { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   let page
   try {
     const opened = await openNexus(browser, host.url, [instrument, []])
@@ -648,11 +666,13 @@ test('voice hang-up keeps no unheard utterance, continues a pending result in te
   }
 })
 
-test('accurate Realtime voice call: real model creates a new work session from speech and it executes', { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async () => {
+test('accurate Realtime voice call: real model creates a new work session from speech and it executes', { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
   // Real model and real client code; the speech is offline SAPI audio fed through Chromium's fake capture device.
   const capture = await voiceFixture([{ silence: 5 }, { text: '请新建一个工作会话，就用 docs 会话所在的工作区，让它编写一份部署说明。', voice: ZH }, { silence: 90 }])
   const host = await voiceHost('real-create', { endpoint: process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', key: process.env.NEXUS_VOICE_KEY })
+  t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   const created = async () => (await host.status())?.agents?.find(agent => !['nexus-supervisor', 'docs'].includes(agent.id))
   let page
   try {
@@ -713,12 +733,15 @@ test('accurate Realtime voice call: real model creates a new work session from s
   }
 })
 
-test('voice call whose response stalls fails the call instead of hanging the supervisor', { timeout: 180000 }, async () => {
+test('voice call whose response stalls fails the call instead of hanging the supervisor', { timeout: 180000 }, async t => {
   const model = controlledModel({ result: 'stall' })
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
   const capture = await voiceFixture([{ silence: 1.5 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 90 }])
   const host = await voiceHost('stall', { endpoint: `ws://127.0.0.1:${model.server.address().port}`, timeoutMs: 3000 })
+  t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
   let page
   try {
     const opened = await openNexus(browser, host.url, [instrument, []])

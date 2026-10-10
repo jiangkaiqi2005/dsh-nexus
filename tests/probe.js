@@ -1,4 +1,6 @@
-import { writeFile } from 'node:fs/promises'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 import { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 
 export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'llm', 'loader']
@@ -16,6 +18,37 @@ export function apply(ctx, config) {
     const timer = setTimeout(async () => {
       let worker
       try {
+        if (config.scenario.startsWith('storage-')) {
+          const session = ctx.sessions.prepare('nexus-supervisor', { meta: { agentPreset: 'nexus', cwd: process.cwd() } })
+          session.append('model/selection', { provider: 'storage-fixture', model: 'preserved-model' })
+          const handle = await ctx.sessionPersistence.create(session.header)
+          let artifact
+          let malformed
+          try {
+            await handle.append(session.snapshotEvents())
+            await handle.flush()
+            if (config.scenario === 'storage-corrupt') {
+              await handle.close()
+              const sessions = resolve(process.env.DSH_HOME, 'sessions')
+              const path = (await readdir(sessions, { recursive: true })).find(path => path.endsWith('nexus-supervisor/session.v4.jsonl.zstd') || path.endsWith('nexus-supervisor\\session.v4.jsonl.zstd'))
+              if (!path) throw new Error('isolated fixture artifact missing')
+              artifact = resolve(sessions, path)
+              malformed = zstdCompressSync(Buffer.from('{"malformed":true}\n'))
+              await writeFile(artifact, malformed)
+            }
+            const entry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-nexus')
+            await entry.update({ ...entry.options, disabled: false })
+            await ctx.loader.await()
+            let startupErrorName
+            try { await entry.fiber.await() } catch (error) { startupErrorName = error.name }
+            const supervisorPublished = !!ctx.agents.get('nexus-supervisor')
+            await entry.update({ ...entry.options, disabled: true })
+            await ctx.loader.await()
+            const preserved = artifact ? (await readFile(artifact)).equals(malformed) : JSON.stringify((await handle.read()).events) === JSON.stringify(session.snapshotEvents())
+            await writeFile(config.report, JSON.stringify({ startupErrorName, supervisorPublished, preserved }))
+          } finally { await handle.close() }
+          return
+        }
         if (config.scenario === 'late-conflict') {
           const { apply: nexusApply } = await import(config.module)
           const entry = [...ctx.loader.entries()].find(entry => entry.options.name === 'dsh-nexus')
