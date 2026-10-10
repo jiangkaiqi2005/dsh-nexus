@@ -12,6 +12,13 @@ import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepsee
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ToolExecutionResult, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** The user spoke during a call and the model answered, but the endpoint returned no transcript: not the user's words. */
+    'nexus-voice': { kind: 'nexus-voice'; form: 'notice'; summary: string }
+  }
+}
+
 export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number }
 
 /** The client end of a call: where model audio goes and how a failed model connection is reported. */

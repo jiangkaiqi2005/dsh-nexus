@@ -26,7 +26,8 @@ const REPLY_SAMPLES = 2 * 9600
  * deltas, function calls answered on the same connection).
  * @param options.utterances - per utterance index: { transcript, call } | { transcript, text } (the
  *   transcript trails the response) | { hold: true } (committed, then nothing).
- * @param options.result - how a work result is answered: 'speak', 'silent' (empty response) or 'hold' (never).
+ * @param options.result - how a work result is answered: 'speak', 'silent' (empty response), 'hold' (never),
+ *   or 'stall' (the response starts and never finishes).
  */
 const UTTERANCES = {
   1: { transcript: 'UTT-ONE 请让文档会话开始编写接口文档。', call: { name: 'nexus_send_session', arguments: { sessionId: 'docs', text: 'DOC-TASK write the API reference' } } },
@@ -119,6 +120,10 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
         if (fresh.includes('TEXT-AFTER-CALL')) return respond({ text: 'TEXT-REPLY' })
         if (fresh.includes('Automatic work-session result') && audio && result !== 'speak') {
           log.held.push({ connection, result })
+          if (result === 'stall') {
+            send({ type: 'response.created', response: { id: `stall-${connection}`, status: 'in_progress' } })
+            return send({ type: 'response.audio_transcript.delta', response_id: `stall-${connection}`, delta: 'STALL' })
+          }
           return result === 'silent' ? respond({}) : undefined
         }
         respond({ text: fresh.includes('Automatic work-session result') ? 'RESULT-HEARD 文档会话已完成。' : fresh.includes('function_call_output') ? 'DOC-DISPATCHED 已安排文档会话。' : 'HOST-REPLY' })
@@ -128,7 +133,7 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
   return { server, wire, log, ready: new Promise(accept => server.once('listening', accept)) }
 }
 
-async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY', key = 'fixture-not-a-secret' } = {}) {
+async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY', key = 'fixture-not-a-secret', timeoutMs = 30000 } = {}) {
   const home = resolve('.scratch/nexus-v1', `voice-${scenario}-${Date.now()}`)
   const profile = resolve(home, 'profiles/nexus-voice')
   const fixture = resolve(home, 'probe')
@@ -140,7 +145,7 @@ async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY'
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-voice-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-voice-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${credentialRef}\n    endpoint: ${endpoint}\n    timeoutMs: 30000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${credentialRef}\n    endpoint: ${endpoint}\n    timeoutMs: ${timeoutMs}\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
   const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-voice', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), [credentialRef]: key, DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   let output = ''
   child.stdout.on('data', data => { output += data })
@@ -192,6 +197,18 @@ const instrument = delays => {
   const request = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
   window.__streams = []
   window.__states = []
+  // Gateway frames that carry a call failure code, observed whether or not the call bar is still mounted.
+  window.__failures = []
+  const Socket = window.WebSocket
+  window.WebSocket = class extends Socket {
+    constructor(...args) {
+      super(...args)
+      this.addEventListener('message', event => {
+        const text = typeof event.data === 'string' ? event.data : event.data instanceof ArrayBuffer ? new TextDecoder().decode(event.data) : ''
+        for (const match of text.matchAll(/"state":"failed","code":"([A-Z_]+)"/g)) window.__failures.push(match[1])
+      })
+    }
+  }
   new MutationObserver(() => { const bar = document.querySelector('[data-nexus-voice]'); const state = bar?.getAttribute('data-state'); const code = state === 'failed' ? bar.querySelector('[role=status]')?.textContent.match(/(([A-Z_]+))/)?.[1] : undefined; const entry = code ? state + ':' + code : state; if (entry && entry !== window.__states.at(-1)) window.__states.push(entry) }).observe(document, { subtree: true, attributes: true, childList: true })
   navigator.mediaDevices.getUserMedia = async constraints => { const stream = await request(constraints); window.__streams.push(stream); await new Promise(accept => setTimeout(accept, delays.shift() ?? 0)); return stream }
 }
@@ -542,6 +559,9 @@ test('voice call creates a new work session, may stay silent on its result, and 
     const typed = events.find(event => event.type === 'user/message' && textOf(event.data).includes('TEXT-AFTER-CALL'))
     const reply = events.find(event => event.type === 'assistant/message' && textOf(event.data.message) === 'TEXT-REPLY')
     assert.equal(turnOf(typed.seq), turnOf(reply.seq))
+    // Switching back to text is recorded too: the text turn's instructions are the text-only ones.
+    const textSystems = events.filter(event => event.type === 'system/message' && turnOf(event.seq) === turnOf(typed.seq)).map(event => textOf(event.data.message))
+    assert.ok(textSystems.length && textSystems.at(-1).includes('This connection is text-only.'))
     const textConnection = model.log.responses.find(response => response.text === 'TEXT-REPLY').connection
     assert.notEqual(textConnection, 1)
     assert.deepEqual(sessionUpdate(model, textConnection).session.modalities, ['text'])
@@ -595,9 +615,11 @@ test('voice hang-up keeps no unheard utterance, continues a pending result in te
     await start()
     const result = await host.finish()
     await until(async () => (await trackStates(page)).every(track => track === 'ended'), 'microphone released when the Host stopped', 15000)
+    // The bar may unmount with the session before it renders the failure; the Host's failure frame is what counts.
+    await until(async () => (await page.evaluate(() => window.__failures)).includes('UNAVAILABLE'), 'Host sent the call an UNAVAILABLE failure', 15000)
     const history = await page.evaluate(() => window.__states)
-    console.log('call states across the Host stop:', JSON.stringify(history))
-    assert.equal(history.at(-1), 'failed:UNAVAILABLE')
+    console.log('call states across the Host stop:', JSON.stringify(history), JSON.stringify(await page.evaluate(() => window.__failures)))
+    assert.ok(['live', 'failed:UNAVAILABLE'].includes(history.at(-1)))
 
     const events = result.events
     const turnOf = seq => events.findLast(event => event.type === 'turn/start' && event.seq < seq).data.turn
@@ -688,5 +710,44 @@ test('accurate Realtime voice call: real model creates a new work session from s
   } finally {
     await browser.close()
     await host.close()
+  }
+})
+
+test('voice call whose response stalls fails the call instead of hanging the supervisor', { timeout: 180000 }, async () => {
+  const model = controlledModel({ result: 'stall' })
+  await model.ready
+  const capture = await voiceFixture([{ silence: 1.5 }, { text: '请让文档会话开始编写接口文档。', voice: ZH }, { silence: 90 }])
+  const host = await voiceHost('stall', { endpoint: `ws://127.0.0.1:${model.server.address().port}`, timeoutMs: 3000 })
+  const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  let page
+  try {
+    const opened = await openNexus(browser, host.url, [instrument, []])
+    page = opened.page
+    const bar = opened.bar
+    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await until(async () => (await state(bar)) === 'live', 'live call')
+    await until(async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')?.status === 'running', 'docs worker running')
+    await host.release()
+    // The model starts answering the result and never finishes; the user then types during the call.
+    await until(() => model.log.held.length === 1, 'result response stalled')
+    const editor = page.getByRole('textbox').last()
+    await editor.fill('TEXT-DURING-STALL 还在吗？')
+    await editor.press('Enter')
+    await until(async () => (await page.evaluate(() => window.__states)).includes('failed:TIMEOUT'), 'call failed on the unanswering connection', 30000)
+    await until(async () => (await supervisorOf(host))?.status === 'idle', 'supervisor not left waiting', 30000)
+    assert.ok((await trackStates(page)).every(track => track === 'ended'), 'microphone released')
+    const result = await host.finish()
+    const typed = result.events.find(event => event.type === 'user/message' && textOf(event.data).includes('TEXT-DURING-STALL'))
+    assert.ok(typed, 'the typed input stays on record')
+    console.log('voice stall evidence:', host.home)
+  } catch (error) {
+    if (page) await page.screenshot({ path: resolve(host.home, 'output/failure.png') }).catch(() => {})
+    console.log(host.output().slice(-4000))
+    throw error
+  } finally {
+    await browser.close()
+    await host.close()
+    for (const socket of model.server.clients) socket.terminate()
+    await new Promise(accept => model.server.close(accept))
   }
 })
