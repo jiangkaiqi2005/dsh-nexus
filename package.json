@@ -1,6 +1,6 @@
 {
   "name": "dsh-nexus",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "description": "Nexus Realtime supervisor for DeepSeek Harness",
   "type": "module",
