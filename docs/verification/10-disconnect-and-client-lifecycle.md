@@ -60,3 +60,25 @@ git diff --check
 ```
 
 本票不把可控端点或浏览器假设备升级为真实型号、物理设备、Desktop 或干净安装通过。真实端点重连、物理 Desktop 隐藏 / 退出和媒体实机验收仍需后续执行；票 11 的完整首版安装验收不在本票范围。用户既有 package 两文件的版本改动保留且不提交。
+
+## 修复轮 1：评审处置与 Desktop 待验收
+
+原实施提交为 `dc60f3326cca230bc75ca49c28264e4da934f1e3`；原 unitBase 不变。
+
+| 评审意见 | 独立核实与处置 | 状态 |
+| --- | --- | --- |
+| 标准轴 P3：client.js 新增行比同级代码多缩进两空格，违反匹配既有风格 | 确认 ready 解码、媒体预留与帧遍历的新增行多缩进；只删除这些行多出的空格。忽略空白的差分为空，未改变行为。 | fixed，待原评审者复审。 |
+| 规格轴 P2：Desktop 实际隐藏 / 退出尚无实机证据 | 确认票据第 16 行要求该边界。焦点切换与 bundled CLI 的测试均不能替代 Electron 窗口隐藏，本轮未运行实际 shell，没有新增实机通过证据。以下记录环境与待用户步骤。 | 未决，需用户实机验收；票 10 的该验收项仍未完成，不能据此记整体规格 approve。 |
+
+隔离能力调查：本机已安装 `D:/DeepSeekHarness/DeepSeek Harness.exe`，安装包 metadata 为 `0.2.0-rc.2`。按 computer-use 技能初始化 `@oai/sky` 并只读取应用清单，返回 `com.deepseek.dsh`、isRunning=false、windows=[]；没有可复用的隔离窗口。现有 `tests/desktop.test.mjs` 使用隔离 DSH_HOME / DSH_AGENTS_HOME、Desktop 自带 `dsh.cmd` 与 headless Edge，其边界是官方 CLI 和 Web 原生输入，不启动 Electron shell。
+
+读取安装包 `resources/app.asar/lib/main.js` 的实际文件，不依赖仓库旧源码推断安装行为：`resolveDesktopPaths` 由 DSH_HOME 决定 profiles/desktop，但 shell 的快捷键和 background-close-confirmed 使用 `app.getPath("userData")`，packaged 启动还调用 `app.setAsDefaultProtocolClient("dsh")`。本应用代码没有发现显式覆盖 userData 或禁用这项协议注册的隔离验证入口。DSH_HOME 本身不足以证明整个 shell 状态隔离；本轮也没有验证通用 Electron 命令行开关能同时覆盖这些行为。因此停止在只读调查，不猜参数启动窗口，不访问用户 profile / 会话 / 凭据，不修改协议、现用 Desktop 或系统设置。安装 shell 文件的只读副本与调查摘要留在忽略目录 `ticket10-desktop-shell-inspection.js` / `ticket10-desktop-isolation.txt`。这表示安全隔离启动条件尚未证实，不表示 Windows UI 控制不可用或产品存在已证明的代码错误。
+
+待用户实机验收的最短步骤（在用户自行选择的 Desktop 环境执行，记录状态与任务标记即可，不提交凭据）：
+
+1. 确认加载包含本票的 Nexus，关闭自动语音选项以独立观察重启行为；手动接通并派发一个足以观察的工作，记下主会话与任务标记。
+2. 用 Desktop 窗口关闭按钮隐藏到托盘，确认进程仍运行；由托盘重新显示，核对仍是同一主管、通话与任务，工作结果进入该主会话，隐藏没有被当成退出 Harness。记录实际采集 / 播放状态。
+3. 在 Host 仍运行时关闭单独的 Web 语音页面，核对该页面采集 / 播放结束而工作继续，重新进入能看到同一任务结果，只有手动操作才再接通；这一项已有受控官方 Host 证据，实机记录便于与 Desktop 隐藏比较。
+4. 新派发一个在途任务，通过 Harness 的真正“退出”操作结束进程；重新启动并进入原主会话，核对原生记录和中断状态，主管保持闲置，没有重跑该任务。与步骤 2 的隐藏区别分别记录。
+
+本轮仅缩进与证据文档修改：`node --check client.js`、`git diff --exit-code -w -- client.js`、`git diff --check` 均通过；未重跑不受行为变更影响的全量，前述 82 项全量仍是原实施提交的实际结果。

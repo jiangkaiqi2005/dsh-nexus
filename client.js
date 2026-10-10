@@ -9,14 +9,14 @@ window.__ModuleLoader__.load({
     // descriptor with the same validation, so both ends accept exactly the same items.
     const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
     const uplink = value => {
-        if (value?.type === 'ready' && Object.keys(value).length === 1) return value
+      if (value?.type === 'ready' && Object.keys(value).length === 1) return value
       if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (['played', 'hangup'].includes(value.type) && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
       throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played" | "hangup", samples }')
     }
     const frame = value => {
       if (value?.type === 'audio' && isAudio(value.audio)) return value
       if (value?.type === 'flush' && Object.keys(value).length === 1) return value
-        if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
+      if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
       if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
       throw new TypeError('nexusVoice/call frame is malformed')
     }
@@ -81,16 +81,16 @@ window.__ModuleLoader__.load({
         this.flushes = 0
         this.discarded = 0
         this.set('requesting-mic')
-          const handle = remote.call()
-          const frames = handle[Symbol.asyncIterator]()
-          attempt.hangup = () => handle.dispose()
-          let mediaReady = false
-          cleanups.push(() => { if (!mediaReady) handle.dispose() })
-          try {
-            const first = await frames.next()
-            if (!current()) return attempt.release()
-            if (first.done || first.value.state !== 'ready') return end('failed', first.value?.code ?? 'CALL_CLOSED')
-          } catch (error) { return end('failed', error?.code ?? 'CALL_CLOSED') }
+        const handle = remote.call()
+        const frames = handle[Symbol.asyncIterator]()
+        attempt.hangup = () => handle.dispose()
+        let mediaReady = false
+        cleanups.push(() => { if (!mediaReady) handle.dispose() })
+        try {
+          const first = await frames.next()
+          if (!current()) return attempt.release()
+          if (first.done || first.value.state !== 'ready') return end('failed', first.value?.code ?? 'CALL_CLOSED')
+        } catch (error) { return end('failed', error?.code ?? 'CALL_CLOSED') }
         // A startup attempt also checks actual playback permission before claiming to be live.
         let playback
         try { playback = new AudioContext({ sampleRate: 24000 }) } catch { return end('playback-blocked') }
@@ -144,12 +144,12 @@ window.__ModuleLoader__.load({
         attempt.hangup = () => { const samples = flush(); if (this.state === 'live') handle.send({ type: 'hangup', samples }); else handle.dispose() }
         cleanups.push(() => flush())
         try {
-            mediaReady = true
-            handle.send({ type: 'ready' })
-            for (let nextFrame = await frames.next(); !nextFrame.done; nextFrame = await frames.next()) {
-              const frame = nextFrame.value
+          mediaReady = true
+          handle.send({ type: 'ready' })
+          for (let nextFrame = await frames.next(); !nextFrame.done; nextFrame = await frames.next()) {
+            const frame = nextFrame.value
             if (!current()) continue // Let the Host consume the final report before disposing this stream.
-              if (frame.type === 'state' && ['connecting', 'live'].includes(frame.state)) this.set(frame.state)
+            if (frame.type === 'state' && ['connecting', 'live'].includes(frame.state)) this.set(frame.state)
             else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
             else if (frame.type === 'flush') {
               const played = flush()
