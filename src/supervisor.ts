@@ -67,7 +67,10 @@ interface Call {
   since: number
   /** A new connection being opened, for a failed transport or a compacted conversation. */
   recovering?: Promise<void>
-  /** Open a new connection; given the current one, replace it only if it is still quiet then. */
+  /**
+   * Open a new connection. Given the current one, it stays in use until the new one has replayed the
+   * conversation, and is replaced only if nothing was said, answered or recorded meanwhile.
+   */
   reconnect(previous?: RealtimeConnection): void
   /** End the call; a failure code is reported to the client, whose stream is still open. */
   end(failure?: string): void
@@ -304,8 +307,12 @@ export class Supervisor implements Agent {
       since: 0,
       reconnect: previous => {
         const recovering: Promise<void> = connect(previous)
-          .then(replaced => { if (replaced && this.call === call) link.state('live') })
-          .catch(failure => call.end(failure instanceof RealtimeFailure ? failure.code : 'CONNECTION_FAILED'))
+          .then(() => { if (!previous && this.call === call) link.state('live') })
+          .catch(failure => {
+            // A replacement that could not open leaves the call on its connection; the next boundary tries again.
+            if (previous && this.call === call && call.connection === previous) return this.ctx.logger.warn(`nexus voice: the compacted conversation could not be replayed on a new connection: ${failure instanceof Error ? failure.message : String(failure)}`)
+            call.end(failure instanceof RealtimeFailure ? failure.code : 'CONNECTION_FAILED')
+          })
           .finally(() => { if (call.recovering === recovering) call.recovering = undefined })
         call.recovering = recovering
       },
@@ -325,12 +332,11 @@ export class Supervisor implements Agent {
     let recovered = false
     let accepted = false
     const connect = async (previous?: RealtimeConnection) => {
+      const exchanges = previous?.exchanges
       const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
       const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
       if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
       call.abort.signal.throwIfAborted()
-      // Something was said meanwhile: keep the connection, the next boundary tries again.
-      if (previous && (call.connection !== previous || !previous.quiet)) return false
       const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
         audio: link.audio,
         flush: link.flush,
@@ -339,6 +345,8 @@ export class Supervisor implements Agent {
         committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
         ignored: error => this.ctx.logger.info(`nexus voice: endpoint error left the call up: ${error.message}`),
         failed: error => {
+          // A replacement still opening fails through its open; the call keeps its connection.
+          if (call.connection !== connection) return
           lostPlayback(connection)
           // Only a live call recovers transport failure; the user's end aborts this owner first.
           if (!accepted || recovered || this.call !== call || !['CONNECTION_CLOSED', 'CONNECTION_FAILED'].includes(error.code)) return call.end(error.code)
@@ -348,17 +356,21 @@ export class Supervisor implements Agent {
           call.reconnect()
         },
       })
+      if (!previous) call.connection = connection
+      const since = this.session.seq
+      const surface = this.session.surface.nodes.join()
+      try { await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`) }
+      catch (error) { connection.close(); throw error }
       if (previous) {
-        // Audio the client may still be playing is accounted for on the new connection; nothing is flushed.
-        link.state('connecting')
+        // Its replay lacks whatever was said, answered or recorded while it opened: keep the call as it is.
+        if (call.connection !== previous || !previous.quiet || previous.exchanges !== exchanges || this.voiceTurns.length || this.session.surface.nodes.join() !== surface) return connection.close()
+        // The call stays live throughout; audio the client may still be playing is accounted for on the new connection, nothing is flushed.
         connection.takeOver(previous.retire())
+        call.connection = connection
       }
-      call.connection = connection
-      call.since = this.session.seq
-      await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
+      call.since = since
       // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
       for (const notice of this.notices) connection.insert(notice)
-      return true
     }
     this.call = call
     signal.addEventListener('abort', hangUp, { once: true })
@@ -431,9 +443,19 @@ export class Supervisor implements Agent {
       if (voice) { voice.server.listen(onText); response = await abortable(voice.server.response, signal) }
       else response = await abortable(connection.request(this.surface(), onText, assembly.tools, instructions), signal)
       text = response.text
+      /** A response that leaves no message: its reported usage stays as a content-free attempt, as native settlements do. */
+      const settleEmpty = () => {
+        if (!response.usage) return this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
+        const event = this.session.append('assistant/attempt', { turn, step, stream: [...stream.snapshot()] })
+        this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: event.seq } } })
+      }
       if (connection.voice && !text && !response.calls.length) {
         // The model chose not to answer aloud; nothing is recorded as said.
-        this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
+        if (response.usage) {
+          push({ type: 'usage', usage: response.usage }, response.settledAt)
+          push({ type: 'finish', reason: { kind: 'stop' } }, response.settledAt)
+        }
+        settleEmpty()
         return false
       }
       const completed = new Set(this.session.snapshotEvents().flatMap(event => event.type === 'tool/result' ? [event.data.message.toolCallId] : []))
@@ -450,7 +472,7 @@ export class Supervisor implements Agent {
       if (response.usage) push({ type: 'usage', usage: response.usage }, response.settledAt)
       push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.settledAt)
       if (!text && !calls.length) {
-        this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
+        settleEmpty()
         return response.calls.length > 0
       }
       const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...calls], source: this.options })

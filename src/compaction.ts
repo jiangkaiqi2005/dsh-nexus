@@ -19,25 +19,42 @@ export function summaryTarget(setting: string | undefined, fallback: ModelTarget
   return setting && slash > 0 ? { provider: setting.slice(0, slash), model: setting.slice(slash + 1) } : { provider: fallback.provider, model: fallback.model }
 }
 
-interface Summarizer { summarize(input: unknown, agent: unknown, signal?: AbortSignal): Promise<unknown> }
+/** The parts of `@deepseek-ai/dsh-compaction-basic` 0.2.0-rc.2 this module relies on beyond the abstract engine. */
+interface SummaryPolicy { summarizationProvider?: string; summarizationModel?: string }
+interface BasicEngine {
+  /** The engine's documented sole subclass hook (`BasicCompactionEngine.summarize`), used by every compaction path. */
+  summarize(input: unknown, agent: unknown, signal?: AbortSignal): Promise<unknown>
+  /** Resolved service config; its summarization fields, top level or per model policy, outrank the routed target. */
+  config: SummaryPolicy & { modelPolicies: readonly SummaryPolicy[] }
+}
 
 /**
  * The native engine with its summary written by `target` instead of the conversation's own
  * route. The supervisor's Realtime route has no Host model adapter, so the native summarizer
  * cannot use it; every other step — range checks, the log-recorded bracket, the checkpoint
  * and its framing, persistence — stays the engine's own. The engine itself is not changed.
+ * Summarization fields of the engine's own config are cleared for these calls, so the Nexus
+ * setting decides the summary model; its other policy fields (such as maxTokens) still apply.
+ * Depends on `BasicCompactionEngine` internals of 0.2.0-rc.2: re-verify on Harness upgrades.
  */
 export function withSummaryModel(engine: CompactionEngine, target: () => ModelTarget): CompactionEngine {
-  const native = engine as unknown as Partial<Summarizer>
-  if (typeof native.summarize !== 'function') return engine
-  const summarize = native.summarize
+  const native = engine as unknown as Partial<BasicEngine>
+  if (typeof native.summarize !== 'function' || !native.config) throw new Error('Nexus compaction requires the native basic compaction engine')
+  const { summarize, config } = native as BasicEngine
+  const cleared = { summarizationProvider: undefined, summarizationModel: undefined }
+  // The engine's own context: read through a service, `ctx` is the reader's context, which cannot reach the engine's injected services.
+  const ctx = Object.getOwnPropertyDescriptor(engine, 'ctx')?.value
+  const summarizer = Object.create(engine, {
+    ctx: { value: ctx },
+    config: { value: { ...config, summarizationProvider: '', summarizationModel: '', modelPolicies: config.modelPolicies.map(policy => ({ ...policy, ...cleared })) } },
+  })
   return Object.create(engine, {
     summarize: {
       value: (input: unknown, agent: { session: Session }, signal?: AbortSignal) => {
         const config = target()
         // Only the fields the summarizer routes with; mutations still go through the real session.
         const session = { id: agent.session.id, requestHeader: () => ({ config }), toolHistory: () => agent.session.toolHistory() }
-        return summarize.call(engine, input, { session, options: config }, signal)
+        return summarize.call(summarizer, input, { session, options: config }, signal)
       },
     },
   })
@@ -47,6 +64,7 @@ export function withSummaryModel(engine: CompactionEngine, target: () => ModelTa
  * The span automatic compaction replaces, as the native selection: from the first node after a
  * leading system message up to a priced recent tail of at least `retain` tokens, never cutting
  * between a tool call and its result. Null when nothing before that tail can be compacted.
+ * Mirrors the range selection of `@deepseek-ai/dsh-compaction-basic` 0.2.0-rc.2, which is not exported.
  */
 export function compactableRange(session: Session, measurement: TokenMeasurement, retain: number) {
   const nodes = measurement.nodes
@@ -54,13 +72,14 @@ export function compactableRange(session: Session, measurement: TokenMeasurement
   const first = session.eventAt(nodes[0].seq)?.type === 'system/message' ? 1 : 0
   let kept = 0
   let keepFrom = nodes.length
-  do kept += nodes[--keepFrom].tokens
-  while (keepFrom > first && kept < retain)
+  do {
+    kept += nodes[--keepFrom].tokens
+  } while (keepFrom > first && kept < retain)
   while (keepFrom > first && !toolPairingBalancedBefore(session, nodes[keepFrom].seq)) keepFrom--
   return keepFrom > first ? { start: nodes[first].seq, end: nodes[keepFrom - 1].seq } : null
 }
 
-/** The native `/compact` command's reports of expected failures, by failure code. */
+/** The native `/compact` command's reports of expected failures, by failure code, as `@deepseek-ai/dsh-command-compact` 0.2.0-rc.2 words them. */
 export const MANUAL_FAILURES: Record<string, string> = {
   busy: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
   cancelled: 'Compaction cancelled.',

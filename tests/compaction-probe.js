@@ -2,7 +2,7 @@ import { writeFile, access } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
-export const inject = ['agents', 'sessionController', 'sessionPersistence', 'sessionProjections', 'llm', 'loader', 'commands', 'agentDefaultModel', 'tokenMeter']
+export const inject = ['agents', 'sessionController', 'sessionPersistence', 'sessionProjections', 'llm', 'loader', 'commands', 'agentDefaultModel', 'tokenMeter', 'agentPresets']
 const SUPERVISOR = 'nexus-supervisor'
 const WORKER = 'compaction-worker'
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
@@ -64,12 +64,14 @@ export function apply(ctx, config) {
         }
         const command = line => ctx.commands.execute(agent, line, [], new AbortController().signal)
         if (config.defaultModel) await ctx.agentDefaultModel.saveSelection(config.defaultModel)
-        // A recording client end of a call: its states, flushes and the audio of each connection generation.
-        const link = report.link = { states: [], flushes: 0, failed: [], samples: [0] }
+        // A recording client end of a call: its states, flushes and the audio delivered by the first connection and by later ones
+        // (the supervisor's private call state, observed by this fixture only).
+        const link = report.link = { states: [], flushes: 0, failed: [], samples: [0, 0] }
+        let firstConnection
         const callLink = {
-          audio: delta => { link.samples[link.samples.length - 1] += Buffer.byteLength(delta, 'base64') >> 1 },
+          audio: delta => { link.samples[agent.call?.connection === firstConnection ? 0 : 1] += Buffer.byteLength(delta, 'base64') >> 1 },
           flush: () => { link.flushes++ },
-          state: state => { link.states.push(state); if (state === 'connecting') link.samples.push(0) },
+          state: state => link.states.push(state),
           failed: code => link.failed.push(code),
         }
         let live
@@ -86,9 +88,20 @@ export function apply(ctx, config) {
           }
           if (step.command) (report.commands ??= []).push(await command(step.command))
           if (step.list) report.commandsLater = ctx.commands.list(agent).map(item => item.name)
-          if (step.call === 'start') live = await agent.startCall(callLink, new AbortController().signal)
+          if (step.call === 'start') { live = await agent.startCall(callLink, new AbortController().signal); firstConnection ??= agent.call.connection }
+          // Native summarization fields as a user could configure them for the preset's engine, top level and for each summary route.
+          if (step.summarizationOverride) {
+            const engine = ctx.agentPresets.serviceFor(agent, 'compaction')
+            const broken = { summarizationProvider: 'nexus-test-summary', summarizationModel: 'broken' }
+            engine.config = { ...engine.config, ...broken, modelPolicies: [...engine.config.modelPolicies, ...['configured-sum', 'default-sum'].map(model => ({ provider: 'nexus-test-summary', model, ...broken }))] }
+            report.overridden = engine.config.summarizationModel
+          }
+          // The user starts speaking as soon as a call rebuild begins (the supervisor's private call state, observed by this fixture only).
+          if (step.speakOnRebuild) {
+            const watch = setInterval(() => { if (agent.call?.recovering) { clearInterval(watch); report.spokeOnRebuild = true; live.append(Buffer.alloc(3200).toString('base64')) } }, 5)
+          }
           if (step.call === 'end') { live.end(); await settle() }
-          if (step.until === 'rebuilt') while (link.states.at(-1) !== 'live') await sleep(20)
+          if (step.until === 'rebuilt') while (agent.call?.connection === firstConnection) await sleep(20)
           if (step.speak) {
             // Speech on the rebuilt connection stops playback; the client heard half of the first connection's last reply.
             const flushes = link.flushes

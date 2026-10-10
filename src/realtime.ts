@@ -1,6 +1,7 @@
 import WebSocket from 'ws'
 import { randomUUID } from 'node:crypto'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { ToolCallId, type ToolCallBlock, type ToolSchema, type UserMessage, type AssistantMessage, type TokenUsage } from '@deepseek-ai/dsh-llm'
 
 export const MODEL = 'qwen3.8-omni-flash-realtime'
@@ -143,6 +144,8 @@ export class RealtimeConnection {
   /** Calls whose response never completed: their arguments arrived, but the Host must not dispatch them. */
   readonly unfinishedCalls: ToolCallBlock[] = []
   private lostPlayback = false
+  /** Committed utterances and started responses so far: what the server conversation gained by itself. */
+  exchanges = 0
 
   constructor(endpoint: string, key: string, private signal: AbortSignal, private timeoutMs: number, private hooks?: VoiceHooks) {
     this.voice = !!hooks
@@ -175,6 +178,7 @@ export class RealtimeConnection {
     if (reply && reply === this.host) { this.asked = false; this.arm(reply) }
     if (!reply) { reply = new Reply(); reply.silenced = true }
     reply.id = id
+    this.exchanges++
     this.live.set(id, reply)
     this.active = reply
   }
@@ -335,6 +339,7 @@ export class RealtimeConnection {
     reply.calls.set(item.call_id, { type: 'tool-call', id: ToolCallId(item.call_id), name: item.name, arguments: item.arguments })
   }
   private commit(itemId: string) {
+    this.exchanges++
     const reply = new Reply()
     reply.timer = setTimeout(() => this.fail(new RealtimeFailure('TIMEOUT')), this.timeoutMs)
     this.unassigned.push(reply)
@@ -370,6 +375,8 @@ export class RealtimeConnection {
       if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
       const message = event.type === 'user/message' ? event.data : event.data.message
       if (this.present.has(message.id)) continue // Generated on, spoken into, or inserted into this connection.
+      // This server conversation still holds the history a later checkpoint replaced; a new connection replays the summary.
+      if (!initial && message.role === 'user' && isCompactCheckpointSource(message.source)) continue
       this.item(message)
     }
     // Surface order is not seq order once a replacement stands where older history stood.

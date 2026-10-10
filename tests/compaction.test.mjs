@@ -20,35 +20,56 @@ const SECOND = Buffer.alloc(48000).toString('base64')
  * A controlled Realtime endpoint that records every request's replayed items and
  * every connection's items. It dispatches a follow-up to the worker once a work
  * result follows a compaction checkpoint, and reports fixed usage on every
- * response.done. On a voice connection each reply also speaks one second, and
- * the first audio input is reported as speech that is never committed.
+ * response.done. On a voice connection each reply also speaks one second. The
+ * first audio input of a connection is reported as speech that is never
+ * committed, or with speech: 'commit' as a transcribed utterance the server
+ * answers silently. opening maps a connection index to 'delay' (its session
+ * acknowledgement arrives 1.5 s late) or 'reject' (it closes on configuration).
  */
-async function endpoint() {
+async function endpoint({ opening = {}, speech } = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await new Promise(accept => server.once('listening', accept))
   const requests = []
+  const requestConnections = []
   const connections = []
+  const closed = []
   let dispatched = false
   server.on('connection', socket => {
     const index = connections.length
     const items = []
     connections.push(items)
+    socket.on('close', () => { closed[index] = true })
     let voice = false
     let spoke = false
     const send = event => socket.send(JSON.stringify(event))
     send({ type: 'session.created' })
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString())
-      if (event.type === 'session.update') { voice = event.session.modalities.includes('audio'); send({ type: 'session.updated', session: event.session }) }
+      if (event.type === 'session.update') {
+        voice = event.session.modalities.includes('audio')
+        if (opening[index] === 'reject') return socket.close()
+        const updated = () => send({ type: 'session.updated', session: event.session })
+        if (opening[index] === 'delay') setTimeout(updated, 1500)
+        else updated()
+      }
       if (event.type === 'conversation.item.create') items.push(event.item)
       if (event.type === 'input_audio_buffer.append' && !spoke) {
         spoke = true
         send({ type: 'input_audio_buffer.speech_started', item_id: `speech-${index}` })
         send({ type: 'input_audio_buffer.speech_stopped', item_id: `speech-${index}` })
+        if (speech === 'commit') {
+          const item = `speech-${index}`
+          send({ type: 'input_audio_buffer.committed', item_id: item })
+          send({ type: 'conversation.item.input_audio_transcription.completed', item_id: item, transcript: 'SPOKEN-DURING-REBUILD' })
+          const id = `resp-${crypto.randomUUID()}`
+          send({ type: 'response.created', response: { id } })
+          send({ type: 'response.done', response: { id, status: 'completed', usage: USAGE } })
+        }
       }
       if (event.type !== 'response.create') return
       const texts = items.map(itemText)
       requests.push(texts)
+      requestConnections.push(index)
       const id = `resp-${crypto.randomUUID()}`
       send({ type: 'response.created', response: { id } })
       const last = texts.at(-1) ?? ''
@@ -63,16 +84,16 @@ async function endpoint() {
       send({ type: 'response.done', response: { id, status: 'completed', usage: USAGE } })
     })
   })
-  return { server, requests, connections, url: `ws://127.0.0.1:${server.address().port}` }
+  return { server, requests, requestConnections, connections, closed, url: `ws://127.0.0.1:${server.address().port}` }
 }
 
 /** Run one scenario in an isolated official Host and return the probe report with the endpoint's requests. */
-async function scenario(name, { steps, nexus = '', defaultModel } = {}) {
+async function scenario(name, { steps, nexus = '', defaultModel, model: endpointOptions } = {}) {
   const home = resolve('.scratch/nexus-v1', `compaction-${name}-${Date.now()}`)
   const profile = resolve(home, 'profiles/nexus-compaction')
   const fixture = resolve(home, 'probe')
   for (const dir of [fixture, resolve(profile, 'node_modules')]) await mkdir(dir, { recursive: true })
-  const model = await endpoint()
+  const model = await endpoint(endpointOptions)
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-compaction-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
   await copyFile(resolve('tests/compaction-probe.js'), resolve(fixture, 'index.js'))
   await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-compaction-probe\n      name: nexus-compaction-probe\n      config:\n        dir: ${JSON.stringify(home)}\n        steps: ${JSON.stringify(steps)}\n${defaultModel ? `        defaultModel: ${JSON.stringify(defaultModel)}\n` : ''}`)
@@ -94,9 +115,10 @@ async function scenario(name, { steps, nexus = '', defaultModel } = {}) {
     assert.ok(report, 'no probe report: ' + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-3000))
     assert.equal(report.error, undefined, report.stack)
     const connections = model.connections.map(items => items.map(itemText))
-    await writeFile(resolve(home, 'requests.json'), JSON.stringify({ requests: model.requests, connections }))
+    const { requests, requestConnections, closed } = model
+    await writeFile(resolve(home, 'requests.json'), JSON.stringify({ requests, requestConnections, connections, closed }))
     console.log(`compaction ${name} evidence:`, home)
-    return { ...report, requests: model.requests, connections }
+    return { ...report, requests, requestConnections, connections, closed }
   } finally {
     await host.close()
     for (const socket of model.server.clients) socket.terminate()
@@ -111,7 +133,7 @@ const userText = event => event.data.content.map(part => part.text).join('')
 test('the main conversation compacts natively between turns once it exceeds the Nexus budget', { timeout: 180000 }, async () => {
   const report = await scenario('auto', {
     nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
-    steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { long: 7 }, { worker: 'AFTER-COMPACTION-WORK' }],
+    steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { summarizationOverride: true }, { long: 7 }, { worker: 'AFTER-COMPACTION-WORK' }],
   })
   const { events, requests } = report
   const starts = of(events, 'compaction/start')
@@ -129,8 +151,10 @@ test('the main conversation compacts natively between turns once it exceeds the 
   assert.equal(turnEnd.data.reason.kind, 'completed')
   assert.ok(end.seq < turnEnd.seq)
   assert.ok(events.filter(event => event.seq > events.find(item => item.type === 'turn/start' && item.data.turn === turn).seq && event.seq < start.seq).at(-1).type === 'step/end', 'no step is open while compacting')
-  // The configured summary model wrote it, and the summarizer saw the conversation.
+  // The configured summary model wrote it, also over summarization fields of the native engine's own config, and the summarizer saw the conversation.
+  assert.equal(report.overridden, 'broken')
   assert.deepEqual([summary.data.provider, summary.data.model], ['nexus-test-summary', 'configured-sum'])
+  assert.ok(report.summaries.every(call => call.model === 'configured-sum'))
   assert.equal(report.summaries[0].purpose, 'compaction')
   assert.equal(report.summaries[0].sessionId, 'nexus-supervisor')
   assert.match(report.summaries[0].input, /KESTREL-9/)
@@ -170,7 +194,7 @@ test('/compact is listed before the first turn and compacts with the default mod
     defaultModel: { provider: 'nexus-test-summary', model: 'default-sum' },
     steps: [
       { command: '/compact' },
-      { prompt: 'Remember the codename KESTREL-9.' }, { prompt: 'Second request.' }, { prompt: 'Third request.' },
+      { prompt: 'Remember the codename KESTREL-9.' }, { summarizationOverride: true }, { prompt: 'Second request.' }, { prompt: 'Third request.' },
       { command: '/compact' }, { command: '/compact now' },
       { prompt: 'After manual compaction.' },
     ],
@@ -191,7 +215,8 @@ test('/compact is listed before the first turn and compacts with the default mod
   const turnBoundaries = events.filter(event => event.type === 'turn/start' || event.type === 'turn/end')
   assert.equal(turnBoundaries.filter(event => event.seq < start.seq).at(-1).type, 'turn/end')
   assert.ok(turnBoundaries.filter(event => event.seq > start.seq && event.seq < end.seq).length === 0)
-  // The default model of ordinary sessions wrote it.
+  // The default model of ordinary sessions wrote it, also over summarization fields of the native engine's own config.
+  assert.equal(report.overridden, 'broken')
   assert.deepEqual([summary.data.provider, summary.data.model], ['nexus-test-summary', 'default-sum'])
   assert.match(commands[1].result.text, /^Compacted \d+ history items \(~\d+ tokens\)\.$/)
   assert.equal(commands[1].result.kind, 'success')
@@ -249,8 +274,8 @@ test('during a call a compaction rebuilds the model connection at a turn boundar
   const rebuilt = connections[1]
   assert.ok(rebuilt.findIndex(item => item.includes(CHECKPOINT)) === 0, 'the rebuilt connection opens with the summary')
   assert.ok(!rebuilt.includes('user: Remember the codename KESTREL-9.'))
-  // The client saw the rebuild truthfully, and nothing it was playing was flushed by it.
-  assert.deepEqual(link.states.slice(0, 2), ['connecting', 'live'])
+  // The call stayed live throughout: the new connection replaced the old one only once it had replayed the conversation, and nothing the client was playing was flushed.
+  assert.deepEqual(link.states, [])
   assert.deepEqual(link.failed, [])
   assert.equal(report.flushesBeforeSpeech, 0)
   // Speech on the rebuilt connection stopped audio delivered before the rebuild: the cut is recorded truthfully.
@@ -378,4 +403,65 @@ test('the Nexus conversation lists /compact on first open; budget and summary mo
     await writeFile(resolve(evidence, 'host.txt'), current.output())
     throw error
   }
+})
+
+test('during a call a replacement connection that cannot open leaves the call on its connection, which never receives the summary as a new item', { timeout: 180000 }, async () => {
+  const report = await scenario('call-rejected', {
+    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    model: { opening: { 1: 'reject', 2: 'reject' } },
+    steps: [
+      { call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 7 },
+      { prompt: 'After failed rebuild.' }, { prompt: 'After rebuild.' }, { until: 'rebuilt' }, { prompt: 'Final.' }, { call: 'end' },
+    ],
+  })
+  const { events, requests, requestConnections, connections, closed, link } = report
+  assert.ok(of(events, 'compaction/start').length >= 1)
+  // Two replacements failed to open; neither ended the call or answered anything.
+  assert.deepEqual(link.failed, [])
+  assert.deepEqual(link.states, [])
+  assert.ok(closed[1] && closed[2])
+  assert.ok(!requestConnections.includes(1) && !requestConnections.includes(2))
+  // The call kept answering on its connection, whose server conversation keeps the originals and gets no checkpoint item.
+  const kept = requests.findIndex(items => items.includes('user: After failed rebuild.'))
+  assert.equal(requestConnections[kept], 0)
+  assert.ok(requests[kept].includes('user: Remember the codename KESTREL-9.'))
+  assert.ok(!connections[0].some(item => item.includes(CHECKPOINT)))
+  // A later boundary replaced it with a connection that replays the summary.
+  const rebuilt = connections.length - 1
+  assert.ok(rebuilt >= 3)
+  assert.equal(connections[rebuilt].findIndex(item => item.includes(CHECKPOINT)), 0)
+  assert.ok(!connections[rebuilt].includes('user: Remember the codename KESTREL-9.'))
+  assert.equal(requestConnections[requests.findIndex(items => items.includes('user: Final.'))], rebuilt)
+  assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
+})
+
+test('during a call speech while a replacement opens keeps the old connection; a silent answer records its usage', { timeout: 180000 }, async () => {
+  const report = await scenario('call-speech', {
+    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    model: { opening: { 1: 'delay' }, speech: 'commit' },
+    steps: [
+      { call: 'start' }, { speakOnRebuild: true }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 7 },
+      { until: 'rebuilt' }, { prompt: 'After rebuild.' }, { call: 'end' },
+    ],
+  })
+  const { events, requests, requestConnections, connections, closed, link } = report
+  assert.equal(report.spokeOnRebuild, true)
+  // The utterance arrived on the old connection while the replacement was opening, so the replacement was discarded unused.
+  assert.ok(closed[1])
+  assert.ok(!requestConnections.includes(1))
+  assert.deepEqual(link.failed, [])
+  assert.deepEqual(link.states, [])
+  const spoken = events.find(event => sourceOf(event) === 'user' && userText(event) === 'SPOKEN-DURING-REBUILD')
+  assert.ok(spoken, 'the utterance is recorded')
+  // The model answered it silently: no message, but the reported usage is kept as a content-free attempt.
+  const attempt = events.find(event => event.type === 'assistant/attempt' && event.seq > spoken.seq)
+  assert.ok(attempt, 'the silent answer is settled')
+  assert.deepEqual(attempt.data.stream.find(record => record.chunk.type === 'usage').chunk.usage, { inputTokens: 234, outputTokens: 5, totalTokens: 1239, cacheReadTokens: 1000 })
+  assert.equal(report.tokenUsage.totals.outputTokens, 5 * (of(events, 'assistant/message').length + of(events, 'assistant/attempt').length))
+  // The next boundary rebuilt the call from the conversation that includes the utterance.
+  const rebuilt = connections[2]
+  assert.equal(rebuilt.findIndex(item => item.includes(CHECKPOINT)), 0)
+  assert.ok(rebuilt.includes('user: SPOKEN-DURING-REBUILD'))
+  assert.equal(requestConnections[requests.findIndex(items => items.includes('user: After rebuild.'))], 2)
+  assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
 })
