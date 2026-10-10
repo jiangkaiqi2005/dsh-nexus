@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, writeFile, readFile, copyFile, symlink } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { spawn } from 'node:child_process'
 import { chromium } from 'playwright'
 import { WebSocketServer } from 'ws'
+import { startHost } from './host-process.mjs'
 
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
 const root = resolve('.')
@@ -65,36 +65,48 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_TITLES_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n    timeoutMs: 30000\n`)
   const reports = []
   const ui = {}
+  // Every Host runs under the repository launcher so its whole process tree is gone before the next one reuses this home.
+  const launch = ready => startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-titles', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_TITLES_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' } }, async child => {
+    let output = ''
+    child.stdout.on('data', bytes => { output += bytes })
+    child.stderr.on('data', bytes => { output += bytes })
+    return ready(child, () => output.replace(/\?token=\S+/g, '?token=[redacted]'), () => output)
+  })
   try {
-    for (const phase of [1, 2, 3]) {
+    for (const phase of [1, 2, 3, 4]) {
       const report = resolve(home, `phase-${phase}.json`)
-      await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-titles-probe\n      name: nexus-titles-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n        phase: ${phase}\n`)
-      const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-titles', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_TITLES_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-      let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
-      try {
+      await writeFile(resolve(fixture, 'patch.yml'), `- insert:
+    - id: nexus-titles-probe
+      name: nexus-titles-probe
+      config:
+        report: ${JSON.stringify(report)}
+        workspace: ${JSON.stringify(workspace)}
+        phase: ${phase}
+`)
+      const host = await launch(async (child, output) => {
         let result
         for (let i = 0; i < 1200; i++) { try { result = JSON.parse(await readFile(report, 'utf8')); break } catch {} if (child.exitCode !== null) break; await delay(100) }
-        assert.ok(result, `no phase ${phase} report (exit ${child.exitCode}, signal ${child.signalCode}): ` + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-4000))
+        assert.ok(result, `no phase ${phase} report (exit ${child.exitCode}, signal ${child.signalCode}): ` + output().slice(-4000))
         assert.equal(result.error, undefined, result.stack)
-        reports.push(result)
-      } finally {
-        child.kill('SIGTERM')
-        await Promise.race([new Promise(accept => child.once('exit', accept)), delay(5000)])
-      }
+        return { result }
+      })
+      await host.close()
+      reports.push(host.result)
     }
-    // A fourth Host without the probe serves the native web client: sidebar titles and how dispatches are shown.
+    // A last Host without the probe serves the native web client: sidebar titles and how dispatches are shown.
     await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus'] } } }))
-    const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-titles', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_TITLES_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-    let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
+    const host = await launch(async (child, output, raw) => {
+      let url
+      for (let i = 0; i < 300 && !url; i++) { url = raw().match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]; if (!url) await delay(100) }
+      assert.ok(url, 'official Host did not start for the web client: ' + output().slice(-3000))
+      return { url }
+    })
     let browser
     let page
     try {
-      let url
-      for (let i = 0; i < 300 && !url; i++) { url = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]; await delay(100) }
-      assert.ok(url, 'official Host did not start for the web client')
       browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true })
       page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1360, height: 900 } })
-      await page.goto(url)
+      await page.goto(host.url)
       const tree = page.getByRole('tree', { name: '会话' })
       // First-run dialogs arrive one after another; dismiss them until the sidebar has been free of them for a while.
       for (let begin = Date.now(), clear = 0; clear < 10; await delay(200)) {
@@ -119,8 +131,7 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
       throw error
     } finally {
       await browser?.close()
-      child.kill('SIGTERM')
-      await Promise.race([new Promise(accept => child.once('exit', accept)), delay(5000)])
+      await host.close()
     }
     await writeFile(resolve(home, 'result.json'), JSON.stringify({ reports, sent, ui }))
     console.log('title evidence:', home)
@@ -128,7 +139,7 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
     for (const socket of server.clients) socket.terminate()
     await new Promise(accept => server.close(accept))
   }
-  const [one, two, three] = reports
+  const [one, two, three, four] = reports
 
   // Native web client (the Desktop UI code, headless): sidebar titles, and a dispatch shown as the user's own message
   // where an older nexus-dispatch record still shows as a collapsed execution request.
@@ -144,13 +155,14 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   const worker = (report, id) => report.workers.find(item => item.id === id)
   const titles = events => events.filter(event => event.type === 'session/title').map(event => [event.data.title, event.data.source.kind])
 
-  // Main session: created as Nexus; an older fallback title becomes Nexus on restart; a user rename survives a restart.
+  // Main session: created as Nexus; an automatic title, fallback or model-generated, becomes Nexus on restart; a user rename survives a restart.
   assert.deepEqual([one.startup.title?.title, one.startup.title?.source.kind], ['Nexus', 'user'])
   assert.deepEqual([two.startup.title?.title, two.startup.title?.source.kind], ['Nexus', 'user'])
-  assert.deepEqual([three.startup.title?.title, three.startup.title?.source.kind], ['我的管家', 'user'])
-  assert.ok(three.startup.quiet, 'the restored supervisor appends nothing at startup, its user title included')
-  assert.deepEqual(titles(three.events), [['Nexus', 'user'], ['PHASE-ONE dispatch', 'fallback'], ['Nexus', 'user'], ['我的管家', 'user']])
-  assert.equal(three.listed.find(item => item.sessionId === 'nexus-supervisor').title, '我的管家', 'the session list (sidebar source) shows the user title')
+  assert.deepEqual([three.startup.title?.title, three.startup.title?.source.kind], ['Nexus', 'user'])
+  assert.deepEqual([four.startup.title?.title, four.startup.title?.source.kind], ['我的管家', 'user'])
+  assert.ok(four.startup.quiet, 'the restored supervisor appends nothing at startup, its user title included')
+  assert.deepEqual(titles(four.events), [['Nexus', 'user'], ['PHASE-ONE dispatch', 'fallback'], ['Nexus', 'user'], ['Model named supervisor', 'provider'], ['Nexus', 'user'], ['我的管家', 'user']])
+  assert.equal(four.listed.find(item => item.sessionId === 'nexus-supervisor').title, '我的管家', 'the session list (sidebar source) shows the user title')
 
   // The new session: untitled until the dispatch (a user message with the Nexus marker), then native fallback and model titles.
   const created = one.workers.find(item => item.id.startsWith('session-'))
@@ -164,12 +176,12 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   assert.equal(one.listed.find(item => item.sessionId === created.id).title, 'Title run-titled-new: 实现登录页并写测')
   assert.deepEqual(one.received[created.id][0], [dispatchText], 'the work model receives exactly the dispatched text as the user request')
   // A later dispatch after a restart reaches the now titled session and leaves its title alone.
-  assert.ok(worker(three, created.id).events.some(event => event.type === 'user/message' && isDispatch(event.data.source) && textOf(event.data) === 'run-new phase two from Nexus'))
-  assert.deepEqual(titles(worker(three, created.id).events), titles(created.events))
+  assert.ok(worker(four, created.id).events.some(event => event.type === 'user/message' && isDispatch(event.data.source) && textOf(event.data) === 'run-new phase two from Nexus'))
+  assert.deepEqual(titles(worker(four, created.id).events), titles(created.events))
 
   // Existing sessions: idle and running both accept the dispatch, and their titles do not change.
   for (const [id, text, delivery] of [['titled-idle', 'run-idle followup from Nexus', 'followup'], ['titled-busy', 'steered-busy change from Nexus', 'steer']]) {
-    const events = worker(three, id).events
+    const events = worker(four, id).events
     assert.deepEqual(titles(events), titles(worker(one, id).events))
     assert.equal(titles(events).length, 2, `${id} keeps its one native title pair`)
     const call = sent.find(item => item.name === 'nexus_send_session' && JSON.parse(item.arguments).sessionId === id)
@@ -179,17 +191,17 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
     assert.match(textOf(events.findLast(event => event.type === 'assistant/message').data.message), new RegExp(`Worker executed: ${text}`))
   }
   // The older, untitled Nexus session is not backfilled.
-  const legacy = worker(three, 'legacy-worker').events
+  const legacy = worker(four, 'legacy-worker').events
   assert.ok(legacy.some(event => event.type === 'user/message' && event.data.source.kind === 'nexus-dispatch'))
   assert.deepEqual(titles(legacy), [])
 
-  // Relay: across three Host runs the supervisor mirrored exactly the user's own inputs to work sessions, each once, and every work turn once.
-  const admitted = three.events.filter(event => event.type === 'agent/inbox/spliced').flatMap(event => event.data.inserted)
+  // Relay: across four probe Host runs the supervisor mirrored exactly the user's own inputs to work sessions, each once, and every work turn once.
+  const admitted = four.events.filter(event => event.type === 'agent/inbox/spliced').flatMap(event => event.data.inserted)
   const mirrored = admitted.filter(message => message.source.kind === 'nexus-user-input').map(message => `${message.source.sessionId}#${message.source.messageId}`)
-  const direct = three.workers.flatMap(item => item.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user' && !isDispatch(event.data.source)).map(event => ({ id: `${item.id}#${event.data.id}`, text: textOf(event.data) })))
+  const direct = four.workers.flatMap(item => item.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user' && !isDispatch(event.data.source)).map(event => ({ id: `${item.id}#${event.data.id}`, text: textOf(event.data) })))
   assert.deepEqual(direct.map(item => item.text).sort(), ['Existing idle task', 'hold-busy existing task', 'user-direct ONE: make it blue', 'user-direct TWO: and add a footer'])
   assert.deepEqual([...mirrored].sort(), direct.map(item => item.id).sort())
-  const dispatchIds = new Set(three.workers.flatMap(item => item.events.filter(event => event.type === 'user/message' && (isDispatch(event.data.source) || event.data.source.kind === 'nexus-dispatch')).map(event => event.data.id)))
+  const dispatchIds = new Set(four.workers.flatMap(item => item.events.filter(event => event.type === 'user/message' && (isDispatch(event.data.source) || event.data.source.kind === 'nexus-dispatch')).map(event => event.data.id)))
   assert.equal(dispatchIds.size, 5, 'three phase-one dispatches, one phase-two dispatch and the older logged dispatch')
   assert.ok(!mirrored.some(key => dispatchIds.has(key.split('#')[1])))
   const results = admitted.filter(message => message.source.kind === 'nexus-work-result').map(message => `${message.source.sessionId}#${message.source.turn}`)

@@ -80,9 +80,16 @@ export function apply(ctx, config) {
           await settle()
           await prompt(created.sessionId, 'user-direct-2', 'user-direct TWO: and add a footer')
           await settle()
+          // A model-generated title (as a native title refresh with a provider would write) is automatic too.
+          const early = agent.session.snapshotEvents().find(event => event.type === 'user/message' && event.data.source.kind === 'user')
+          agent.session.append('session/title', { title: 'Model named supervisor', messageSeqs: [early.seq], source: { kind: 'provider', provider: 'session-title-first-prompt-llm', model: { provider: 'title-worker', model: 'worker-model' } } })
+        } else if (config.phase === 3) {
+          await prompt(agent.id, 'phase-3', 'PHASE-THREE hello')
+          await agent.whenIdle()
+          await settle()
           await ctx.sessionController.rename({ sessionId: agent.id, title: '我的管家' })
         } else {
-          await prompt(agent.id, 'phase-3', 'PHASE-THREE hello')
+          await prompt(agent.id, 'phase-4', 'PHASE-FOUR hello')
           await agent.whenIdle()
           await settle()
         }
