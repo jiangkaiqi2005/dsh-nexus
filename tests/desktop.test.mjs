@@ -49,6 +49,7 @@ test('Desktop bundled CLI activates the packed Nexus, queries registered project
       wire.push(event)
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'response.create') {
+        socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
         requests++
         if (requests === 1) {
           const item = { type: 'function_call', call_id: 'desktop-workspaces', name: 'nexus_list_workspaces', arguments: '{}' }

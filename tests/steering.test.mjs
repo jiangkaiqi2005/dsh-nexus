@@ -50,6 +50,7 @@ async function steeringProfile(real = false) {
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') items.push({ role: event.item.role, text: event.item.content?.map(part => part.text).join('\n') ?? event.item.output ?? '' })
       if (event.type !== 'response.create') return
+      socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
       // A new connection replays the whole history; only items after the last answer are new to the model.
       const fresh = items.slice(Math.max(answered, items.findLastIndex(item => item.role === 'assistant') + 1)).map(item => item.text).join('\n')
       answered = items.length

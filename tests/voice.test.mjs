@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile, symlink, copyFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { chromium } from 'playwright'
-import { WebSocketServer } from 'ws'
+import WebSocket, { WebSocketServer } from 'ws'
 import { voiceFixture } from './voice-audio.mjs'
 import { startHost } from './host-process.mjs'
 
@@ -32,7 +32,10 @@ const REPLY_SAMPLES = 2 * 9600
  *   transcript trails the response) | { transcript, text, paced: n } (n audio deltas, one per 150 ms) |
  *   { transcript, text, burst: n } (n audio deltas at once) | { hold: true } (committed, then nothing).
  *   late: true on an utterance replays packets of the response its onset cancelled during its own response;
- *   strayError: true sends, after its speech_started, the error the endpoint gives a cancel with no active response.
+ *   strayError: true sends, after its speech_started, the error the endpoint gives a cancel with no active response;
+ *   uncancelled: true lets its onset leave the response being generated running; slow: ms delays the answer to
+ *   its commit, which is dropped (folded) when the user starts speaking again meanwhile. A text with a call
+ *   is spoken and then ends in that call.
  * @param options.result - how a work result is answered: 'speak', 'silent' (empty response), 'hold' (never),
  *   or 'stall' (the response starts and never finishes).
  * @param options.speechDelayMs - how long after the onset speech_started is reported (the real endpoint lags).
@@ -45,7 +48,7 @@ const UTTERANCES = {
 function controlledModel({ withhold = false, utterances = UTTERANCES, result = 'speak', speechDelayMs = 0, onOnset } = {}) {
   const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
   const wire = []
-  const log = { connections: 0, closed: 0, utterances: [], appendedBytes: 0, voicedFrames: 0, responses: [], held: [], cancelled: [], late: [], absorbed: 0, onsets: 0 }
+  const log = { connections: 0, closed: 0, utterances: [], appendedBytes: 0, voicedFrames: 0, responses: [], held: [], cancelled: [], late: [], absorbed: 0, onsets: 0, folded: [] }
   server.on('connection', socket => {
     const connection = ++log.connections
     socket.on('close', () => log.closed++)
@@ -79,8 +82,8 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
         send({ type: 'response.audio_transcript.delta', response_id: old, delta: 'LATE-TEXT' })
         send({ type: 'response.done', response: { id: old, status: 'completed', output: [] } })
       }
-      if (call) {
-        const item = { type: 'function_call', call_id: `call-${id}`, name: call.name, arguments: JSON.stringify(call.arguments) }
+      const item = call && { type: 'function_call', call_id: `call-${id}`, name: call.name, arguments: JSON.stringify(call.arguments) }
+      if (item && !text) {
         send({ type: 'response.output_item.added', response_id: id, item: { id: `item-${id}`, ...item } })
         send({ type: 'response.function_call_arguments.done', response_id: id, item_id: `item-${id}`, ...item })
         return send({ type: 'response.done', response: { id, status: 'completed', output: [item] } })
@@ -103,7 +106,9 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
       const done = () => {
         send({ type: 'response.audio_transcript.done', response_id: id, transcript: said })
         send({ type: 'response.audio.done', response_id: id })
-        send({ type: 'response.done', response: { id, status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'audio', transcript: said }] }] } })
+        // A spoken reply may end in a tool call.
+        if (item) send({ type: 'response.function_call_arguments.done', response_id: id, item_id: `item-${id}`, ...item })
+        send({ type: 'response.done', response: { id, status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'audio', transcript: said }] }, ...(item ? [item] : [])] } })
       }
       if (!paced) { for (let index = 0; index < count; index++) delta(index); return done() }
       let index = 0
@@ -124,8 +129,10 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
       started = () => {
         clearTimeout(timer)
         started = undefined
-        // The exact model cancels a response it is still generating and reports that before speech_started.
-        if (current) {
+        // The exact model cancels a response it is still generating and reports that before speech_started;
+        // uncancelled lets it run to completion instead, as an endpoint may for a response it is finishing.
+        if (current && utterances[index]?.uncancelled) log.responses.find(response => response.id === current.id).atOnset = log.responses.find(response => response.id === current.id).deltas
+        else if (current) {
           const { id, cancel, said } = current
           cancel()
           log.cancelled.push(id)
@@ -150,14 +157,23 @@ function controlledModel({ withhold = false, utterances = UTTERANCES, result = '
       send({ type: 'conversation.item.created', item: { id: itemId, type: 'message', role: 'user', content: [{ type: 'input_audio' }] } })
       const plan = utterances[index] ?? { transcript: `UTT-${index}`, text: `VOICE-${index}` }
       if (plan.hold) return
-      if (plan.call || plan.paced || plan.burst) {
-        send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
-        respond(plan)
-      } else {
-        // The transcript may trail the response it belongs to.
-        respond({ text: plan.text })
-        send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
+      const answer = () => {
+        if (plan.call || plan.paced || plan.burst) {
+          send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
+          respond(plan)
+        } else {
+          // The transcript may trail the response it belongs to.
+          respond({ text: plan.text })
+          send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
+        }
       }
+      if (!plan.slow) return answer()
+      // As probed: the endpoint does not answer a commit by itself once the user speaks again before it starts the response.
+      setTimeout(() => {
+        if (log.onsets <= index) return answer()
+        log.folded.push(index)
+        send({ type: 'conversation.item.input_audio_transcription.completed', item_id: itemId, transcript: plan.transcript })
+      }, plan.slow)
     }
     send({ type: 'session.created', session: { id: `session-${connection}` } })
     socket.on('message', bytes => {
@@ -857,11 +873,11 @@ test('voice call whose response stalls fails the call instead of hanging the sup
   }
 })
 
-/** Run one controlled call: Host, endpoint and a headless Edge whose fake microphone plays the capture. */
-async function controlledCall(t, scenario, model, capture, run) {
+/** Run one call: Host, endpoint (controlled, or a relay to the real one with key) and a headless Edge whose fake microphone plays the capture. */
+async function controlledCall(t, scenario, model, capture, run, { key } = {}) {
   t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
   await model.ready
-  const host = await voiceHost(scenario, { endpoint: `ws://127.0.0.1:${model.server.address().port}` })
+  const host = await voiceHost(scenario, { endpoint: `ws://127.0.0.1:${model.server.address().port}`, key })
   t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
   t.after(() => browser.close())
@@ -943,9 +959,13 @@ test('voice barge-in: speech stops the reply and its queued audio, late packets 
     assert.equal(cut.data.interrupted, true)
     assert.match(textOf(cut.data.message), /^LONG-ONE part-1/)
     assert.ok(!events.some(event => event.type === 'assistant/message' && textOf(event.data.message).includes('LATE-TEXT')), 'late text of the cancelled reply is not recorded')
-    // Turn 2 starts with the playback notice, then the user's words, then the complete reply 2.
+    // The playback notice reached the model while the user spoke, before the endpoint answered the utterance;
+    // turn 2 records it as the server holds it: the user's words, the notice, then the complete reply 2.
+    const noticeSent = text => model.wire.find(event => event.type === 'conversation.item.create' && event.item.content?.[0]?.text.includes('speaking over your spoken reply "' + text))
+    assert.ok(noticeSent('LONG-ONE').at < model.log.responses.find(response => response.text?.startsWith('VOICE-TWO')).at, 'the first notice preceded the reply to utterance 2')
+    assert.ok(noticeSent('LONG-THREE').at < model.log.responses.find(response => response.text?.startsWith('VOICE-FOUR')).at, 'the second notice preceded the reply to utterance 4')
     const [notice] = noticesIn(turns[1])
-    assert.ok(notice.seq < user('UTT-TWO').seq)
+    assert.ok(notice.seq > user('UTT-TWO').seq && notice.seq < replyIn(turns[1])[0].seq)
     const [, heard, total] = textOf(notice.data).match(CUT).map(Number)
     assert.ok(heard > 0 && heard < total && Math.abs(total - first.deltas * 0.4) < 0.05, `heard ${heard} of ${total}`)
     assert.equal(textOf(replyIn(turns[1])[0].data.message), 'VOICE-TWO 好的。 part-1 part-2 part-3 part-4')
@@ -956,6 +976,8 @@ test('voice barge-in: speech stops the reply and its queued audio, late packets 
     const [, heardLater, totalLater] = textOf(later.data).match(CUT).map(Number)
     assert.ok(heardLater > 0 && heardLater < 7 && Math.abs(totalLater - 8) < 0.05, `heard ${heardLater} of ${totalLater}`)
     assert.match(textOf(later.data), /LONG-THREE/)
+    // The unrelated endpoint error left the call up and is on the Host log.
+    assert.ok(result.logs.some(line => /nexus voice: endpoint error left the call up: .*invalid_request_error/.test(line)), JSON.stringify(result.logs))
     // Normal exchange resumed: replies 4 and 5 were heard whole, no further notices.
     assert.equal(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice').length, 2)
     assert.match(textOf(replyIn(turns[4])[0].data.message), /^VOICE-FIVE/)
@@ -1020,6 +1042,12 @@ test('voice interleaving: a tool that finishes while the user speaks, and a work
     assert.equal(turnOf(reply('RESULT-HEARD').seq), turnOf(notice.seq))
     assert.equal(turnOf(reply('VOICE-FOUR').seq), turnOf(user('UTT-FOUR').seq))
     assert.notEqual(turnOf(notice.seq), turnOf(user('UTT-FOUR').seq))
+    // Native turns follow input identity, so they are not in speaking order; the record keeps the order in which
+    // the replies were actually generated in its stream chunk times, not the time each turn recorded them.
+    const spokenAt = text => { const first = reply(text).data.stream.find(item => item.type === 'text-chunks' || item.chunk?.type === 'text-delta'); return first.time0 ?? first.time }
+    assert.ok(spokenAt('VOICE-WHILE-TOOL') < spokenAt('TOOL-CONTINUED'), 'reply 2 was generated before the tool continuation of turn 1')
+    assert.ok(spokenAt('VOICE-FOUR') < spokenAt('RESULT-HEARD'), 'the reply to utterance 4 was generated before the result reply')
+    assert.ok(Math.abs(spokenAt('VOICE-WHILE-TOOL') - response('VOICE-WHILE-TOOL').at) < 1000)
     // The Host cancelled no work: docs finished its dispatched turn normally.
     const docs = result.workers.find(worker => worker.id === 'docs')
     assert.equal(docs.events.findLast(event => event.type === 'turn/end').data.reason.kind, 'completed')
@@ -1029,82 +1057,173 @@ test('voice interleaving: a tool that finishes while the user speaks, and a work
   })
 })
 
-test('accurate Realtime voice call: the user speaks over a long spoken reply, playback stops, the new question is answered and the record shows what was cut', { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
-  // Real model and real client code; the speech is offline SAPI audio fed through Chromium's fake capture device.
-  const capture = await voiceFixture([{ silence: 5 }, { text: '请详细讲一讲长城的历史，多讲一些细节。', voice: ZH }, { silence: 7 }, { text: '先停一下，一加一等于几？', voice: ZH }, { silence: 20 }, { text: '好的，谢谢你。', voice: ZH }, { silence: 25 }])
-  const host = await voiceHost('real-barge', { endpoint: process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', key: process.env.NEXUS_VOICE_KEY })
-  t.after(() => host.close())
-  const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
-  t.after(() => browser.close())
-  let page
-  try {
-    const opened = await openNexus(browser, host.url, [instrument, []])
-    page = opened.page
-    const bar = opened.bar
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
-    await until(async () => (await state(bar)) === 'live', 'live call', 30000)
-    const began = Date.now()
-    // The interruption: the Host flushes the client, which must go silent at once.
-    await until(async () => (await page.evaluate(() => window.__flushes)) >= 1, 'first flush', 90000)
-    await until(async () => (await audible(page)) === 0, 'playback stopped at the interruption', 1500)
-    const cutNodes = await page.evaluate(() => window.__nodes.filter(item => item.stoppedAt !== undefined && item.stoppedAt < item.when + item.duration).length)
-    // The capture ends about 37 s after the call starts; wait past it until every utterance was handled.
-    await delay(Math.max(0, began + 45000 - Date.now()))
-    await until(async () => { const own = await supervisorOf(host); return own?.users >= 3 && own.status === 'idle' }, 'last utterance handled', 120000)
-    await delay(8000)
-    await until(async () => (await audible(page)) === 0, 'last reply played out', 30000)
-    const client = { flushes: Number(await bar.getAttribute('data-flushes')), discarded: Number(await bar.getAttribute('data-discarded-samples')), scheduled: Number(await bar.getAttribute('data-played-samples')), cutNodes }
-    assert.equal(await state(bar), 'live')
+test('voice edge timing: a reply the endpoint completes after the user spoke keeps its tool call, and an utterance folded into the next one gets no reply of another', { timeout: 300000 }, async t => {
+  const model = controlledModel({ utterances: {
+    1: { transcript: 'UTT-ONE 请列出所有会话。', text: 'LIST-FIRST', paced: 12, call: { name: 'nexus_list_sessions', arguments: {} } },
+    2: { transcript: 'UTT-TWO 等一下。', text: 'VOICE-TWO 好。', uncancelled: true },
+    3: { transcript: 'UTT-THREE 那个，', text: 'NEVER-SAID', slow: 1500 },
+    4: { transcript: 'UTT-FOUR 一加一等于几？', text: 'VOICE-FOUR 二。' },
+  } })
+  const capture = await voiceFixture([{ silence: 1.5 }, { text: '请列出所有会话。', voice: ZH }, { silence: 1.4 }, { text: '等一下。', voice: ZH }, { silence: 4 }, { text: '那个，', voice: ZH }, { silence: 1 }, { text: '一加一等于几？', voice: ZH }, { silence: 15 }])
+  await controlledCall(t, 'edge', model, capture, async ({ host, page, bar }) => {
+    await until(() => model.log.responses.some(response => response.text?.startsWith('VOICE-FOUR')), 'fourth reply', 90000)
+    await until(async () => { const own = await supervisorOf(host); return own?.status === 'idle' && own.ends >= 4 }, 'four turns completed', 60000)
+    await delay(2500)
+    const scheduled = Number(await bar.getAttribute('data-played-samples'))
+    assert.equal(await audible(page), 0)
     await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
     await until(async () => (await state(bar)) === 'idle', 'call ended')
-    await page.screenshot({ path: resolve(host.home, 'output/voice-call.png') })
 
     const result = await host.finish()
     const events = result.events
     const turnOf = seq => events.findLast(event => event.type === 'turn/start' && event.seq < seq).data.turn
-    const voiced = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
-    const notices = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice' && event.data.source.summary === 'interrupted playback')
-    const replies = events.filter(event => event.type === 'assistant/message')
-    const summary = {
-      transcripts: voiced.map(event => ({ turn: turnOf(event.seq), text: textOf(event.data) })),
-      replies: replies.map(event => ({ turn: turnOf(event.seq), text: textOf(event.data.message), interrupted: event.data.interrupted ?? false, model: event.data.message.source.model })),
-      notices: notices.map(event => ({ turn: turnOf(event.seq), text: textOf(event.data) })),
-      client,
-      turnEnds: events.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind),
-    }
-    await writeFile(resolve(host.home, 'output/summary.json'), JSON.stringify(summary, null, 2))
-    console.log('real voice barge-in summary:', JSON.stringify(summary))
-    // The model heard all three requests.
-    assert.match(textOf(voiced[0].data), /长城/)
-    const question = voiced.find(event => /一加一|1\s*\+\s*1|几/.test(textOf(event.data)))
-    assert.ok(question, 'the interrupting question was transcribed')
-    assert.match(textOf(voiced.at(-1).data), /谢谢/)
-    // The long reply was cut: the client discarded queued audio, and the record says how much was heard.
-    const long = replies.find(event => turnOf(event.seq) === turnOf(voiced[0].seq))
-    assert.ok(long, 'the long reply is on record')
-    assert.ok(client.flushes >= 1 && client.discarded > 0 && client.cutNodes > 0)
-    const [notice] = notices
-    assert.ok(notice && notice.seq > long.seq && notice.seq < question.seq, 'the cut is recorded before the interrupting question')
-    const [, heard, total] = textOf(notice.data).match(CUT).map(Number)
-    assert.ok(heard < total, `heard ${heard} of ${total}`)
-    // The interrupting question got its own answer, and the conversation went on normally afterwards.
-    const answer = replies.find(event => turnOf(event.seq) === turnOf(question.seq))
-    assert.ok(answer && textOf(answer.data.message), 'the new question was answered')
-    const last = replies.find(event => turnOf(event.seq) === turnOf(voiced.at(-1).seq))
-    assert.ok(last && !last.data.interrupted, 'the last reply was not interrupted')
-    assert.ok(!notices.some(event => turnOf(event.seq) === turnOf(voiced.at(-1).seq)), 'nothing was cut before the last utterance')
-    for (const reply of summary.replies) assert.equal(reply.model, MODEL)
-    assert.ok(summary.turnEnds.every(kind => kind === 'completed'))
-    console.log('real voice barge-in evidence:', host.home)
-  } catch (error) {
-    if (page) await page.screenshot({ path: resolve(host.home, 'output/failure.png') }).catch(() => {})
-    console.log(host.output().slice(-4000))
-    // Keep the native record of a failed real run for diagnosis.
-    const record = await host.finish().catch(() => undefined)
-    if (record) await writeFile(resolve(host.home, 'output/failure-events.json'), JSON.stringify(record, null, 1))
-    throw error
-  } finally {
-    await browser.close()
-    await host.close()
-  }
+    const user = text => events.find(event => event.type === 'user/message' && textOf(event.data).includes(text))
+    const replyIn = turn => events.filter(event => event.type === 'assistant/message' && turnOf(event.seq) === turn)
+    // Reply 1 was still being generated when utterance 2 started, and the endpoint completed it with its tool call.
+    const first = model.log.responses.find(response => response.text === 'LIST-FIRST')
+    assert.ok(first.atOnset < first.deltas, `reply 1 was being generated at the onset: ${first.atOnset} of ${first.deltas}`)
+    const one = turnOf(user('UTT-ONE').seq)
+    const [spoken, continued] = replyIn(one)
+    assert.equal(spoken.data.interrupted, undefined)
+    assert.match(textOf(spoken.data.message), /^LIST-FIRST part-1/)
+    // The completed call is answered, not dropped: it ran in turn 1 and its output was continued there.
+    const call = events.find(event => event.type === 'tool/call' && event.data.name === 'nexus_list_sessions')
+    assert.ok(call && spoken.data.message.content.some(part => part.type === 'tool-call' && part.id === call.data.callId))
+    const output = events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === call.data.callId)
+    assert.equal(output.data.message.isError, false)
+    assert.ok(model.wire.some(event => event.type === 'conversation.item.create' && event.item.type === 'function_call_output' && event.item.call_id === call.data.callId))
+    assert.deepEqual([turnOf(call.seq), turnOf(output.seq)], [one, one])
+    assert.match(textOf(continued.data.message), /^DOC-DISPATCHED/)
+    // Its audio after the onset was not played, and the notice of what was heard precedes the reply to utterance 2.
+    const total = model.log.responses.reduce((sum, response) => sum + response.deltas, 0)
+    assert.equal(scheduled, 9600 * (total - (first.deltas - first.atOnset)))
+    const notices = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice')
+    assert.equal(notices.length, 1)
+    assert.equal(turnOf(notices[0].seq), turnOf(user('UTT-TWO').seq))
+    assert.match(textOf(replyIn(turnOf(user('UTT-TWO').seq))[0].data.message), /^VOICE-TWO/)
+    // Utterance 3 was folded into utterance 4 by the endpoint: it has no reply, and the reply to 4 is not recorded as its.
+    assert.deepEqual(model.log.folded, [3])
+    assert.ok(!model.log.responses.some(response => response.text === 'NEVER-SAID'))
+    assert.equal(replyIn(turnOf(user('UTT-THREE').seq)).length, 0)
+    assert.equal(textOf(replyIn(turnOf(user('UTT-FOUR').seq))[0].data.message), 'VOICE-FOUR 二。')
+    assert.ok(events.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
+    console.log('voice edge evidence:', host.home)
+  })
 })
+
+/**
+ * A recording relay between the Host and the real endpoint: it forwards both ways unchanged and keeps
+ * the shape of what was exchanged (event types, ids, statuses, item texts, timestamps), never audio or
+ * request headers, so a real run can show what reached the model and when.
+ */
+function relay(endpoint) {
+  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+  const wire = []
+  const log = { responses: [], cancelled: [], late: [], absorbed: 0 }
+  const record = (direction, data) => {
+    const event = JSON.parse(data.toString())
+    if (event.type === 'input_audio_buffer.append' || event.type === 'response.audio.delta' || event.type?.endsWith('transcript.delta')) return
+    const entry = { direction, at: Date.now(), type: event.type }
+    if (event.item) entry.item = { type: event.item.type, role: event.item.role, call_id: event.item.call_id, text: event.item.content?.map(part => part.text ?? '').join('\n').slice(0, 400) }
+    if (event.item_id) entry.item_id = event.item_id
+    if (event.transcript) entry.transcript = event.transcript
+    if (event.response) entry.response = { id: event.response.id, status: event.response.status, reason: event.response.status_details?.reason }
+    if (event.error) entry.error = event.error
+    if (event.type === 'response.created') log.responses.push({ id: event.response.id, at: entry.at })
+    if (event.type === 'response.done' && event.response.status === 'cancelled') log.cancelled.push(event.response.id)
+    wire.push(entry)
+  }
+  server.on('connection', (socket, request) => {
+    const url = new URL(endpoint)
+    for (const [name, value] of new URL(request.url, 'http://relay').searchParams) url.searchParams.set(name, value)
+    const upstream = new WebSocket(url, { headers: { Authorization: request.headers.authorization } })
+    const pending = []
+    upstream.on('open', () => { for (const data of pending.splice(0)) upstream.send(data) })
+    upstream.on('message', data => { record('s2c', data); if (socket.readyState === 1) socket.send(data.toString()) })
+    upstream.on('close', () => socket.close())
+    upstream.on('error', () => socket.close())
+    socket.on('message', data => { record('c2s', data); if (upstream.readyState === 1) upstream.send(data.toString()); else pending.push(data.toString()) })
+    socket.on('close', () => upstream.close())
+  })
+  return { server, wire, log, ready: new Promise(accept => server.once('listening', accept)) }
+}
+
+// Real model and real client code through the relay; the speech is offline SAPI audio fed through Chromium's fake
+// capture device. The gap after the first request decides whether the user speaks while the long reply is still
+// being generated (the endpoint cancels it) or after it was generated, while it plays (only playback stops).
+for (const [scenario, gap, generating] of [['real-barge', 7, false], ['real-barge-generating', 2, true]]) {
+  test(`accurate Realtime voice call: the user speaks over a long reply ${generating ? 'still being generated' : 'already generated and playing'}; playback stops, the model is told what was heard before it answers, and the question is answered`, { skip: process.env.NEXUS_REAL_VOICE !== '1', timeout: 420000 }, async t => {
+    const capture = await voiceFixture([{ silence: 5 }, { text: '请详细讲一讲长城的历史，多讲一些细节。', voice: ZH }, { silence: gap }, { text: '先停一下，一加一等于几？', voice: ZH }, { silence: 20 }, { text: '好的，谢谢你。', voice: ZH }, { silence: 25 }])
+    const model = relay(process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime')
+    await controlledCall(t, scenario, model, capture, async ({ host, page, bar }) => {
+      const began = Date.now()
+      // The interruption: the Host flushes the client, which must go silent at once.
+      await until(async () => (await page.evaluate(() => window.__flushes)) >= 1, 'first flush', 90000)
+      await until(async () => (await audible(page)) === 0, 'playback stopped at the interruption', 1500)
+      const cutNodes = await page.evaluate(() => window.__nodes.filter(item => item.stoppedAt !== undefined && item.stoppedAt < item.when + item.duration).length)
+      // Wait past the end of the capture until every utterance was handled.
+      await delay(Math.max(0, began + 30000 + gap * 1000 - Date.now()))
+      await until(async () => { const own = await supervisorOf(host); return own?.users >= 3 && own.status === 'idle' }, 'last utterance handled', 120000)
+      await delay(8000)
+      await until(async () => (await audible(page)) === 0, 'last reply played out', 30000)
+      const client = { flushes: Number(await bar.getAttribute('data-flushes')), discarded: Number(await bar.getAttribute('data-discarded-samples')), scheduled: Number(await bar.getAttribute('data-played-samples')), cutNodes }
+      assert.equal(await state(bar), 'live')
+      await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+      await until(async () => (await state(bar)) === 'idle', 'call ended')
+      await page.screenshot({ path: resolve(host.home, 'output/voice-call.png') })
+
+      const result = await host.finish()
+      const events = result.events
+      const turnOf = seq => events.findLast(event => event.type === 'turn/start' && event.seq < seq).data.turn
+      const voiced = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
+      const notices = events.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice' && event.data.source.summary === 'interrupted playback')
+      const replies = events.filter(event => event.type === 'assistant/message')
+      // On the wire: the notice the Host sent, and the endpoint events around it.
+      const noticeSent = model.wire.find(event => event.direction === 'c2s' && event.type === 'conversation.item.create' && event.item.text.includes('speaking over'))
+      const onset = noticeSent && model.wire.findLast(event => event.direction === 's2c' && event.type === 'input_audio_buffer.speech_started' && event.at <= noticeSent.at)
+      const between = noticeSent && onset ? model.wire.filter(event => event.direction === 's2c' && event.type === 'response.created' && event.at >= onset.at && event.at <= noticeSent.at) : []
+      const summary = {
+        transcripts: voiced.map(event => ({ turn: turnOf(event.seq), text: textOf(event.data) })),
+        replies: replies.map(event => ({ turn: turnOf(event.seq), text: textOf(event.data.message), interrupted: event.data.interrupted ?? false, model: event.data.message.source.model })),
+        notices: notices.map(event => ({ turn: turnOf(event.seq), text: textOf(event.data) })),
+        client,
+        wire: { cancelled: model.log.cancelled, noticeSentAfterOnsetMs: noticeSent && onset ? noticeSent.at - onset.at : undefined, responsesStartedBeforeNotice: between.length, nextResponseAfterNoticeMs: noticeSent ? model.wire.find(event => event.direction === 's2c' && event.type === 'response.created' && event.at > noticeSent.at)?.at - noticeSent.at : undefined },
+        turnEnds: events.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind),
+      }
+      await writeFile(resolve(host.home, 'output/summary.json'), JSON.stringify(summary, null, 2))
+      console.log('real voice barge-in summary:', JSON.stringify(summary))
+      // The model heard all three requests.
+      assert.match(textOf(voiced[0].data), /长城/)
+      const question = voiced.find(event => /一加一|1\s*\+\s*1|几/.test(textOf(event.data)))
+      assert.ok(question, 'the interrupting question was transcribed')
+      assert.match(textOf(voiced.at(-1).data), /谢谢/)
+      // The long reply was stopped: the client discarded queued audio.
+      const long = replies.find(event => turnOf(event.seq) === turnOf(voiced[0].seq))
+      assert.ok(long, 'the long reply is on record')
+      assert.ok(client.flushes >= 1 && client.discarded > 0 && client.cutNodes > 0)
+      if (generating) {
+        // The endpoint cancelled the reply it was generating; the record keeps the delivered prefix, marked interrupted.
+        assert.ok(model.log.cancelled.length >= 1, 'the endpoint cancelled the reply being generated')
+        assert.equal(long.data.interrupted, true)
+      }
+      // The model was told what was heard before it answered the interruption: the notice went out after the onset
+      // and before any response started, and the record keeps it with the interrupting speech.
+      assert.ok(noticeSent && onset, 'the notice was sent during the interrupting speech')
+      assert.equal(between.length, 0, 'no response started between the onset and the notice')
+      const [notice] = notices
+      assert.ok(notice && notice.seq > long.seq, 'the notice is recorded after the long reply')
+      const [, heard, total] = textOf(notice.data).match(CUT).map(Number)
+      assert.ok(heard < total, `heard ${heard} of ${total}`)
+      // The interrupting question got its own answer, and the conversation went on normally afterwards.
+      const answer = replies.find(event => turnOf(event.seq) === turnOf(question.seq))
+      assert.ok(answer && textOf(answer.data.message), 'the new question was answered')
+      assert.ok(notice.seq < answer.seq, 'the notice precedes the answer')
+      const last = replies.find(event => turnOf(event.seq) === turnOf(voiced.at(-1).seq))
+      assert.ok(last && !last.data.interrupted, 'the last reply was not interrupted')
+      assert.ok(!notices.some(event => turnOf(event.seq) === turnOf(voiced.at(-1).seq)), 'nothing was cut before the last utterance')
+      for (const reply of summary.replies) assert.equal(reply.model, MODEL)
+      assert.ok(summary.turnEnds.every(kind => kind === 'completed'))
+      console.log('real voice barge-in evidence:', host.home)
+    }, { key: process.env.NEXUS_VOICE_KEY })
+  })
+}

@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { randomUUID } from 'node:crypto'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { ToolCallId, type ToolCallBlock, type ToolSchema } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, type ToolCallBlock, type ToolSchema, type UserMessage } from '@deepseek-ai/dsh-llm'
 
 export const MODEL = 'qwen3.8-omni-flash-realtime'
 // Text and voice instructions share these two halves and differ only in the clause between them and the closing line.
@@ -23,8 +23,11 @@ function errorDetail(error: unknown): string {
   }).join(', ')
 }
 
-/** interrupted: the user's speech stopped the response; text is what arrived before that, and calls it never finished are absent. */
-export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean }
+/**
+ * interrupted: the server cancelled the response because the user started speaking; text is what arrived
+ * before that, and calls it never finished are absent. at: when the server finished the response.
+ */
+export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean; at: number }
 
 /** A delivered spoken reply whose playback the user's speech stopped, in seconds of audio. */
 export interface Cut { text: string; heard: number; total: number }
@@ -33,23 +36,25 @@ export interface Cut { text: string; heard: number; total: number }
 class Reply {
   /** The server's response id, once it started this response. */
   id?: string
-  /** The user spoke while this response was live: what follows is neither played nor recorded. */
-  cut = false
+  /** No more of its audio is played: the user spoke while it was live, or nobody asked for it. */
+  silenced = false
   interrupted = false
   text = ''
+  /** Text deltas with the time each arrived, so a later listener records when they were generated. */
+  private readonly deltas: [string, number][] = []
   readonly calls = new Map<string, ToolCallBlock>()
   readonly settled: Promise<Response>
   resolve!: (response: Response) => void
   reject!: (error: Error) => void
   timer?: ReturnType<typeof setTimeout>
-  private onText?: (text: string) => void
+  private onText?: (text: string, time: number) => void
   constructor() {
     this.settled = new Promise((resolve, reject) => { this.resolve = resolve; this.reject = reject })
     this.settled.catch(() => {})
   }
-  push(delta: string) { this.text += delta; this.onText?.(delta) }
-  /** Replay text received so far, then forward live deltas. */
-  listen(onText: (text: string) => void) { if (this.text) onText(this.text); this.onText = onText }
+  push(delta: string) { const time = Date.now(); this.text += delta; this.deltas.push([delta, time]); this.onText?.(delta, time) }
+  /** Replay text received so far with its arrival times, then forward live deltas. */
+  listen(onText: (text: string, time: number) => void) { for (const [delta, time] of this.deltas) onText(delta, time); this.onText = onText }
 }
 
 /** One user utterance the server committed through its VAD and answers by itself. */
@@ -59,7 +64,7 @@ export interface ServerTurn {
   /** Input transcription; undefined when the endpoint reports it failed or the call ended first. */
   readonly transcript: Promise<string | undefined>
   readonly response: Promise<Response>
-  listen(onText: (text: string) => void): void
+  listen(onText: (text: string, time: number) => void): void
 }
 
 /** Voice-call hooks: model audio for the client, interrupted playback, committed utterances and connection failure. */
@@ -70,6 +75,8 @@ export interface VoiceHooks {
   /** What the client reported for a flushed reply that was not played to its end. */
   cut(cut: Cut): void
   committed(turn: ServerTurn): void
+  /** An endpoint error that concerns no pending request; the call stays up. */
+  ignored(error: RealtimeFailure): void
   failed(error: RealtimeFailure): void
 }
 
@@ -129,6 +136,8 @@ export class RealtimeConnection {
   private abort = () => this.fail(new RealtimeFailure('ABORTED'))
   private send(event: object) { this.ws.send(JSON.stringify({ event_id: randomUUID(), ...event })) }
 
+  /** The Host request, while the server has not started a response for it. */
+  private get unstarted() { return this.host && !this.host.id ? this.host : undefined }
   /**
    * A started response belongs to the oldest committed utterance still waiting for one: the server
    * starts it right after the commit, ahead of any queued request. Otherwise it answers the Host
@@ -136,20 +145,17 @@ export class RealtimeConnection {
    */
   private started(id: unknown) {
     if (typeof id !== 'string') throw new RealtimeFailure('INVALID_EVENT')
-    let reply = this.unassigned.shift() ?? (this.host && !this.host.id ? this.host : undefined)
-    if (reply === this.host) this.asked = false
-    if (!reply) { reply = new Reply(); reply.cut = true }
+    let reply = this.unassigned.shift() ?? this.unstarted
+    if (reply && reply === this.host) { this.asked = false; this.arm(reply) }
+    if (!reply) { reply = new Reply(); reply.silenced = true }
     reply.id = id
     this.live.set(id, reply)
     this.active = reply
   }
-  /** The response of an event without a response id; a text connection's only request also when its start was not announced. */
-  private unidentified() { return this.active ?? (!this.voice && this.host ? (this.active = this.host) : undefined) }
-  /** The live response an event belongs to; packets of a finished, unknown or cut response belong to none. */
+  /** The live response an event belongs to: by its response id, else the one being produced. Packets of a finished or unknown response belong to none. */
   private replyOf(event: any) {
     const id = event.response_id ?? event.response?.id
-    const reply = typeof id === 'string' ? this.live.get(id) : this.unidentified()
-    return reply?.cut ? undefined : reply
+    return typeof id === 'string' ? this.live.get(id) : this.active
   }
   private receive(event: any) {
     switch (event.type) {
@@ -176,7 +182,7 @@ export class RealtimeConnection {
       case 'response.audio.delta': {
         if (!this.hooks) throw new RealtimeFailure('UNEXPECTED_AUDIO')
         const reply = this.replyOf(event)
-        if (reply && typeof event.delta === 'string' && event.delta) this.deliver(reply, event.delta)
+        if (reply && !reply.silenced && typeof event.delta === 'string' && event.delta) this.deliver(reply, event.delta)
         return
       }
       case 'input_audio_buffer.speech_started': if (this.hooks) this.speech(); return
@@ -192,15 +198,17 @@ export class RealtimeConnection {
     const id = event.response?.id
     // A late or repeated response.done of a finished response changes nothing.
     if (typeof id === 'string' && !this.live.has(id)) return
-    const reply = typeof id === 'string' ? this.live.get(id) : this.unidentified()
+    const reply = typeof id === 'string' ? this.live.get(id) : this.active
     if (typeof id === 'string') this.live.delete(id)
     if (this.active === reply) this.active = undefined
-    if (reply && this.voice && (event.response?.status === 'cancelled' || reply.cut)) {
+    if (reply && this.voice && event.response?.status === 'cancelled') {
       // The user's speech stopped it: keep the text that arrived before; calls of a cancelled response are not dispatched.
-      if (event.response?.status === 'cancelled') reply.calls.clear()
+      reply.calls.clear()
       reply.interrupted = true
       this.settle(reply)
     } else if (reply) {
+      // A response the server completed is whole, also when the user spoke before it ended: its calls are
+      // in the server conversation and need their outputs; what was not played is reported by played().
       for (const item of event.response?.output ?? []) if (item.type === 'function_call' && !reply.calls.has(item.call_id)) this.call(reply, item)
       if (event.response?.status !== 'completed') {
         // A text turn owns its connection; a call keeps its connection when one response fails.
@@ -215,18 +223,21 @@ export class RealtimeConnection {
     clearTimeout(reply.timer)
     if (reply === this.host) { this.host = undefined; this.asked = false }
     if (error) reply.reject(error)
-    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}) })
+    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}), at: Date.now() })
   }
   /**
    * The server's VAD heard the user start speaking. The server cancels a response it is still
-   * producing by itself (a cancelled response.done); a Host request it has not started is absorbed
-   * into the user's turn and asked again afterwards. Audio already delivered may still be playing,
-   * so the client is told to stop it.
+   * producing by itself (a cancelled response.done); whatever of it still arrives is not played.
+   * A Host request it has not started is absorbed into the user's turn and asked again afterwards.
+   * A committed utterance it has not started answering is answered together with the new speech
+   * (as probed), so it settles without a reply of its own rather than taking the next one.
+   * Audio already delivered may still be playing, so the client is told to stop it.
    */
   private speech() {
     this.speaking = true
-    if (this.active) this.active.cut = true
-    if (this.host && !this.host.id && this.asked) { this.asked = false; clearTimeout(this.host.timer) }
+    if (this.active) this.active.silenced = true
+    if (this.unstarted && this.asked) { this.asked = false; clearTimeout(this.unstarted.timer) }
+    for (const reply of this.unassigned.splice(0)) this.settle(reply)
     if (!this.delivered.length) return
     this.flushed.push(this.delivered)
     this.delivered = []
@@ -251,14 +262,12 @@ export class RealtimeConnection {
   /** Nothing is being said or answered: ask again for an absorbed request, or let a waiting request go. */
   private idle() {
     if (this.active || this.speaking || this.unassigned.length || this.opening) return
-    if (this.host && !this.host.id && !this.asked && !this.next) return this.ask()
+    if (this.unstarted && !this.asked && !this.next) return this.ask()
     for (const wake of this.idleWaiters.splice(0)) wake()
   }
   private ask() {
-    const reply = this.host!
     this.asked = true
-    clearTimeout(reply.timer)
-    reply.timer = setTimeout(() => this.expire(reply), this.timeoutMs)
+    this.arm(this.host!)
     this.send({ type: 'response.create' })
   }
   /**
@@ -268,7 +277,15 @@ export class RealtimeConnection {
    */
   private error(failure: RealtimeFailure) {
     if (!this.voice || this.next || this.opening) throw failure
-    if (this.host && !this.host.id && this.asked) { this.settle(this.host, failure); this.idle() }
+    const request = this.unstarted
+    if (request && this.asked) { this.settle(request, failure); return this.idle() }
+    // The endpoint's errors name no client event (as probed), so one is attributed only to an outstanding request.
+    this.hooks!.ignored(failure)
+  }
+  /** Start the deadline of the Host request anew. */
+  private arm(reply: Reply) {
+    clearTimeout(reply.timer)
+    reply.timer = setTimeout(() => this.expire(reply), this.timeoutMs)
   }
   private call(reply: Reply, item: { call_id: unknown; name: unknown; arguments: unknown }) {
     if (typeof item.call_id !== 'string' || typeof item.name !== 'string' || typeof item.arguments !== 'string') throw new RealtimeFailure('INVALID_FUNCTION_CALL')
@@ -310,13 +327,22 @@ export class RealtimeConnection {
       }
       if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
       const message = event.type === 'user/message' ? event.data : event.data.message
-      if (this.present.has(message.id)) continue // Generated on, or spoken into, this connection.
-      const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : part.type === 'tool-call' ? [`[Previous native tool call ${part.id}: ${part.name} ${part.arguments}]`] : []).join('\n')
-      const source = message.role === 'user' && message.source.kind !== 'user' ? `[Context source: ${JSON.stringify(message.source)}]\n` : ''
-      if (text) this.message(message.role, message.id, source + text)
+      if (this.present.has(message.id)) continue // Generated on, spoken into, or inserted into this connection.
+      this.item(message)
     }
     this.sentThrough = this.history.at(-1)?.seq ?? this.sentThrough
     if (respond) this.ask()
+  }
+  private item(message: { id: string; role: string; source: { kind: string }; content: readonly { type: string; text?: string; id?: string; name?: string; arguments?: string }[] }) {
+    const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : part.type === 'tool-call' ? [`[Previous native tool call ${part.id}: ${part.name} ${part.arguments}]`] : []).join('\n')
+    const source = message.role === 'user' && message.source.kind !== 'user' ? `[Context source: ${JSON.stringify(message.source)}]\n` : ''
+    if (text) this.message(message.role, message.id, source + text)
+  }
+  /** Put a native user message into the server conversation now, ahead of the next response the server starts. */
+  insert(message: UserMessage) {
+    if (this.closed) return
+    this.item(message)
+    this.present.add(message.id)
   }
   private message(role: string, id: string, text: string) {
     this.send({ type: 'conversation.item.create', item: { id, type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'text', text }] } })

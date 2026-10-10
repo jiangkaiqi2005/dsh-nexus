@@ -24,6 +24,7 @@ test('Nexus footer opens an enabled native composer and sends to the fixed super
       const event = JSON.parse(bytes.toString())
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'response.create') {
+        socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
         modelRequests++
         socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Nexus UI reply' }))
         socket.send(JSON.stringify({ type: 'response.done', response: { status: 'completed' } }))

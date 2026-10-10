@@ -43,6 +43,7 @@ async function deliveryProfile(real = false) {
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') items.push({ id: event.item.id, role: event.item.role, type: event.item.type, text: event.item.content?.map(part => part.text).join('\n') ?? event.item.output ?? '' })
       if (event.type !== 'response.create') return
+      socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
       const from = Math.max(answered, items.findLastIndex(item => item.role === 'assistant') + 1)
       const fresh = items.slice(from).map(item => item.text).join('\n')
       answered = items.length

@@ -46,6 +46,7 @@ async function dispatchProfile(real = false) {
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'conversation.item.create') history.push(event.item)
       if (event.type === 'response.create') {
+        socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
         // Automatic work results and mirrored worker input also wake the supervisor; they do not advance the scripted dispatch plan.
         const fresh = history.slice(Math.max(answered, history.findLastIndex(item => item.role === 'assistant') + 1)).filter(item => !item.content?.[0]?.text.includes('Current runtime context'))
         answered = history.length

@@ -30,6 +30,7 @@ async function profileTurn(scenario) {
       const event = JSON.parse(bytes.toString()); wire.push({ ...event, connection })
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
       if (event.type === 'response.create') {
+        socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
         socket.send(JSON.stringify({ type: 'response.text.delta', delta: 'Nexus profile reply' }))
         socket.send(JSON.stringify({ type: 'response.done', response: { status: scenario === 'failed' ? 'failed' : 'completed' } }))
       }

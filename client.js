@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
         // Scheduled playback since the last flush; finished nodes are counted as played and dropped.
         let nodes = []
         let finished = 0
-        const settle = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
+        const retire = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
         try {
           for await (const frame of handle) {
             if (!current()) return attempt.release()
@@ -118,7 +118,7 @@ window.__ModuleLoader__.load({
             else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
             else if (frame.type === 'flush') {
               const now = playback.currentTime
-              settle(now)
+              retire(now)
               let played = finished
               for (const { node, start, samples } of nodes) {
                 const heard = Math.min(samples, Math.max(0, Math.round((now - start) * 24000)))
@@ -140,7 +140,7 @@ window.__ModuleLoader__.load({
               const node = playback.createBufferSource()
               node.buffer = buffer
               node.connect(playback.destination)
-              settle(playback.currentTime)
+              retire(playback.currentTime)
               next = Math.max(next, playback.currentTime)
               node.start(next)
               nodes.push({ node, start: next, samples: samples.length })

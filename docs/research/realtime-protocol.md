@@ -28,3 +28,9 @@
 - 无活动回复时 `response.cancel` 返回 `error{type:'invalid_request_error', message:'Conversation has none active response'}`，无 code；属单次请求错误，非连接失败。
 - 工具调用后插入用户语音轮，再回填 `function_call_output` + `response.create` 可正常续答。
 - 有活动回复时 `response.create` 排队；用户说话期间的 `response.create` 被吞并，commit 后只产生一个自动回复。
+
+修复轮 1 补充探针（`.scratch/nexus-v1/protocol-07/queued-1.json`）：
+
+- 活动回复期间发出、正在排队的 `response.create` 在用户开口后**不会**被丢弃：活动回复以 cancelled 结束后，排队请求在用户仍在说话时开始并完成。Nexus 只在连接空闲时发出请求，不会制造这种排队。
+- 用户说话期间用 `conversation.item.create` 插入的消息，排在服务端开口时已建立的用户语音 item 之后，并在该语句的自动回复开始之前进入服务端会话（previous_item_id 链可见）。
+- 服务端 VAD 把一句话切成两段时，第一段提交后若用户在服务端开始回答前再次开口，第一段不会得到单独回复，第二段提交后的回复覆盖两段。

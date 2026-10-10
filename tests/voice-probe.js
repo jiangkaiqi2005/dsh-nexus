@@ -59,7 +59,9 @@ export function apply(ctx, config) {
         const reader = await ctx.sessionPersistence.open(SUPERVISOR, 'read')
         const { events } = await reader.read()
         await reader.close()
-        await writeFile(flag('result.json'), JSON.stringify({ pid: process.pid, events, workers, released: !ctx.agents.get(SUPERVISOR) }))
+        // Nexus lines of the Host log, from the logger's own message buffer.
+        const logs = ctx.logger.buffer.map(message => message.args.map(String).join(' ')).filter(line => line.startsWith('nexus'))
+        await writeFile(flag('result.json'), JSON.stringify({ pid: process.pid, events, workers, logs, released: !ctx.agents.get(SUPERVISOR) }))
       } catch (error) { await writeFile(flag('result.json'), JSON.stringify({ error: String(error), stack: error.stack })) }
     }
     const timer = setTimeout(run, 1500)

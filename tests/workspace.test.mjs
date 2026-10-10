@@ -44,6 +44,7 @@ test('official Host discovers registered projects across cwd and dispatches to t
       if (event.type === 'session.update') send({ type: 'session.updated', session: event.session })
       if (event.type === 'conversation.item.create') history.push(event.item)
       if (event.type !== 'response.create') return
+      send({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } })
       if (!scenario) scenario = history.slice(history.findLastIndex(item => item.role === 'assistant') + 1).findLast(item => item.role === 'user' && /WORKSPACE-/.test(item.content?.[0]?.text))?.content[0].text
       if (!scenario) return reply('Work result received.')
       if (stage++ === 0) return call('nexus_list_workspaces', {})

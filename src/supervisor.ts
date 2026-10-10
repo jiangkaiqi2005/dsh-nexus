@@ -74,8 +74,8 @@ export class Supervisor implements Agent {
   private connection?: RealtimeConnection
   private call?: Call
   private readonly voiceTurns: ServerTurn[] = []
-  /** Playback the user's speech stopped, recorded at the start of the next turn. */
-  private readonly cuts: UserMessage[] = []
+  /** Notices of playback the user's speech stopped: already sent to the model, recorded with the next turn's input. */
+  private readonly notices: UserMessage[] = []
   /** Call connections the user hung up; their unfinished requests continue on a text connection. */
   private readonly hungUp = new WeakSet<RealtimeConnection>()
   status: AgentStatus = 'idle'
@@ -137,20 +137,22 @@ export class Supervisor implements Agent {
     do {
       // A committed utterance opens its own turn; the server is already answering it.
       // One the call ended before anything was heard or answered leaves no record.
-      const voice = this.voiceTurns.shift()
-      const said = voice && await this.utterance(voice, signal).catch(() => undefined)
-      if (voice && !said && !signal.aborted) continue
+      const server = this.voiceTurns.shift()
+      const said = server && await this.utterance(server, signal).catch(() => undefined)
+      if (server && !said && !signal.aborted) continue
+      const voice = server && said && { server, said }
       const turn = ++this.turn
       let step = 0
       this.session.append('turn/start', { turn })
       let reason: TurnEndReason | undefined
       try {
         signal.throwIfAborted()
-        const input = said ? [said] : this.inbox.claim(turn)
+        const input = voice ? [voice.said] : this.inbox.claim(turn)
         if (!input.length) continue
         step = 1
         this.session.append('step/start', { turn, step })
-        let toolsPending = await this.request(turn, step, signal, [...this.cuts.splice(0), ...input], voice, said)
+        // A notice follows the utterance it was sent during, as the server holds them; otherwise it precedes the input.
+        let toolsPending = await this.request(turn, step, signal, voice ? [...input, ...this.notices.splice(0)] : [...this.notices.splice(0), ...input], voice)
         // Stopping listeners may add steering for another step of this turn.
         while (true) {
           signal.throwIfAborted()
@@ -244,8 +246,10 @@ export class Supervisor implements Agent {
       const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
         audio: link.audio,
         flush: link.flush,
-        cut: cut => this.cuts.push(cutNotice(cut)),
+        // The model learns what was heard before it answers the speech that stopped the playback.
+        cut: cut => { const notice = cutNotice(cut); this.notices.push(notice); connection.insert(notice) },
         committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
+        ignored: error => this.ctx.logger.info(`nexus voice: endpoint error left the call up: ${error.message}`),
         failed: error => call.end(error.code),
       })
       call.connection = connection
@@ -257,19 +261,19 @@ export class Supervisor implements Agent {
     }
   }
   /** @param voice - the utterance whose server-started reply answers this step, with its native input. */
-  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[], voice?: ServerTurn, said?: UserMessage): Promise<boolean> {
+  private async request(turn: number, step: number, signal: AbortSignal, inputs: readonly UserMessage[], voice?: { server: ServerTurn; said: UserMessage }): Promise<boolean> {
     // A turn keeps the connection it started on; a live call serves the turns that start during it.
-    if (voice) this.connection = voice.connection
+    if (voice) this.connection = voice.server.connection
     this.connection ??= this.call?.connection
     if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS) }, { surfaceOp: 'append' })
     for (const message of inputs) this.session.append('user/message', message, { surfaceOp: 'append' })
     await this.compose()
     signal.throwIfAborted()
-    // The utterance itself is already in the server conversation; notices recorded with it are sent later.
-    if (said) this.connection?.markPresent(said.id)
+    // The utterance itself is already in the server conversation.
+    if (voice) this.connection?.markPresent(voice.said.id)
     const assembly = await this.prompt.assemble(assembleContextFor(this, signal))
     // A server-started voice reply answers the instructions its connection already holds.
-    const instructions = voice ? voice.connection.instructions : `${this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
+    const instructions = voice ? voice.server.connection.instructions : `${this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
     const previous = this.session.requestHeader()
     const header = { config: this.options, tools: assembly.tools }
     this.session.append('request/header', { header, reason: !previous ? 'initial' : JSON.stringify(previous) === JSON.stringify(header) ? 'series' : 'change' })
@@ -293,17 +297,19 @@ export class Supervisor implements Agent {
     let index = 0
     let text = ''
     let calls: ToolCallBlock[] = []
-    const push = (chunk: StreamChunk) => {
-      const time = Date.now()
+    // Chunk times are when the model produced them, also for a reply received before its turn recorded it.
+    const push = (chunk: StreamChunk, time = Date.now()) => {
       stream.push({ time, chunk })
       this.events.emit('agent/assistant-stream', { frame: { type: 'chunk', attemptId, revision, index: index++, time, chunk } })
     }
     this.events.emit('agent/assistant-stream', { frame: { type: 'start', attemptId, revision, turn, step } })
-    push({ type: 'block-start', index: 0, blockType: 'text' })
+    // The text block starts with its first delta, so a replayed reply keeps its chunk times in order.
+    let begun = false
+    const begin = (time?: number) => { if (!begun) { begun = true; push({ type: 'block-start', index: 0, blockType: 'text' }, time) } }
     try {
-      const onText = (delta: string) => { text += delta; push({ type: 'text-delta', index: 0, text: delta }) }
+      const onText = (delta: string, time?: number) => { begin(time); text += delta; push({ type: 'text-delta', index: 0, text: delta }, time) }
       let response: Response
-      if (voice) { voice.listen(onText); response = await abortable(voice.response, signal) }
+      if (voice) { voice.server.listen(onText); response = await abortable(voice.server.response, signal) }
       else response = await abortable(connection.request(this.surface(), onText, assembly.tools, instructions), signal)
       text = response.text
       if (connection.voice && !text && !response.calls.length) {
@@ -312,19 +318,21 @@ export class Supervisor implements Agent {
         return false
       }
       calls = response.calls
-      push({ type: 'block-end', index: 0, block: { type: 'text', text } })
+      begin(response.at)
+      push({ type: 'block-end', index: 0, block: { type: 'text', text } }, response.at)
       for (const [offset, call] of response.calls.entries()) {
-        push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' })
-        push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments })
-        push({ type: 'block-end', index: offset + 1, block: call })
+        push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' }, response.at)
+        push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.at)
+        push({ type: 'block-end', index: offset + 1, block: call }, response.at)
       }
-      push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } })
+      push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.at)
       const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...response.calls], source: this.options })
       connection.markPresent(message.id)
       // As natively for a cancelled stream: the delivered prefix, marked interrupted.
       const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {
+      begin()
       if (text) push({ type: 'block-end', index: 0, block: { type: 'text', text } })
       push({ type: 'finish', reason: { kind: signal.aborted ? 'aborted' : 'error', failure: { code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN', message: 'Nexus request did not complete' } } })
       const event = this.session.append('assistant/attempt', { turn, step, stream: [...stream.snapshot()] })
