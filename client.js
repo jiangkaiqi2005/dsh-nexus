@@ -214,36 +214,64 @@ window.__ModuleLoader__.load({
       }, busy ? t('hangup') : t('start')))
     }
 
-    function Settings({ form, t }) {
+    function Settings({ form, catalog, t }) {
       const snapshot = React.useSyncExternalStore(listener => form.subscribe(listener), () => form.getSnapshot())
       const [error, setError] = React.useState(false)
       const [saving, setSaving] = React.useState(false)
+      const [budget, setBudget] = React.useState()
+      const [models, setModels] = React.useState()
+      React.useEffect(() => {
+        let live = true
+        catalog().then(response => { if (live && response.ok) setModels(response.value) }, () => {})
+        return () => { live = false }
+      }, [catalog])
+      const disabled = snapshot.status !== 'ready' || !snapshot.writable || saving
+      const save = async (key, value) => {
+        setSaving(true)
+        try { setError(!(await form.set(key, value))) } catch { setError(true) }
+        finally { setSaving(false) }
+      }
+      const savedBudget = snapshot.value?.compactionBudget ?? 128000
+      const commitBudget = () => {
+        const value = Number(budget)
+        setBudget(undefined)
+        if (budget !== undefined && Number.isSafeInteger(value) && value >= 1 && value !== savedBudget) save('compactionBudget', value)
+      }
+      const summaryModel = snapshot.value?.summaryModel ?? ''
+      const routes = (models?.groups ?? []).flatMap(group => group.models.map(model => ({ value: `${group.id}/${model.id}`, label: `${group.name} / ${model.name || model.id}` })))
+      if (summaryModel && !routes.some(route => route.value === summaryModel)) routes.unshift({ value: summaryModel, label: summaryModel })
+      const fallback = models ? ` (${models.default.provider}/${models.default.model})` : ''
       return h('div', { style: { padding: 16 } },
         h('h2', null, 'Nexus'),
         h('label', null, h('input', {
-          type: 'checkbox', checked: snapshot.value?.autoVoice ?? false,
-          disabled: snapshot.status !== 'ready' || !snapshot.writable || saving,
-          onChange: async event => {
-            const enabled = event.target.checked
-            setSaving(true)
-            try { setError(!(await form.set('autoVoice', enabled))) } catch { setError(true) }
-            finally { setSaving(false) }
-          },
+          type: 'checkbox', checked: snapshot.value?.autoVoice ?? false, disabled,
+          onChange: event => save('autoVoice', event.target.checked),
         }), t('auto-voice')),
         h('p', null, t('next-startup')),
+        h('label', { style: { display: 'block', marginTop: 12 } }, t('compaction-budget'), ' ', h('input', {
+          type: 'number', min: 1, step: 1, value: budget ?? savedBudget, disabled,
+          onChange: event => setBudget(event.target.value), onBlur: commitBudget,
+          onKeyDown: event => { if (event.key === 'Enter') commitBudget() },
+        })),
+        h('label', { style: { display: 'block', marginTop: 12 } }, t('summary-model'), ' ', h('select', {
+          value: summaryModel, disabled,
+          onChange: event => save('summaryModel', event.target.value),
+        }, h('option', { value: '' }, t('summary-default') + fallback), ...routes.map(route => h('option', { key: route.value, value: route.value }, route.label)))),
+        h('p', null, t('compaction-hint')),
         error ? h('p', { role: 'alert' }, t('save-failed')) : null)
     }
 
     return {
       inject: ['slots', 'uiWorkspace', 'locale'],
       apply(ctx) {
-        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', ...states(STATES.en) })
-        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', ...states(STATES.zh) })
-        ctx.inject(['configForms'], settingsCtx => {
+        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default model', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget and summary model apply immediately.', ...states(STATES.en) })
+        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认模型', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算与摘要模型立即生效。', ...states(STATES.zh) })
+        ctx.inject(['configForms', 'remote', 'remote.session'], settingsCtx => {
           const form = settingsCtx.configForms.get('nexus')
+          const catalog = () => settingsCtx.remote.session.modelCatalog()
           settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
             name: 'settings.section', id: 'nexus', label: 'Nexus', locale: 'nexus',
-            inject: () => ({ form }),
+            inject: () => ({ form, catalog }),
           }, Settings))
         })
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({

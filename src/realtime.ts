@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { randomUUID } from 'node:crypto'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { ToolCallId, type ToolCallBlock, type ToolSchema, type UserMessage, type AssistantMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, type ToolCallBlock, type ToolSchema, type UserMessage, type AssistantMessage, type TokenUsage } from '@deepseek-ai/dsh-llm'
 
 export const MODEL = 'qwen3.8-omni-flash-realtime'
 // Text and voice instructions share these two halves and differ only in the clause between them and the closing line.
@@ -26,11 +26,31 @@ function errorDetail(error: unknown): string {
 /**
  * interrupted: the server cancelled the response because the user started speaking; text is what arrived
  * before that, and calls it never finished are absent. settledAt: when the response settled.
+ * usage: the token usage the server reported on response.done.
  */
-export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean; settledAt: number }
+export interface Response { text: string; calls: ToolCallBlock[]; interrupted?: boolean; settledAt: number; usage?: TokenUsage }
+
+/**
+ * The token usage of a response.done in native terms, where uncached and cached input are disjoint:
+ * the endpoint's input_tokens include its cached_tokens. Undefined when the server reported none.
+ */
+function usageOf(usage: any): TokenUsage | undefined {
+  if (!usage || !Number.isSafeInteger(usage.input_tokens) || !Number.isSafeInteger(usage.output_tokens)) return undefined
+  const details = usage.input_token_details ?? usage.input_tokens_details
+  const cached = Number.isSafeInteger(details?.cached_tokens) && details.cached_tokens <= usage.input_tokens ? details.cached_tokens : 0
+  return {
+    inputTokens: usage.input_tokens - cached, outputTokens: usage.output_tokens,
+    ...(Number.isSafeInteger(usage.total_tokens) ? { totalTokens: usage.total_tokens } : {}),
+    ...(cached ? { cacheReadTokens: cached } : {}),
+  }
+}
 
 /** A delivered spoken reply whose playback the user stopped, in seconds of audio. */
 export interface Cut { text: string; heard: number; total: number; ended?: boolean }
+
+interface Delivered { reply: { readonly text: string }; samples: number }
+/** Audio delivered to the client and not yet accounted for: since its last flush, and flushes awaiting its report. */
+export interface Playback { delivered: Delivered[]; flushed: Delivered[][] }
 
 /** One model response being received: its text, tool calls and settlement. */
 class Reply {
@@ -39,6 +59,7 @@ class Reply {
   /** No more of its audio is played: the user spoke while it was live, or nobody asked for it. */
   silenced = false
   interrupted = false
+  usage?: TokenUsage
   text = ''
   /** Text deltas with the time each arrived, so a later listener records when they were generated. */
   private readonly deltas: [string, number][] = []
@@ -115,8 +136,8 @@ export class RealtimeConnection {
   private readonly unassigned: Reply[] = []
   private speaking = false
   /** Audio delivered to the client since its last flush, per reply in delivery order; flushed batches await the client's report. */
-  private delivered: { reply: Reply; samples: number }[] = []
-  private readonly flushed: { reply: Reply; samples: number }[][] = []
+  private delivered: Delivered[] = []
+  private readonly flushed: Delivered[][] = []
   private readonly transcripts = new Map<string, (text: string | undefined) => void>()
   private idleWaiters: (() => void)[] = []
   /** Calls whose response never completed: their arguments arrived, but the Host must not dispatch them. */
@@ -205,6 +226,7 @@ export class RealtimeConnection {
     if (typeof id === 'string' && !this.live.has(id)) return
     const reply = typeof id === 'string' ? this.live.get(id) : this.active
     if (typeof id === 'string') this.live.delete(id)
+    if (reply) reply.usage = usageOf(event.response?.usage)
     if (this.active === reply) this.active = undefined
     if (reply && this.voice && event.response?.status === 'cancelled') {
       // The user's speech stopped it: keep the text that arrived before; calls of a cancelled response are not dispatched.
@@ -228,7 +250,7 @@ export class RealtimeConnection {
     clearTimeout(reply.timer)
     if (reply === this.host) { this.host = undefined; this.asked = false }
     if (error) reply.reject(error)
-    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}), settledAt: Date.now() })
+    else reply.resolve({ text: reply.text, calls: [...reply.calls.values()], ...(reply.interrupted ? { interrupted: true } : {}), settledAt: Date.now(), ...(reply.usage ? { usage: reply.usage } : {}) })
   }
   /**
    * The server's VAD heard the user start speaking. The server cancels a response it is still
@@ -350,7 +372,8 @@ export class RealtimeConnection {
       if (this.present.has(message.id)) continue // Generated on, spoken into, or inserted into this connection.
       this.item(message)
     }
-    this.sentThrough = this.history.at(-1)?.seq ?? this.sentThrough
+    // Surface order is not seq order once a replacement stands where older history stood.
+    for (const event of this.history) this.sentThrough = Math.max(this.sentThrough, event.seq)
     if (respond) this.ask()
   }
   private item(message: UserMessage | AssistantMessage) {
@@ -429,4 +452,15 @@ export class RealtimeConnection {
   }
   /** The client may have received audio, but its final playback report is unavailable. */
   get unconfirmedPlayback() { return this.lostPlayback || !!(this.delivered.length || this.flushed.length) }
+  /** Open and settled: nothing is being said, answered or configured, and no utterance awaits its transcript. */
+  get quiet() { return !this.closed && !this.active && !this.host && !this.speaking && !this.unassigned.length && !this.opening && !this.next && !this.transcripts.size }
+  /** Close a quiet call connection that a new one replaces, handing over the playback the client has not reported yet. */
+  retire(): Playback {
+    const playback = { delivered: this.delivered, flushed: this.flushed.splice(0) }
+    this.delivered = []
+    this.close()
+    return playback
+  }
+  /** Account for playback delivered on the connection this one replaces, as if delivered here. */
+  takeOver(playback: Playback) { this.delivered = playback.delivered; this.flushed.push(...playback.flushed) }
 }

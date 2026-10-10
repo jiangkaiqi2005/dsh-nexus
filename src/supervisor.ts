@@ -1,16 +1,22 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { agentEvents, assembleContextFor, type Agent, type AgentCancelCause, type AgentStatus, type CancelOptions, type InboxTarget } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { createAssistantMessage, createSystemMessage, createUserMessage, createToolResultMessage, LlmAttemptId, type StreamChunk, type UserMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-stream'
-import type { Session, TurnEndReason } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
 import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type Response, type ServerTurn } from './realtime.js'
+import { MANUAL_FAILURES, RETAIN_SHARE, compactableRange, summaryTarget, withSummaryModel } from './compaction.js'
 import { registerWorkSessions } from './work-sessions.js'
 import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type { ToolExecutionResult, ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
+import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-token-meter'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -23,7 +29,11 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number }
+/**
+ * compactionBudget: estimated request tokens above which the main conversation compacts between turns.
+ * summaryModel: `provider/model` that writes compaction summaries; empty follows the default model of ordinary sessions.
+ */
+export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; compactionBudget: Volatile<number>; summaryModel: Volatile<string> }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
 export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void }
@@ -47,11 +57,18 @@ function cutNotice({ text, heard, total, ended }: Cut) {
   return createUserMessage({ content: [{ type: 'text', text: `[The user ${ended ? 'ended the call during' : 'started speaking over'} your spoken reply${excerpt}, which stopped it: about ${heard.toFixed(1)} s of its ${total.toFixed(1)} s of audio were played; the rest was not heard.]` }], source: { kind: 'nexus-voice', form: 'notice', summary: 'interrupted playback' } })
 }
 
+const isCheckpoint = (event: SessionEvent | undefined) => event?.type === 'user/message' && isCompactCheckpointSource(event.data.source)
+
 /** One live call: its model connection, and how it ends. */
 interface Call {
   readonly abort: AbortController
   connection?: RealtimeConnection
+  /** The log length when the current connection replayed the native conversation. */
+  since: number
+  /** A new connection being opened, for a failed transport or a compacted conversation. */
   recovering?: Promise<void>
+  /** Open a new connection; given the current one, replace it only if it is still quiet then. */
+  reconnect(previous?: RealtimeConnection): void
   /** End the call; a failure code is reported to the client, whose stream is still open. */
   end(failure?: string): void
 }
@@ -94,6 +111,8 @@ export class Supervisor implements Agent {
     // Stream attempts are transient; the durable cursor keeps new ids distinct
     // from attempts emitted by earlier process instances.
     this.revision = session.seq
+    // Shadows the preset's /compact for this agent, so it is listed before the preset binds at first work.
+    this.ctx.commands.register({ definitionId: CommandDefinitionId('@deepseek-ai/dsh-command-compact'), name: 'compact', description: 'Compact older conversation history', handler: invocation => this.compactCommand(invocation) })
   }
   private setStatus(status: AgentStatus) { this.status = status; this.events.emit('agent/status', { status }) }
   send(message: UserMessage, target: InboxTarget, wakeup: boolean) {
@@ -116,7 +135,7 @@ export class Supervisor implements Agent {
     this.abort = new AbortController()
     let operation: Promise<T>
     try { operation = task(this.abort.signal) } catch (error) { operation = Promise.reject(error) }
-    const result = operation.finally(() => { this.maintenance = false; this.abort = undefined; this.wake() })
+    const result = operation.finally(() => { this.maintenance = false; this.abort = undefined; this.refreshCall(); this.wake() })
     this.activity = result.catch(() => {})
     return result
   }
@@ -180,9 +199,13 @@ export class Supervisor implements Agent {
         if (this.connection !== this.call?.connection) this.connection?.close()
         this.connection = undefined
         if (step) this.session.append('step/end', { turn, step })
+        // After the turn's last step: no reply is being produced and no tool runs.
+        if (step && !reason && !signal.aborted) await this.compactOverBudget(signal)
+        if (!reason && signal.aborted) reason = { kind: 'aborted', reason: signal.reason }
         this.session.append('turn/end', { turn, reason: reason ?? { kind: 'completed' } })
       }
       if (signal.aborted) break
+      this.refreshCall()
       this.wakeRequested = false
     } while (this.inbox.nextTurn.length || this.inbox.nextStep.length || this.voiceTurns.length)
   }
@@ -215,9 +238,56 @@ export class Supervisor implements Agent {
       registerWorkSessions(this.ctx, this, this.tools)
     })().catch(error => { this.composing = undefined; throw error })
   }
+  /** The preset's native compaction engine, with summaries written by the configured summary model. */
+  private compaction() {
+    const engine = this.ctx.agentPresets.serviceFor(this, 'compaction')
+    if (!engine) throw new Error('The selected native preset must provide compaction')
+    return withSummaryModel(engine, () => summaryTarget(this.config.summaryModel.get(), this.ctx.agentDefaultModel.currentSelection()))
+  }
+  /**
+   * Natively compact older history once the conversation exceeds the Nexus budget, keeping a recent
+   * share verbatim. A failure keeps the whole conversation; the attempt stays in the log.
+   */
+  private async compactOverBudget(signal: AbortSignal) {
+    const budget = this.config.compactionBudget.get()
+    const measurement = this.ctx.tokenMeter.measure(this.session)
+    if (measurement.totalTokens <= budget) return
+    const range = compactableRange(this.session, measurement, Math.floor(budget * RETAIN_SHARE))
+    if (!range) return
+    try { await this.compaction().compactRegion(range.start, range.end, this, signal) }
+    catch (error) {
+      if (!signal.aborted) this.ctx.logger.warn(`nexus: automatic compaction failed; the conversation is kept whole: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  /** `/compact` of the main conversation, as the native command but with the configured summary model. */
+  private async compactCommand({ rawInput, signal, commandId }: CommandInvocation): Promise<CommandResult> {
+    if (rawInput.trim()) return { kind: 'error', text: 'Usage: /compact (no arguments)' }
+    try {
+      await this.compose()
+      const result = await this.compaction().compactNow(this, signal, commandId)
+      if (!result) return { kind: 'success', text: 'No compactable history yet.' }
+      return { kind: 'success', text: `Compacted ${result.shadowedSeqs.length} history items (~${result.shadowedTokenCount} tokens).`, sourceEventSeq: result.summarySeq }
+    } catch (error) {
+      if (signal.aborted) return { kind: 'error', text: MANUAL_FAILURES.cancelled }
+      // By name: the Host's error class can be another module instance than ours.
+      const failure = error as { name?: unknown; code?: unknown }
+      if (failure?.name === 'ManualCompactionError' && typeof failure.code === 'string' && MANUAL_FAILURES[failure.code]) return { kind: 'error', text: MANUAL_FAILURES[failure.code] }
+      throw error
+    }
+  }
+  /**
+   * A live call's server conversation still holds history compacted after its connection replayed it.
+   * Between turns, while nothing is said or answered, a new connection replays the compacted conversation.
+   */
+  private refreshCall() {
+    const call = this.call
+    const connection = call?.connection
+    if (!call || !connection || call.recovering || this.voiceTurns.length || !connection.quiet) return
+    if (this.session.surface.nodes.some(seq => seq >= call.since && isCheckpoint(this.session.eventAt(seq)))) call.reconnect(connection)
+  }
+  /** The model-visible events in surface order; a compaction checkpoint stands where the history it replaced stood. */
   private surface() {
-    const surface = new Set(this.session.surface.nodes)
-    return this.session.snapshotEvents().filter(event => surface.has(event.seq))
+    return this.session.surface.nodes.flatMap(seq => this.session.eventAt(seq) ?? [])
   }
   /**
    * Connect the same model with audio for one client: utterances its VAD
@@ -231,6 +301,14 @@ export class Supervisor implements Agent {
     if (this.call) throw new RealtimeFailure('CALL_BUSY')
     const call: Call = {
       abort: new AbortController(),
+      since: 0,
+      reconnect: previous => {
+        const recovering: Promise<void> = connect(previous)
+          .then(replaced => { if (replaced && this.call === call) link.state('live') })
+          .catch(failure => call.end(failure instanceof RealtimeFailure ? failure.code : 'CONNECTION_FAILED'))
+          .finally(() => { if (call.recovering === recovering) call.recovering = undefined })
+        call.recovering = recovering
+      },
       end: failure => {
         signal.removeEventListener('abort', hangUp)
         if (this.call !== call) return
@@ -244,39 +322,48 @@ export class Supervisor implements Agent {
       if (connection.unconfirmedPlayback) this.notices.push(createUserMessage({ content: [{ type: 'text', text: '[The audio transport closed; pending playback stopped. The final client playback acknowledgement is unavailable, so do not assume the complete spoken reply was heard.]' }], source: { kind: 'nexus-voice', form: 'notice', summary: 'unconfirmed playback after disconnect' } }))
     }
     const hangUp = () => { if (this.call !== call) return; if (call.connection) { lostPlayback(call.connection); this.hungUp.add(call.connection); call.connection.hangup() } call.end() }
+    let recovered = false
+    let accepted = false
+    const connect = async (previous?: RealtimeConnection) => {
+      const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
+      const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
+      if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
+      call.abort.signal.throwIfAborted()
+      // Something was said meanwhile: keep the connection, the next boundary tries again.
+      if (previous && (call.connection !== previous || !previous.quiet)) return false
+      const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
+        audio: link.audio,
+        flush: link.flush,
+        // The model learns what was heard before it answers the speech that stopped the playback.
+        cut: cut => { const notice = cutNotice(cut); this.notices.push(notice); connection.insert(notice) },
+        committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
+        ignored: error => this.ctx.logger.info(`nexus voice: endpoint error left the call up: ${error.message}`),
+        failed: error => {
+          lostPlayback(connection)
+          // Only a live call recovers transport failure; the user's end aborts this owner first.
+          if (!accepted || recovered || this.call !== call || !['CONNECTION_CLOSED', 'CONNECTION_FAILED'].includes(error.code)) return call.end(error.code)
+          recovered = true
+          link.flush()
+          link.state('connecting')
+          call.reconnect()
+        },
+      })
+      if (previous) {
+        // Audio the client may still be playing is accounted for on the new connection; nothing is flushed.
+        link.state('connecting')
+        connection.takeOver(previous.retire())
+      }
+      call.connection = connection
+      call.since = this.session.seq
+      await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
+      // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
+      for (const notice of this.notices) connection.insert(notice)
+      return true
+    }
     this.call = call
     signal.addEventListener('abort', hangUp, { once: true })
     try {
       await this.compose()
-      let recovered = false
-      let accepted = false
-      const connect = async () => {
-        const assembly = await this.prompt.assemble(assembleContextFor(this, call.abort.signal))
-        const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
-        if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
-        call.abort.signal.throwIfAborted()
-        const connection = new RealtimeConnection(this.config.endpoint, credential.value, call.abort.signal, this.config.timeoutMs ?? 30000, {
-          audio: link.audio,
-          flush: link.flush,
-          // The model learns what was heard before it answers the speech that stopped the playback.
-          cut: cut => { const notice = cutNotice(cut); this.notices.push(notice); connection.insert(notice) },
-          committed: turn => { this.voiceTurns.push(turn); this.wakeRequested = true; this.wake() },
-          ignored: error => this.ctx.logger.info(`nexus voice: endpoint error left the call up: ${error.message}`),
-          failed: error => {
-            lostPlayback(connection)
-            // Only a live call recovers transport failure; the user's end aborts this owner first.
-            if (!accepted || recovered || this.call !== call || !['CONNECTION_CLOSED', 'CONNECTION_FAILED'].includes(error.code)) return call.end(error.code)
-            recovered = true
-            link.flush()
-            link.state('connecting')
-            call.recovering = connect().then(() => { if (this.call === call) link.state('live') }).catch(failure => call.end(failure instanceof RealtimeFailure ? failure.code : 'CONNECTION_FAILED'))
-          },
-        })
-        call.connection = connection
-        await connection.open(this.surface(), assembly.tools, `${VOICE_INSTRUCTIONS}\n\n${renderPrompt(assembly)}`)
-        // Notices can be waiting for a native turn when the user reconnects immediately after hanging up.
-        for (const notice of this.notices) connection.insert(notice)
-      }
       await connect()
       accepted = true
       return { append: audio => call.connection?.appendAudio(audio), played: samples => call.connection?.played(samples), hangup: samples => { if (call.connection) { this.hungUp.add(call.connection); call.connection.hangup(samples) } call.end() }, end: hangUp }
@@ -304,12 +391,16 @@ export class Supervisor implements Agent {
     const previous = this.session.requestHeader()
     const header = { config: this.options, tools: assembly.tools }
     this.session.append('request/header', { header, reason: !previous ? 'initial' : JSON.stringify(previous) === JSON.stringify(header) ? 'series' : 'change' })
+    // The Nexus budget is the capacity the main conversation is kept within.
+    const contextWindow = this.config.compactionBudget.get()
+    const routed = this.session.requestContext()
+    if (routed?.provider !== this.options.provider || routed.model !== this.options.model || routed.contextWindow !== contextWindow) this.session.append('request/context', { ...this.options, contextWindow })
     const system = this.session.surface.nodes.map(seq => this.session.eventAt(seq)).find(event => event?.type === 'system/message')
     if (!system || JSON.stringify(system.data.message.content) !== JSON.stringify([{ type: 'text', text: instructions }])) {
       this.session.append('system/message', { turn, step, message: createSystemMessage(instructions) }, system ? { surfaceOp: { op: 'replace', startSeq: system.seq, endSeq: system.seq }, sourceEventSeqs: [system.seq] } : { surfaceOp: 'append' })
     }
     const context = renderContextSnapshot(assembly)
-    const retained = this.session.snapshotEvents().findLast(event => event.type === 'user/message' && event.data.source.kind === 'nexus-runtime')
+    const retained = this.surface().findLast(event => event.type === 'user/message' && event.data.source.kind === 'nexus-runtime')
     if (context && (!retained || retained.type !== 'user/message' || JSON.stringify(retained.data.content) !== JSON.stringify([{ type: 'text', text: context }]))) this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'nexus-runtime', form: 'snapshot' } }), { surfaceOp: 'append' })
     if (!this.connection) {
       const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
@@ -356,6 +447,7 @@ export class Supervisor implements Agent {
         push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.settledAt)
         push({ type: 'block-end', index: offset + 1, block: call }, response.settledAt)
       }
+      if (response.usage) push({ type: 'usage', usage: response.usage }, response.settledAt)
       push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.settledAt)
       if (!text && !calls.length) {
         this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
@@ -364,7 +456,7 @@ export class Supervisor implements Agent {
       const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...calls], source: this.options })
       connection.markPresent(message.id)
       // Cancelled streams retain the delivered prefix; a commit folded into later speech may be empty.
-      const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
+      const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.usage ? { usage: response.usage } : {}), ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {
       begin()
