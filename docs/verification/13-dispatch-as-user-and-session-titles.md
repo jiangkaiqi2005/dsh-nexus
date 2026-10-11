@@ -73,7 +73,25 @@ npm test
 git diff --check
 ```
 
+## 用户实机验收发现与第 2 轮修复
+
+2026-10-10 用户在 Desktop 安装 `2247020` 构建的 tgz 实机验收，发现两处问题。只读诊断使用用户导出的会话副本 `.scratch/nexus-v1/acceptance-20261010/`（sessions、storages、cordis.yml、cordis.patch.yml），未读写 `~/.dsh`；解码与导出脚本及结果在 `.scratch/nexus-v1/acceptance-20261010-diag/`（`decode.cjs`、`dump.cjs`、`titles.cjs`，工作会话全部事件 `s10dec.txt`，主管日志 `sup.txt`、`sup-window.txt`）。
+
+**A. Nexus 新建会话只有兜底标题，没有模型标题（非 Nexus 缺陷，不改代码）。** 工作会话 `session-10dec8d3`：seq 9 派活来源为 `user` + `via: nexus`；seq 12 主请求路由 `ark-coding-plan/glm-5.3-flash`（Desktop `agent-default-model`）；seq 14 兜底标题“列出 src 目录下的文件。只输”；seq 15 原生 `session/title-llm-request`（`session-title-first-prompt-llm`，同一路由，`maxTokens: 64`），此后没有 `provider` 标题。即 Nexus 侧行为正确：派活取得命名资格，原生照常写兜底并发出命名请求。对照：用户自建会话 `session-d1f309d6` 路由 `deepseek-account/deepseek-flash`，seq 15 兜底、seq 16 请求、seq 19 得到模型标题；`session-8439fb02`（`deepseek-official/deepseek-v4-pro`）seq 18 同样成功。glm-5.3-flash 每次回答都先输出 reasoning（seq 16 简单一步也先推理，seq 37 输出 3459 tokens），`dsh-base` 默认的 `maxOutputTokens: 64`（未覆盖命名模型，沿用主请求路由）很可能被推理耗尽；原生 `dsh-session-title-llm` 此时抛出“reached maxOutputTokens”或“produced no text”，只记 `logger.warn`、不写会话，于是只剩兜底标题。按原生规则，同一路由下的普通会话也会如此；副本中没有用户手打首条消息且走 glm 的普通会话可直接对照，warn 原文在 Desktop 主机日志（`~/.dsh` 下）中，未读取。协调者裁定不改代码，向用户建议在 Desktop 配置中为 `session-title-llm` 指定不推理的命名模型。
+
+**B. 用户在工作会话输入“发个你好，不要发其他的任何信息”，主会话立刻回了“你好”（Nexus 措辞缺陷，已修）。** 工作会话 seq 32/36（02:21:33.808）收到该输入，seq 37 回复“你好”，seq 39 轮次 completed（约 97 s，glm 推理用时）。主管日志 seq 561（02:21:33.810）收到 `nexus-user-input` 镜像，1 s 后 seq 563 主管自己回复“你好”，这就是用户看到的那句；seq 571（工作轮结束后 3 ms）收到 `nexus-work-result`（“Final content: 你好”），seq 573 主管确认。此前 seq 543 镜像“这句话照常同步到主会话”后，主管 seq 545 原样复述了这句话。三个轮次结果（工作会话 seq 23/31/39）各回流一次（主管 seq 533/552/571），两条镜像各一次（543/561），没有丢失或被去重吞没。根因是镜像通知（`src/results.ts` 末句“Treat it as the current user requirement … rather than only restating it”）与主管指令（`src/realtime.ts` 称其为“explicit user instructions … take priority”）都没说明它是写给工作会话 agent 的，镜像又按票 05 唤醒主管，实时模型便把内容当作对自己的命令执行或复述。
+
+按协调者裁定采用方案 1，只改措辞，不改唤醒语义：
+- 镜像通知末句改为两句：该输入写给那个工作会话的 agent，由它执行，执行结果会作为自动工作结果回来；主管不要自己执行或回答其内容，也不要复述。作为用户明确指令，它优先于主管此前的派活：只在它改变主管自己的安排时调整（例如停止或改派其他会话，或改变后续派活、评审与汇报），否则简短确认或保持安静。
+- 主管指令（文字与语音共用部分）中关于 `nexus-user-input` 的一句同样改写，保留“优先于此前派活”的语义。
+- `tests/results.test.mjs` 新增受控用例：以本次实机输入为内容，断言通知含上述关键语义且不再含旧句，并断言文字与语音两份主管指令含同样表述。
+
+第 2 轮检查（未调用付费真实模型）：在旧措辞构建上运行新用例 `ticket13/r3-red-results.txt`：14 项，13 passed / 1 failed，失败的就是新用例（旧通知不含“addressed to the agent of that work session …”），exit 1；改后 `ticket13/r3-typecheck.txt`、`ticket13/r3-build.txt` exit 0，`ticket13/r3-results.txt` 14 passed / 0 failed，`ticket13/r3-steering.txt` 1 passed / 0 failed / 1 skipped（真实端点用例，证据 `steering-controlled-1791687448554`），全量 `ticket13/r3-npm-test.txt`：93 项，82 passed / 0 failed / 11 skipped，371.5 s，exit 0（比上轮多出本轮新用例 1 项；本票 Host 证据 `titles-1791687523105`；11 项 skipped 同前）；`git diff --check` 无输出。受控验证只锁定文本；真实实时模型是否据此不再代为执行，待用户在 Desktop 复验。
+
 ## 未验证与待用户验收
+
+- 第 2 轮镜像措辞调整后，真实主管模型面对工作会话中的直接输入是否不再代为执行或复述、只在需要时调整安排并在结果回来后汇报，待用户在 Desktop 复验。
+- 实机发现 A：Desktop 默认模型 glm-5.3-flash 下 Nexus 新建会话只有兜底标题（见上节，证据工作会话 `session-10dec8d3` seq 14/15，对照 `session-d1f309d6` seq 19）；同一模型下普通会话是否同样只有兜底、Desktop 日志中的失败原文，未验证；为 `session-title-llm` 指定不推理命名模型后的效果待用户确认。
 
 - Desktop 程序中侧栏的实际标题（新建会话的自动命名、主会话显示 Nexus 或用户改的名称）与派活在会话中的显示，待用户实机验收；本票只以官方 Web 客户端代码在 headless Edge 中验证。
 - 真实命名模型：Desktop 的命名默认使用工作会话主请求的模型（如 `deepseek-flash`），本票用受控适配器，未调用真实模型，标题内容与语言风格未验证。

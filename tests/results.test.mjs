@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { ResultRelay } from '../dist/results.js'
+import { INSTRUCTIONS, VOICE_INSTRUCTIONS } from '../dist/realtime.js'
 
 // Controlled relay-level checks over real native Session events. The Host-level
 // delivery test proves the same relay against a live supervisor.
@@ -160,6 +161,23 @@ test('direct user input in a work session reaches the supervisor under its own s
   assert.match(textOf(target.delivered[0]), new RegExp(`User message: ${steer.id}\nContent:\nswitch to THEME-AMBER\n`))
   assert.match(textOf(target.delivered[1]), /Admitted as a queued prompt[\s\S]*afterwards write the summary/)
   assert.match(target.delivered[0].source.summary, /^user to w: switch to THEME-AMBER/)
+})
+
+test('a mirrored user input tells the supervisor the work agent carries it out: not to perform, answer or repeat it, only to adjust its own arrangements', () => {
+  const target = supervisor()
+  const worker = session('w')
+  relay(target).observe(worker, admit(worker, 'next-turn', userInput('发个你好，不要发其他的任何信息')))
+  const text = textOf(target.delivered[0])
+  assert.match(text, /\nContent:\n发个你好，不要发其他的任何信息\n/)
+  assert.match(text, /addressed to the agent of that work session, which carries it out; its outcome reaches you later as an automatic work-session result\./)
+  assert.match(text, /Do not carry out or answer its content yourself, and do not repeat it back\./)
+  assert.match(text, /explicit user instruction it takes priority over your earlier dispatches: adjust your own arrangements only where it changes them \(for example stop or redirect another session[^)]*\); otherwise acknowledge briefly or stay silent\.$/)
+  assert.doesNotMatch(text, /Treat it as the current user requirement/)
+  // The standing instructions, text and voice alike, frame the same source the same way.
+  for (const instructions of [INSTRUCTIONS, VOICE_INSTRUCTIONS]) {
+    assert.match(instructions, /source nexus-user-input mirror what the user typed directly into a work session: they are explicit user instructions addressed to the agent of that session, which already has them \(no need to resend\) and carries them out; its outcome reaches you later as an automatic work-session result\. Do not carry out, answer or repeat their content yourself\. They take priority over your earlier dispatches: adjust your own arrangements only where they change them/)
+    assert.match(instructions, /otherwise acknowledge briefly or stay silent\./)
+  }
 })
 
 test('only the user own input to conversation sessions is mirrored: no supervisor feedback, Nexus dispatch, agent message, subagent session, claim or replayed notice', () => {
