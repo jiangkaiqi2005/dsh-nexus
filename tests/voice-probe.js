@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const inject = ['agents', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools']
+export const inject = ['agents', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools', 'workspaceRegistry']
 const SUPERVISOR = 'nexus-supervisor'
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const exists = path => access(path).then(() => true, () => false)
@@ -18,7 +18,7 @@ export function apply(ctx, config) {
   const flag = name => resolve(config.dir, name)
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
-      while (!(await exists(flag('release')))) { options.signal.throwIfAborted(); await sleep(50) }
+      while (!config.navigation && !(await exists(flag('release')))) { options.signal.throwIfAborted(); await sleep(50) }
       const text = `Docs ready: ${config.marker}`
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -39,6 +39,16 @@ export function apply(ctx, config) {
       try {
         await ctx.agentDefaultModel.saveSelection({ provider: 'voice-worker', model: 'worker-model' })
         await ctx.sessionController.create({ sessionId: 'docs', cwd: config.workspace })
+        if (config.navigation) {
+          for (const [sessionId, cwd, title] of [['docs', config.workspace, '导航工作会话'], ['other-work', resolve(config.workspace, 'other-project'), '另一个项目会话']]) {
+            const workspace = await ctx.workspaceRegistry.create(cwd)
+            if (sessionId !== 'docs') await ctx.sessionController.create({ sessionId, workspaceId: workspace.id })
+            else await workspace.attachSession(sessionId)
+            await ctx.sessionController.prompt({ sessionId, requestId: `navigation-${sessionId}`, mode: 'queue', content: [{ type: 'text', text: '准备可导航的工作会话' }] }, new AbortController().signal)
+            await ctx.agents.get(sessionId).whenIdle()
+            await ctx.sessionController.rename({ sessionId, title })
+          }
+        }
         while (!stopped && !(await exists(flag('finish')))) {
           const agents = ctx.agents.list().map(agent => {
             const events = agent.session.snapshotEvents()

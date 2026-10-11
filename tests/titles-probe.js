@@ -6,11 +6,22 @@ export function apply(ctx, config) {
   const sleep = ms => new Promise(accept => setTimeout(accept, ms))
   // What each work agent's model actually received as human text, per session, in request order.
   const received = {}
+  const titleRequests = []
+  const titleBudgetLogs = []
+  ctx.logger.exporter({ export: message => { for (const text of message.args) if (typeof text === 'string' && text.startsWith('nexus title budget: ')) titleBudgetLogs.push(JSON.parse(text.slice('nexus title budget: '.length))) } })
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
       let text
       if (options.purpose === 'session-title') {
         const framed = options.messages[0].content[0].text
+        titleRequests.push({ sessionId: options.sessionId, provider: options.provider, model: options.model, maxTokens: options.maxTokens })
+        // Reasoning-only exhaustion reproduces fallback-only naming on the same work model route.
+        if (framed.includes('run-titled-new:') && options.maxTokens < 4096) {
+          yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+          yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'The small output budget was spent reasoning before the title.' } }
+          yield { type: 'finish', reason: { kind: 'max-tokens' } }
+          return
+        }
         text = `Title ${JSON.parse(framed.slice(framed.indexOf('['))).at(0).text.slice(0, 24)}`
       } else {
         const human = options.messages.filter(message => message.role === 'user' && message.source.kind === 'user').map(message => message.content.filter(part => part.type === 'text').map(part => part.text).join('\n'))
@@ -107,7 +118,7 @@ export function apply(ctx, config) {
         const reader = await ctx.sessionPersistence.open(agent.id, 'read')
         const { events } = await reader.read()
         await reader.close()
-        await writeFile(config.report, JSON.stringify({ phase: config.phase, startup, final, events, workers, listed, received }))
+        await writeFile(config.report, JSON.stringify({ phase: config.phase, startup, final, events, workers, listed, received, titleRequests, titleBudgetLogs }))
       } catch (error) { await writeFile(config.report, JSON.stringify({ error: String(error), stack: error.stack })) }
     }, 1800)
     return () => clearTimeout(timer)

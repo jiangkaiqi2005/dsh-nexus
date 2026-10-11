@@ -194,18 +194,17 @@ window.__ModuleLoader__.load({
       zh: { idle: '语音未接通', 'requesting-mic': '正在请求麦克风…', connecting: '正在接通…', live: '已接通 Nexus', 'mic-denied': '麦克风权限被拒绝', 'no-device': '没有可用的麦克风', 'mic-failed': '麦克风不可用', 'playback-blocked': '音频播放未就绪', failed: '通话失败' },
     }
 
-    function CallBar({ sessionId, call, remote, t }) {
+    function CallBar({ sessionId, call, remote, t, floating = false }) {
       const [, render] = React.useReducer(count => count + 1, 0)
       React.useEffect(() => call.subscribe(render), [call])
-      React.useEffect(() => { if (sessionId !== SUPERVISOR) call.hangup(); return () => call.hangup() }, [sessionId, call])
       React.useEffect(() => {
         if (sessionId === SUPERVISOR && call.autoPending) { call.autoPending = false; call.start(remote) }
       }, [sessionId, call, remote, call.autoPending])
-      if (sessionId !== SUPERVISOR) return null
+      if (floating ? call.state === 'idle' : sessionId !== SUPERVISOR || call.state !== 'idle') return null
       const busy = call.active
       return h('div', {
         'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played, 'data-flushes': call.flushes, 'data-discarded-samples': call.discarded,
-        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13 },
+        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13, ...(floating ? { position: 'absolute', bottom: 20, right: 24, pointerEvents: 'auto', background: 'var(--color-background, Canvas)', border: '1px solid currentColor', borderRadius: 8 } : {}) },
       },
       h('span', { role: 'status' }, t(`state-${call.state}`) + (call.code && !busy ? ` (${call.code})` : '')),
       h('button', {
@@ -315,6 +314,10 @@ window.__ModuleLoader__.load({
             uiCtx.slots.inject('conversation.input.dock', () => uiCtx.slots.register({
               name: 'conversation.input.dock', id: 'nexus-voice', locale: 'nexus',
               inject: sessionId => ({ sessionId, call, remote: uiCtx.remote.nexusVoice }),
+            }, CallBar))
+            uiCtx.slots.inject('shell.overlay', () => uiCtx.slots.register({
+              name: 'shell.overlay', id: 'nexus-voice', locale: 'nexus',
+              inject: () => ({ call, remote: uiCtx.remote.nexusVoice, floating: true }),
             }, CallBar))
             uiCtx.remote.nexusVoice.claimStartup().then(async response => {
               if (disposed) return

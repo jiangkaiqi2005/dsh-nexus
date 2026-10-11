@@ -133,7 +133,7 @@ git diff --check
 
 本次只登记用户反馈，没有读取用户现用配置、调用真实模型、重新安装或修改产品代码。标题、语音切换及引导问题保留待核实，两票均不记整票验收完成。
 
-## 未验证与待用户验收
+## 本轮修复前未验证项（历史状态）
 
 - 文字模式镜像输入已获用户确认通过；语音模式镜像输入被切换后的断话阻断，尚未完成验收。用户点名 Nexus 做事的补充步骤没有单独的会话证据。
 - 新建会话已确认生成兜底标题；没有模型标题的实际路由、原生命名请求与失败原因待核对。
@@ -144,3 +144,34 @@ git diff --check
 - 用户 Desktop 主会话当前标题的实际来源（复核 4）。
 - Desktop 打包冒烟（复审时授权运行，见上文首轮评审处置）只验证到插件在 Desktop 自带运行时加载、主会话标题落盘为 Nexus；冒烟截图时主会话尚无完成轮次，侧栏 Nexus 工作区下还没有列出它，会话标题栏显示的是会话 id `nexus-supervisor`。官方 Web 客户端对有完成轮次的主会话，标题栏与侧栏都显示标题（受控验证中为“我的管家”）。Desktop 中空白主会话是否显示 Nexus，待实机确认。
 - 真实模型下主管是否据来源标记正确辨认自己的派活（读取会话记录时），未用真实模型验证。
+
+## 第 4 轮：模型标题、跨会话通话与已有会话引导
+
+2026-10-10，固定实施基点 `7e97bbc6bbba38c2ba43ffee2f836c5199ef0253`。用户不继续人工验收，并明确前两条注释（切换工作会话断话、已有会话任务引导）与模型标题都要修复。本轮三项同时实施；这取代前文 A 的“不改插件”处置，但不变更 ADR 0004 的来源、正文、原生命名与工作标题不由主管重命名规则。不改票 12 压缩实现，不修改 Desktop 配置或默认工作模型，不读真实凭据，不调用付费模型。最新用户会话仅由协调者复制 sessions 到忽略目录作只读诊断；没有写生产数据。
+
+### 诊断与最小修复
+
+| 问题 | 证据与修复 | 验证边界 |
+| --- | --- | --- |
+| 模型标题缺失 | 当前副本 `session-3bd49f9f` seq 14 是兜底“列出 src 目录的文件，不要修”，seq 15 原生命名走 `ark-coding-plan/glm-5.3-flash`、预算 64，之后无 provider 标题。真实失败 warn 未取到，不能把“推理耗预算”当作已证实的真实模型根因。真实原生命名服务加受控推理适配器重现了 64 只 reasoning、max-tokens、保留 fallback；同一路由仅预算改为 4096 后产生 provider 标题。新模块通过公共 `llm/stream` waterfall，仅标记本进程 `nexus_create_session` 创建的确切 live Session 与派活 callId，匹配第一条经 Nexus 的 user 输入、原生 first-prompt 命名器及稳定消息 ID/序号，消费一次资格，再把有限输出预算提高到至少 4096。原生标题提示仍要求短标题，失败仍留 fallback。 | 不改变路由、不增加思考策略/设置、不由 Nexus 生成标题；8192 等更大预算不降低；普通/旧/已有标题、用户先输入的新会话、手动刷新和正常工作请求不改。真实模型在此预算下的成功率未调用验证。 |
+| 切换断话 | 浏览器通过原生侧栏切到工作会话，旧实现立即移除通话控件，麦克风 track ended。原因是 `CallBar` 的 sessionId 变化与组件卸载 effect 调用 hangup。保留客户端单一 Call owner 和插件释放 effect；输入 dock 仅显示闲置接通，活动/失败控件移至公共 `shell.overlay`。切换会话/项目、空白会话、设置不结束通话，侧栏折叠仍可见挂断。 | 真实 headless Edge、官方客户端、实际假设备麦克风采集与本地 WS；同一条模型连接保持，直接输入镜像进入该连接。设置原生模态打开时可先关闭设置再挂断，未覆盖其焦点规则。真实物理麦克风/扬声器与用户 Desktop 本轮未操作。 |
+| 已有会话引导 | 真实主管 seq 1334 未先查列表而派错目标，用户纠正后 seq 1349 list、1355 正确 followup accepted。工作会话 `session-d1f309d6` seq 147 原生 pwsh 开 120 秒背景 job `pwsh-3`，seq 153 轮次已 completed；主管 seq 1379/1394/1400 只发 stop_session，agent 已闲置但 job 继续，最终 seq 161 输出 TIMER-2MIN-DONE。主管把 agent stop 接受误报为计时器停止；未发现原生 steer 传输丢失。工具说明与主管共用指令明确点名已有会话先查最新 projections.values.title/id；业务停止经 send_session 要求 worker 取消相关 job 并核实；stop_session 只取消当前轮次，返回 scope=current-turn、backgroundJobsCancelled=false、completed=false；只有实际工作结果/会话证据才可报停止完成。 | 不加 Host 意图分类或自动取消；闲置 followup、运行中 next-step steer 保持原生。受控主管执行既定工具脚本、受控 worker 执行真实原生 pwsh/job 工具，不宣称提示词可以保证真实模型遵循。 |
+
+原生 `session/title-llm-request` 在 waterfall 前记录，仍包含 64 的原生参数提案；它不代表最终适配器收到了 64。实际调整通过插件 Host `logger.info` 的 `nexus title budget:` 记录（仅 sessionId、titleProvider、messageSeq、callId、originalMaxTokens、maxTokens），并由受控适配器真实 options 对照。没有额外自定义会话事件、没有重复原生请求事件、没有正文或凭据写入该审计日志。四次实际持久化重启仍只恢复原生已知事件。
+
+### 本轮自验
+
+命令日志位于 `.scratch/nexus-v1/ticket13-title-fix-20261010/`，不提交该目录：
+
+- `red-repro.txt`：真实命名服务旧预算 64，适配器仅输出 reasoning 后 max-tokens，断言 provider 失败；`budget-experiment.txt` 仅把预算扩大后成功，`green-repro.txt` 为实际新模块成功。原始红实验保留，没有为了取红调用真实模型。
+- `red-titles.txt`：实际隔离 Host 新建会话止于 fallback；`green-titles-final.txt`：1 passed / 0 failed，35.21 s。使用最终 logger 审计，实际发送命名预算 4096、同工作路由，普通命名仍 64；四次持久化重启与真实客户端检查通过，没有重复请求事件。中间 `green-titles.txt` 使用的重复请求审计方案已废弃，不作为最终证据。
+- `title-budget.txt`：4 passed / 0 failed，178 ms；推理耗预算转成功、更高预算保留、旧/普通/已有标题和用户先输入不变、后续 refresh/工作请求不变、持续失败留真实 fallback。
+- `red-voice-navigation-final.txt`：1 failed，7.654 s，切工作会话后控件 0、track ended；`green-voice-navigation-complete.txt`：1 passed / 0 failed，9.271 s，证据 `voice-navigation-1791700499187`。覆盖跨会话/项目、空白视图、设置、折叠侧栏、同通话输入镜像、显式挂断释放及返回 Nexus 不重开。
+- `red-background-stop-final.txt`：1 failed，15.338 s，真实 job 在 agent stop 前后仍 running，返回缺少 current-turn scope；`green-background-stop.txt`：1 passed / 0 failed，14.986 s，证据 `steering-controlled-1791700605554`。worker 原生 pwsh → job_list → job_kill → job_output(wait) → job_list，全程无工具错误，最后 job killed。仅一次性 fixture 会话以公共 setSandboxMode 运行固定本地计时命令，绕过当前测试机器不可用的 Windows ACL sandbox；没有改变用户配置。
+- 测试探索中背景第一次 timeout 是 fixture 未解包 Realtime function_call_output；另一 fixture 命令因 Windows ACL grantWrite 失败，未记为产品红。语音探索中的列表折叠、设置遮罩和“展开”按钮名称定位失败也未记为产品红，各证据目录保留。
+- `typecheck-three.txt`、`build-three.txt` exit 0；`related-three.txt`：22 项，21 passed / 0 failed / 1 skipped（真实端点）；随后共享 steering Host 改用仓库 startHost 的 Windows Job Object 整树清理，最终完整套件另记结果。
+- 首次全量 `npm-test-three.txt`：102 项，89 passed / 2 failed / 11 skipped，515.255 s，exit 1。两处旧测试用 `bar.evaluate(element)` 缓存活动控件，在挂断后仍点击已卸载的旧按钮，分别等待第二次 live 和前台工具期间重连超时；其他用例通过。将第二次点击重新查询当前 `[data-nexus-voice] button`，没有放松两次通话、精确状态序列、迟到麦克风释放、工具只执行/返回一次等原断言。`voice-races-current-control.txt`：1 passed，12.161 s；`voice-tool-current-control.txt`：1 passed，11.778 s。产品逻辑未因此修改，最终全量保留旧控件 isConnected 的诊断输出并重新验证。
+- 第二次全量 `npm-test-three-final.txt`：102 项，90 passed / 1 failed / 11 skipped，394.522 s，exit 1；两项重新查询控件的通话回归均通过，诊断确认旧控件 `isConnected=false`。唯一失败在启动权限失败 fixture：等待已确认 ready.json 后再次读取，恰逢 probe 每 100 ms 截断重写文件的窗口，读取结果为空，获取 pid 抛 TypeError；尚未进入权限行为断言。改为保留等待时已成功解析的同一快照取 pid，没有忽略失败或增大超时。`startup-ready-snapshot.txt`：启动整文件 5 passed / 0 failed，73.548 s，覆盖重启、不重复自动接通，以及权限、设备、播放、模型失败后的手动恢复。产品文件未因该测试修正改变。
+- 最终全量 `npm-test-three-final-2.txt`：102 项，91 passed / 0 failed / 11 skipped，399.079 s，exit 0；包括新增标题预算、跨视图通话、已有会话背景任务取消、原生闲置/运行引导，以及既有压缩、重启、断线、打断、工具与播放时序回归。11 项是需要真实模型端点或显式启用 Desktop 的既有用例，未计作通过。最终 `typecheck-final.txt`、`git diff --cached --check` 均 exit 0。没有因测试 fixture 修正再改产品逻辑。
+
+实施阶段尚未打包安装；交回协调者按固定快照做标准/规格双轴评审，再打包与隔离 Desktop 冒烟。票 12 已有较长对话及后续操作仍未验收。用户不继续人工验收，不代表这些未执行步骤通过；真实模型遵循引导及本轮物理设备效果仍无新增实机结论。

@@ -6,6 +6,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { registerWorkSessionTitles } from './work-session-titles.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -25,6 +26,7 @@ export const isNexusDispatch = ({ source }: UserMessage) => source.kind === 'nex
  * Nexus manages conversation sessions only; subagent sessions belong to the agent that spawned them.
  */
 export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: ToolRuntime) {
+  const trackTitle = registerWorkSessionTitles(ctx)
   const output = { schema: { type: 'json' } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
   const sessionId = { type: 'string', required: true, description: 'Target native conversation session identity.' } as const
   const text = { type: 'string', required: true, description: 'Task or guidance to deliver, preserving the user requirements.' } as const
@@ -54,7 +56,7 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
       return { items: ctx.workspaceRegistry.list().map(({ id, title, path }) => ({ id, title, path })) }
     },
   }))
-  tools.register(defineTool({ name: 'nexus_list_sessions', description: 'List all native conversation sessions, including existing user-created sessions, without activating them. Subagent sessions are not listed.', parameters: {}, output,
+  tools.register(defineTool({ name: 'nexus_list_sessions', description: 'List all native conversation sessions, including existing user-created sessions, without activating them. Resolve a conversation named by the user from its current projections.values.title and stable sessionId before sending work; do not guess from stale names. Subagent sessions are not listed.', parameters: {}, output,
     execute: async (_args, exec) => JSON.parse(JSON.stringify({ items: (await ctx.sessionController.list({}, exec.signal)).items.filter(item => item.sessionId !== supervisor.id && item.origin !== 'subagent') })) as JsonValue,
   }))
   tools.register(defineTool({ name: 'nexus_read_session', description: 'Read native conversation session state and a bounded history page. Use beforeSeq to read earlier context when hasMore is true.', parameters: { sessionId, beforeSeq: { type: 'integer' } }, output,
@@ -73,10 +75,12 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
       exec.signal.throwIfAborted()
       const created = await ctx.sessionController.create({ workspaceId: workspace.id, ...(args.agentPreset ? { agentPreset: args.agentPreset } : {}) })
       exec.signal.throwIfAborted()
-      return send(await resolve(created.sessionId), args.text, exec.callId)
+      const agent = await resolve(created.sessionId)
+      trackTitle(agent.session, exec.callId)
+      return send(agent, args.text, exec.callId)
     },
   }))
-  tools.register(defineTool({ name: 'nexus_send_session', description: 'Deliver a task to any existing conversation session. Idle agents wake; running agents receive native next-step steering. Acceptance is not completion.', parameters: { sessionId, text }, output,
+  tools.register(defineTool({ name: 'nexus_send_session', description: 'Deliver a task or changed requirement to an existing conversation resolved with nexus_list_sessions. Idle agents wake; running agents receive native next-step steering after their running tool finishes. To stop a business task, ask its worker to cancel relevant background jobs and verify the outcome using its native job tools. Acceptance is not completion; inspect the worker result before reporting that task stopped.', parameters: { sessionId, text }, output,
     execute: async (args, exec) => {
       await conversation(args.sessionId, exec.signal)
       const agent = await resolve(args.sessionId)
@@ -84,13 +88,13 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
       return send(agent, args.text, exec.callId)
     },
   }))
-  tools.register(defineTool({ name: 'nexus_stop_session', description: 'Request native cancellation of a conversation session current turn while retaining its queued input. Use only when the goal calls for stopping; acceptance is not completion.', parameters: { sessionId }, output,
+  tools.register(defineTool({ name: 'nexus_stop_session', description: 'Request native cancellation of only a conversation session current agent turn while retaining queued input. This does not cancel its detached background jobs, timers or processes; an idle agent may still own running jobs. To stop the task itself use nexus_send_session to ask its worker to cancel and verify relevant jobs. Acceptance is not completion or proof that the task stopped.', parameters: { sessionId }, output,
     execute: async (args, exec) => {
       await conversation(args.sessionId, exec.signal)
       const agent = await resolve(args.sessionId)
       exec.signal.throwIfAborted()
       agent.cancel({ kind: 'hook', reason: `Nexus ${supervisor.id} tool ${exec.callId}` }, { keepInbox: true })
-      return { sessionId: agent.id, accepted: true, completed: false }
+      return { sessionId: agent.id, accepted: true, completed: false, scope: 'current-turn', backgroundJobsCancelled: false }
     },
   }))
 }

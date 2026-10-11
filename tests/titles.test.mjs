@@ -175,6 +175,10 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   assert.deepEqual(titles(created.events), [['run-titled-new: 实现登录页并写测', 'fallback'], ['Title run-titled-new: 实现登录页并写测', 'provider']])
   assert.equal(one.listed.find(item => item.sessionId === created.id).title, 'Title run-titled-new: 实现登录页并写测')
   assert.deepEqual(one.received[created.id][0], [dispatchText], 'the work model receives exactly the dispatched text as the user request')
+  assert.deepEqual(one.titleRequests.find(request => request.sessionId === created.id), { sessionId: created.id, provider: 'title-worker', model: 'worker-model', maxTokens: 4096 })
+  assert.deepEqual(one.titleBudgetLogs, [{ sessionId: created.id, titleProvider: 'session-title-first-prompt-llm', messageSeq: dispatchEvent.seq, callId: createCall.call_id, originalMaxTokens: 64, maxTokens: 4096 }])
+  assert.equal(created.events.filter(event => event.type === 'session/title-llm-request').length, 1, 'the native pre-waterfall request is not duplicated')
+  assert.ok(one.titleRequests.filter(request => !request.sessionId.startsWith('session-')).every(request => request.maxTokens === 64), 'ordinary existing conversations keep the native title budget')
   // A later dispatch after a restart reaches the now titled session and leaves its title alone.
   assert.ok(worker(four, created.id).events.some(event => event.type === 'user/message' && isDispatch(event.data.source) && textOf(event.data) === 'run-new phase two from Nexus'))
   assert.deepEqual(titles(worker(four, created.id).events), titles(created.events))

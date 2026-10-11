@@ -1,8 +1,9 @@
 import { writeFile, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 
-export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel']
+export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'jobs', 'sessionTitle']
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const SUPERVISOR = 'nexus-supervisor'
 const THEME = /THEME-[A-Z]+/g
@@ -21,6 +22,36 @@ export function apply(ctx, config) {
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
       const messages = options.messages
+      if (config.background) {
+        const input = messages.findLast(message => message.role === 'user' && message.source.kind === 'user')
+        const after = messages.slice(messages.indexOf(input) + 1)
+        const results = after.filter(message => message.role === 'tool')
+        const stopping = input && textOf(input).includes('STOP-BACKGROUND')
+        let call
+        if (options.purpose === 'session-title') {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: '后台计时工作' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        if (!stopping && !results.length) call = { name: 'pwsh', arguments: { command: "Start-Sleep -Seconds 45; Write-Output 'TIMER-DONE'", description: 'Start the controlled background timer', run_in_background: true } }
+        if (stopping && !results.length) call = { name: 'job_list', arguments: {} }
+        if (stopping && results.length === 1) call = { name: 'job_kill', arguments: { job_id: textOf(results[0]).match(/pwsh-\d+/)?.[0], reason: 'User asked to stop the timer' } }
+        if (stopping && results.length === 2) call = { name: 'job_output', arguments: { job_id: textOf(results[0]).match(/pwsh-\d+/)?.[0], wait: true } }
+        if (stopping && results.length === 3) call = { name: 'job_list', arguments: {} }
+        if (call) {
+          const block = { type: 'tool-call', id: `timer-${crypto.randomUUID()}`, name: call.name, arguments: JSON.stringify(call.arguments) }
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'block-end', index: 0, block }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        const text = stopping ? `Timer verified: ${textOf(results.at(-1))}` : 'Timer started in the background; the worker turn is complete.'
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       const last = messages.findLast(message => message.role === 'assistant' || message.role === 'tool')
       if (last?.role !== 'tool') {
         const agent = ctx.agents.get(options.sessionId)
@@ -67,7 +98,23 @@ export function apply(ctx, config) {
             else { stable = 0; last = total }
           }
         }
-        if (config.real) {
+        if (config.background) {
+          const timerWorker = await create('timer-worker')
+          // The disposable profile runs only this fixed local timer; avoid the host's unavailable Windows ACL sandbox.
+          setSandboxMode(timerWorker.session, 'danger-full-access')
+          ctx.sessionTitle.rename(timerWorker.session, '已有后台计时会话')
+          await prompt(SUPERVISOR, 'TIMER-START 给已有后台计时会话设置计时', 'timer-start')
+          await until(() => ended(timerWorker, 1), 'timer start turn')
+          await quiet()
+          marks.beforeStop = ctx.jobs.list(timerWorker.id)
+          await prompt(SUPERVISOR, 'TIMER-CANCEL-AGENT 仅停止会话当前执行轮次', 'timer-cancel')
+          await quiet()
+          marks.afterStop = ctx.jobs.list(timerWorker.id)
+          await prompt(SUPERVISOR, 'TIMER-STOP 让已有后台计时会话取消计时并核实', 'timer-stop')
+          await until(() => ended(timerWorker, 2), 'worker cancelled timer')
+          await quiet()
+          marks.afterGuidance = ctx.jobs.list(timerWorker.id)
+        } else if (config.real) {
           const site = await create('site-worker')
           const doc = await create('doc-worker')
           // The user starts both sessions personally; Nexus learns their tasks only from the mirrored input.

@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, writeFile, readFile, copyFile, symlink } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { spawn } from 'node:child_process'
 import { WebSocketServer } from 'ws'
+import { startHost } from './host-process.mjs'
 
 const delay = ms => new Promise(accept => setTimeout(accept, ms))
 const root = resolve('.')
@@ -26,9 +26,12 @@ const scripted = {
   'A-CHANGE': ['nexus_send_session', { sessionId: 'alpha', text: 'Changed requirement from the user: use THEME-AMBER instead of THEME-BLUE.' }],
   'B-START': ['nexus_send_session', { sessionId: 'beta', text: 'task-beta THEME-BLUE' }],
   'C-START': ['nexus_send_session', { sessionId: 'gamma', text: 'task-gamma THEME-BLUE' }],
+  'TIMER-START': ['nexus_list_sessions', {}],
+  'TIMER-CANCEL-AGENT': ['nexus_stop_session', { sessionId: 'timer-worker' }],
+  'TIMER-STOP': ['nexus_list_sessions', {}],
 }
 
-async function steeringProfile(real = false) {
+async function steeringProfile(real = false, background = false) {
   const home = resolve('.scratch/nexus-v1', `steering-${real ? 'real' : 'controlled'}-${Date.now()}`)
   const profile = resolve(home, 'profiles/nexus-steering')
   const fixture = resolve(home, 'probe')
@@ -48,13 +51,19 @@ async function steeringProfile(real = false) {
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString()); wire.push({ ...event, connection })
       if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated', session: event.session }))
-      if (event.type === 'conversation.item.create') items.push({ role: event.item.role, text: event.item.content?.map(part => part.text).join('\n') ?? event.item.output ?? '' })
+      if (event.type === 'conversation.item.create') items.push({ role: event.item.role, text: background && event.item.type === 'function_call_output' ? JSON.parse(event.item.output).content.map(part => part.text).join('\n') : event.item.content?.map(part => part.text).join('\n') ?? event.item.output ?? '' })
       if (event.type !== 'response.create') return
       socket.send(JSON.stringify({ type: 'response.created', response: { id: `resp-${crypto.randomUUID()}`, status: 'in_progress' } }))
       // A new connection replays the whole history; only items after the last answer are new to the model.
       const fresh = items.slice(Math.max(answered, items.findLastIndex(item => item.role === 'assistant') + 1)).map(item => item.text).join('\n')
       answered = items.length
-      const step = Object.entries(scripted).find(([tag]) => fresh.includes(tag) && !fresh.includes('Automatic work-session result') && !fresh.includes('Direct user input'))
+      let step = Object.entries(scripted).find(([tag]) => fresh.includes(tag) && !fresh.includes('Automatic work-session result') && !fresh.includes('Direct user input'))
+      if (background && fresh.includes('"items"') && fresh.includes('已有后台计时会话')) {
+        const stopping = items.some(item => item.text.includes('TIMER-STOP'))
+        const list = JSON.parse(items.findLast(item => item.text.includes('"items"') && item.text.includes('已有后台计时会话')).text)
+        const target = list.items.find(item => item.projections.values.title === '已有后台计时会话')
+        step = ['list-result', ['nexus_send_session', { sessionId: target.sessionId, text: stopping ? 'STOP-BACKGROUND 取消计时并用原生 job 工具核实结束' : 'START-BACKGROUND 设置后台计时' }]]
+      }
       const respond = () => {
         if (step) {
           const item = { type: 'function_call', call_id: `steer-call-${++call}`, name: step[1][0], arguments: JSON.stringify(step[1][1]) }
@@ -69,12 +78,13 @@ async function steeringProfile(real = false) {
   })
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-steering-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
   await copyFile(resolve('tests/steering-probe.js'), resolve(fixture, 'index.js'))
-  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-steering-probe\n      name: nexus-steering-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n        real: ${real}\n        prompts: ${JSON.stringify(REAL_PROMPTS)}\n        manual: ${JSON.stringify(real ? ['doc-worker'] : ['gamma'])}\n        buildLimitMs: ${real ? 150000 : 30000}\n`)
+  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-steering-probe\n      name: nexus-steering-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n        real: ${real}\n        background: ${background}\n        prompts: ${JSON.stringify(REAL_PROMPTS)}\n        manual: ${JSON.stringify(real ? ['doc-worker'] : ['gamma'])}\n        buildLimitMs: ${real ? 150000 : 30000}\n`)
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-steering-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-steering-probe'] } } }))
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_STEERING_KEY\n    endpoint: ${real ? process.env.NEXUS_REAL_ENDPOINT ?? 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' : `ws://127.0.0.1:${server.address().port}`}\n    timeoutMs: 30000\n`)
-  const child = spawn(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-steering', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_STEERING_KEY: real ? process.env.NEXUS_STEERING_KEY : 'fixture-not-a-secret', DSH_TELEMETRY: '0' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-steering', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_STEERING_KEY: real ? process.env.NEXUS_STEERING_KEY : 'fixture-not-a-secret', DSH_TELEMETRY: '0' } }, child => ({ child }))
+  const child = host.child
   let output = ''; child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })
   try {
     let result
@@ -86,8 +96,7 @@ async function steeringProfile(real = false) {
     console.log('steering evidence:', report)
     return { ...analyze(result), result, wire }
   } finally {
-    child.kill('SIGTERM')
-    await Promise.race([new Promise(accept => child.once('exit', accept)), delay(5000)])
+    await host.close()
     for (const socket of server.clients) socket.terminate()
     await new Promise(accept => server.close(accept))
   }
@@ -175,6 +184,24 @@ test('user steering: main-conversation change and direct worker steering reach t
   assert.deepEqual(finals('gamma'), ['Built gamma with THEME-BLUE (the build step began with THEME-BLUE)', 'Built gamma with THEME-JADE (the build step began with THEME-JADE)'])
   assert.deepEqual(placed('gamma', message => message.source.kind === 'user' && textOf(message).includes('THEME-JADE')).step, { turn: 2, step: 1 })
   assert.equal(result.artifacts.gamma, 'THEME-JADE')
+})
+
+test('stopping an idle worker turn is explicitly scoped; task guidance cancels its real background timer and verifies it', { timeout: 120000 }, async () => {
+  const { result, events, finals } = await steeringProfile(false, true)
+  assert.deepEqual(result.marks.beforeStop.map(job => job.status), ['running'])
+  assert.deepEqual(result.marks.afterStop.map(job => job.status), ['running'], 'agent cancellation must not pretend it stopped a background task')
+  const stopped = events.find(event => event.type === 'tool/call' && event.data.name === 'nexus_stop_session')
+  const stopResult = JSON.parse(events.find(event => event.type === 'tool/result' && event.data.message.toolCallId === stopped.data.callId).data.message.content[0].text)
+  assert.equal(stopResult.scope, 'current-turn')
+  assert.equal(stopResult.backgroundJobsCancelled, false)
+  assert.equal(stopResult.completed, false)
+  assert.deepEqual(result.marks.afterGuidance.map(job => job.status), ['killed'])
+  const worker = result.workers.find(item => item.id === 'timer-worker')
+  assert.deepEqual(worker.events.filter(event => event.type === 'tool/call').map(event => event.data.name), ['pwsh', 'job_list', 'job_kill', 'job_output', 'job_list'])
+  assert.ok(worker.events.filter(event => event.type === 'tool/result').every(event => !event.data.message.isError), 'all native timer and cancellation tools succeeded')
+  assert.match(finals('timer-worker').at(-1), /Timer verified:.*killed/)
+  const dispatches = events.filter(event => event.type === 'tool/call' && event.data.name === 'nexus_send_session')
+  for (const call of dispatches) assert.ok(events.some(event => event.type === 'tool/call' && event.data.name === 'nexus_list_sessions' && event.seq < call.seq))
 })
 
 test('accurate Realtime model applies a natural-language change to the affected worker only and absorbs a direct worker steer', { skip: process.env.NEXUS_REAL_STEERING !== '1', timeout: 600000 }, async () => {

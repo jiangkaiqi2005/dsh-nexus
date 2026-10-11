@@ -34,9 +34,10 @@ async function profile(endpoint, autoVoice = false) {
         child.stderr.on('data', data => { output += data; writeFile(resolve(dir, 'host.txt'), output.replace(/\?token=\S+/g, '?token=[redacted]')) })
         let url
         await until(() => { url = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]; return url }, 'official Host URL')
-        try { await until(async () => (await json(resolve(dir, 'ready.json')))?.supervisor, 'supervisor ready') }
+        let ready
+        try { await until(async () => { ready = await json(resolve(dir, 'ready.json')); return ready?.supervisor }, 'supervisor ready') }
         catch (error) { await writeFile(resolve(dir, 'host.txt'), output.replace(/\?token=\S+/g, '?token=[redacted]')); throw error }
-        const pid = (await json(resolve(dir, 'ready.json'))).pid
+        const pid = ready.pid
         return { url, pid, dir, async finish() { await writeFile(resolve(dir, 'finish'), ''); await until(async () => !!(await json(resolve(dir, 'finished.json'))), 'durable close'); await writeFile(resolve(dir, 'host.txt'), output.replace(/\?token=\S+/g, '?token=[redacted]')) } }
       })
     },

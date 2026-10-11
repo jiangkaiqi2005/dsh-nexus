@@ -428,7 +428,7 @@ test('disconnect lifecycle: another client cannot acquire media, closing the own
   })
 })
 
-async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY', key = 'fixture-not-a-secret', timeoutMs = 30000 } = {}) {
+async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY', key = 'fixture-not-a-secret', timeoutMs = 30000, navigation = false } = {}) {
   const home = resolve('.scratch/nexus-v1', `voice-${scenario}-${Date.now()}`)
   const profile = resolve(home, 'profiles/nexus-voice')
   const fixture = resolve(home, 'probe')
@@ -436,7 +436,8 @@ async function voiceHost(scenario, { endpoint, credentialRef = 'NEXUS_VOICE_KEY'
   for (const dir of [fixture, workspace, resolve(profile, 'node_modules'), resolve(home, 'output')]) await mkdir(dir, { recursive: true })
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-voice-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
   await copyFile(resolve('tests/voice-probe.js'), resolve(fixture, 'index.js'))
-  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-voice-probe\n      name: nexus-voice-probe\n      config:\n        dir: ${JSON.stringify(home)}\n        workspace: ${JSON.stringify(workspace)}\n        marker: DOC-READY-42\n`)
+  if (navigation) await mkdir(resolve(workspace, 'other-project'), { recursive: true })
+  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-voice-probe\n      name: nexus-voice-probe\n      config:\n        dir: ${JSON.stringify(home)}\n        workspace: ${JSON.stringify(workspace)}\n        marker: DOC-READY-42\n        navigation: ${navigation}\n`)
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-voice-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-voice-probe'] } } }))
@@ -521,6 +522,69 @@ const instrument = delays => {
 const trackStates = page => page.evaluate(() => window.__streams.flatMap(stream => stream.getTracks().map(track => track.readyState)))
 /** Scheduled playback nodes that are still audible now: started, not stopped and not yet finished. */
 const audible = page => page.evaluate(() => window.__nodes.filter(item => item.stoppedAt === undefined && item.node.context.currentTime < item.when + item.duration).length)
+
+test('voice navigation: changing working conversation or project preserves the call and accessible hangup control', { timeout: 120000 }, async t => {
+  const model = controlledModel({ utterances: {} })
+  t.after(async () => { for (const socket of model.server.clients) socket.terminate(); if (model.server.listening) await new Promise(accept => model.server.close(accept)) })
+  await model.ready
+  const capture = await voiceFixture([{ silence: 45 }])
+  const host = await voiceHost('navigation', { endpoint: `ws://127.0.0.1:${model.server.address().port}`, navigation: true })
+  t.after(() => host.close())
+  const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
+  t.after(() => browser.close())
+  const { page, bar } = await openNexus(browser, host.url, [instrument, []])
+  try {
+    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await until(async () => await state(bar) === 'live', 'navigation call live')
+    const voiceConnection = model.log.connections
+    const closedBefore = model.log.closed
+    const tree = page.getByRole('tree', { name: '会话' })
+    const worker = tree.getByRole('treeitem', { name: /^导航工作会话/ })
+    if (!(await worker.isVisible())) await tree.getByRole('treeitem', { name: /^workspace/ }).click()
+    await worker.click()
+    await delay(500)
+    await writeFile(resolve(host.home, 'output/navigation-first.yml'), await page.locator('body').ariaSnapshot())
+    assert.equal(await bar.count(), 1, 'the call and its controls must remain visible in a work conversation')
+    assert.equal(await state(bar), 'live', 'changing conversation must not hang up Nexus')
+    assert.deepEqual(await trackStates(page), ['live'])
+    const editor = page.getByRole('textbox').last()
+    await editor.fill('WORKER-NAV-DIRECT 用户直接在工作会话输入')
+    await editor.press('Enter')
+    await until(() => model.wire.some(event => event.connection === voiceConnection && event.type === 'conversation.item.create' && event.item.content?.[0]?.text?.includes('WORKER-NAV-DIRECT')), 'direct input mirrored on the same voice call')
+    const other = tree.getByRole('treeitem', { name: /^另一个项目会话/ })
+    if (!(await other.isVisible())) await tree.getByRole('treeitem', { name: /^other-project/ }).click()
+    await other.click()
+    assert.equal(await state(bar), 'live')
+    assert.equal(model.log.closed, closedBefore, 'navigation never closes the active model connection')
+    assert.equal(model.log.connections, voiceConnection, 'navigation does not reconnect the voice model')
+    await page.getByRole('button', { name: '新建会话', exact: true }).last().click()
+    assert.equal(await state(bar), 'live', 'the empty conversation view retains global call controls')
+    await page.getByRole('button', { name: '设置', exact: true }).click()
+    assert.equal(await state(bar), 'live', 'settings retain global call controls')
+    await page.getByRole('dialog', { name: '设置' }).getByRole('button', { name: '关闭', exact: true }).click()
+    await page.getByRole('button', { name: '收起侧边栏', exact: true }).click()
+    assert.ok(await bar.getByRole('button', { name: /挂断|Hang up/ }).isVisible(), 'collapsed navigation cannot hide the hangup control')
+    await page.screenshot({ path: resolve(host.home, 'output/navigation-live.png') })
+    await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
+    await until(() => model.log.closed > closedBefore, 'explicit hangup closes the model connection')
+    assert.deepEqual(await trackStates(page), ['ended'])
+    await page.getByRole('button', { name: '打开侧边栏', exact: true }).click()
+    await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click()
+    assert.equal(await state(bar), 'idle', 'returning to Nexus after explicit hangup never reopens the microphone')
+    await host.finish()
+    console.log('voice navigation evidence:', host.home)
+  } catch (error) {
+    await page.screenshot({ path: resolve(host.home, 'output/navigation-failure.png') }).catch(() => {})
+    await writeFile(resolve(host.home, 'output/navigation-failure.yml'), await page.locator('body').ariaSnapshot()).catch(() => {})
+    console.log('voice navigation evidence:', host.home, 'capture tracks:', await trackStates(page))
+    throw error
+  } finally {
+    await browser.close()
+    await host.close()
+    for (const socket of model.server.clients) socket.terminate()
+    await new Promise(accept => model.server.close(accept))
+  }
+})
 
 test('voice call: client audio reaches the Host-held model, which speaks, dispatches work and keeps talking while it runs', { timeout: 240000 }, async t => {
   const model = controlledModel()
@@ -793,7 +857,8 @@ test('voice call races: hanging up during the microphone request or rapidly rest
     await start()
     await until(async () => (await state(bar)) === 'live', 'first live call')
     // Hang up and call again one task later, as close as the page allows.
-    await bar.evaluate(async element => { element.querySelector('button').click(); await new Promise(accept => setTimeout(accept, 0)); element.querySelector('button').click() })
+    const previousControlConnected = await page.evaluate(async () => { const previous = document.querySelector('[data-nexus-voice] button'); previous.click(); await new Promise(accept => setTimeout(accept, 0)); const connected = previous.isConnected; document.querySelector('[data-nexus-voice] button').click(); return connected })
+    console.log('rapid restart: previous control still connected:', previousControlConnected)
     await until(async () => (await state(bar)) === 'live', 'second live call')
     await until(() => model.log.closed === 1, 'first call closed')
     const appended = connection => model.wire.filter(event => event.type === 'input_audio_buffer.append' && event.connection === connection).length
@@ -1591,7 +1656,7 @@ test('hangup during a native tool keeps it running, and a rapid manual reconnect
   const capture = await voiceFixture([{ silence: 1.5 }, { text: '请查一下API资料。', voice: ZH }, { silence: 30 }])
   await controlledCall(t, 'hangup-tool', model, capture, async ({ host, page, bar }) => {
     await until(async () => { try { await readFile(resolve(host.home, 'tool-started')); return true } catch { return false } }, 'native tool pending')
-    await bar.evaluate(async element => { element.querySelector('button').click(); await new Promise(accept => setTimeout(accept, 0)); element.querySelector('button').click() })
+    await page.evaluate(async () => { document.querySelector('[data-nexus-voice] button').click(); await new Promise(accept => setTimeout(accept, 0)); document.querySelector('[data-nexus-voice] button').click() })
     await until(async () => (await state(bar)) === 'live' && model.log.connections === 2, 'rapid manually reconnected')
     await writeFile(resolve(host.home, 'tool-release'), '')
     await until(() => model.log.responses.some(response => response.connection === 2 && response.text?.startsWith('TOOL-CONTINUED')), 'same tool result on new call')

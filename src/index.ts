@@ -10,7 +10,7 @@ import { ResultRelay } from './results.js'
 import { VoiceController } from './voice.js'
 import { SUMMARY_MODEL } from './compaction.js'
 
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'sessionTitle']
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'sessionTitle', 'llm']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
 
 export interface Config extends SupervisorConfig { autoVoice: Volatile<boolean> }
