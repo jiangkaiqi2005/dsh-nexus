@@ -175,3 +175,25 @@ git diff --check
 - 最终全量 `npm-test-three-final-2.txt`：102 项，91 passed / 0 failed / 11 skipped，399.079 s，exit 0；包括新增标题预算、跨视图通话、已有会话背景任务取消、原生闲置/运行引导，以及既有压缩、重启、断线、打断、工具与播放时序回归。11 项是需要真实模型端点或显式启用 Desktop 的既有用例，未计作通过。最终 `typecheck-final.txt`、`git diff --cached --check` 均 exit 0。没有因测试 fixture 修正再改产品逻辑。
 
 实施阶段尚未打包安装；交回协调者按固定快照做标准/规格双轴评审，再打包与隔离 Desktop 冒烟。票 12 已有较长对话及后续操作仍未验收。用户不继续人工验收，不代表这些未执行步骤通过；真实模型遵循引导及本轮物理设备效果仍无新增实机结论。
+
+### 第 4 轮双轴评审与安装
+
+2026-10-11，实施提交 `434f75ee3f7141e2f26334c4e23d8d0dac3a102f`，双轴评审固定范围 `7e97bbc6bbba38c2ba43ffee2f836c5199ef0253...434f75ee3f7141e2f26334c4e23d8d0dac3a102f`。协调者报告标准轴与规格轴均 `approve`、`issues=[]`，评审后代码修复 0 轮。本轮用户明确的三项反馈在同一单元完成，没有扩展票 12。
+
+以下由协调者在双轴通过后实际执行；实施代理只核对保存的日志与 JSON 后记入文档，没有重跑命令或测试。证据仍在 `.scratch/nexus-v1/ticket13-title-fix-20261010/`：
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| `npm ci --ignore-scripts`、`npm run build` | 均 exit 0，分别为 `pack-npm-ci.txt`、`pack-build.txt`。 |
+| `npm pack --json` | exit 0，`pack.json`；26 个文件，产物 `E:\Agent\dsh-nexus\.scratch\nexus-v1\ticket13-title-fix-20261010\dsh-nexus-0.2.0.tgz`，shasum `bc63c018460601b58cb709305d6d604fcfa30f7a`。 |
+| 隔离 Desktop 冒烟 | `desktop-smoke.txt`：1 passed / 0 failed / 0 skipped，16.116 s，exit 0；隔离证据 `.scratch/nexus-v1/desktop-smoke-GacpbM`。Desktop 自带运行时激活打包插件、查询原生项目与恢复会话记录，使用 fixture 凭据及受控本地端点，没有调用真实模型。 |
+| 官方 CLI 安装 | `D:\DeepSeekHarness\resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add <上述 tgz 绝对路径>`，exit 0，`desktop-install.txt`。安装器报告 peer 提示，核对结果见下文。 |
+| 安装内容核对 | `install-verification.json`：referenceCommit 为上述实施提交，全部 26 个包文件的安装 SHA256 与构建匹配，包括新增 `dist/work-session-titles.js` 和 `client.js`；包 SHA1 与 pack shasum 一致。 |
+
+用户此前明确回复“已退出”，协调者安装前两次确认没有 DeepSeek Harness 进程，没有再次启动用户 Desktop。只复制备份 `sessions`、`storages` 及 desktop 顶层文件到 `C:\Users\25330\.dsh-backup-20261011-annotations-bd6941cc`；`backup-verification.json` 确认 sessions 16 文件 / 2702671 字节、storages 16 文件 / 124904 字节在备份与来源间一致，顶层文件哈希匹配，没有查看配置内容。
+
+`configuration-verification.json` 确认安装前后 `cordis.yml`、`cordis.patch.yml`、`pnpm-workspace.yaml` 不变；官方安装器更新了 `package.json` 和 `pnpm-lock.yaml` 的插件依赖元数据，因此不宣称所有顶层配置未变。未修改用户模型或业务配置、未读取真实凭据。
+
+官方安装器的 peer 提示没有被忽略为“无警告”：协调者分别对当前 desktop profile 和安装同一包的隔离 Desktop profile 只读执行 `pnpm peers check`，`desktop-peers-check.txt`、`isolated-desktop-peers-check.txt` 均 exit 1，仅报告 peer 缺失。`peer-warning-verification.json` 确认两边各 21 个宿主 peer 名称完全相同，difference 为 0；同包隔离 Desktop 运行时实际加载已通过上述冒烟。保留该安装环境提示与验证边界，没有为消除提示自动修改 Host。
+
+本轮包已安装，没有启动用户 Desktop、推送或创建 PR。票 12 长对话及后续操作仍未验，真实付费模型的命名成功率和引导遵循、物理音频设备均无新增实机验证；用户明确不继续人工验收，安装完成不记为这些步骤通过。
