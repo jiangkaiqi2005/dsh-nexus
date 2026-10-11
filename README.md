@@ -1,49 +1,41 @@
 # Nexus
 
-Nexus 是 DeepSeek Harness 的实时语音管家插件，项目与包名为 `dsh-nexus`。
+Nexus 是 DeepSeek Harness 的实时语音管家插件。一个 `qwen3.8-omni-flash-realtime` 主管与你交流，把具体工作交给 Harness 普通会话，接收结果并决定下一步。挂断后，主管和工作继续，在同一个主会话用文字交流。
 
-一个 Realtime 主 agent 与用户交流、观察全部工作会话并自主调度。挂断后继续工作，在同一个主会话输出文字。具体执行交给 Harness 工作会话。
+可以说：“让已有的修复会话解决这个报错，完成后交给审查会话检查。”执行期间继续说话、改变要求，或者直接在工作会话输入；主管会获知你的直接要求。它可使用已有和新建的普通会话；会话 agent 自己产生的 subagent 由其 parent 管理。
 
-当前提供票 01–10、12 与 13 的本地插件实现：固定侧栏入口、唯一 `qwen3.8-omni-flash-realtime` 主管的文字交流、原生记录与重启恢复、工作会话调度、工作结果自动回流、用户途中修改要求，实时语音通话与打断、挂断后文字续行与手动再接通、可选的每次启动一次自动语音，断线恢复与客户端关闭后的后台文字工作，以及主会话的自动与手动上下文压缩、派活以用户消息发出与会话自动命名。
+当前兼容 **Harness / Desktop 0.2.0-rc.2**，Cordis 4.0.4。保持现有宿主版本，不自动升级 Desktop；历史 `0.2.1-alpha.1` 仅为接口研究基线。Windows Web 客户端和 Desktop 已有分项验证；票 11 的干净安装受控组合场景与真实用户完整场景分别记录，后者仍待验收。
 
-点击侧栏底部 Nexus 即可在主管的原生会话输入文字；重复点击返回同一个主管。主管会话使用当前目录对应的原生工作区，已有工作区沿用其名称。
+安装打包后的 `dsh-nexus-0.2.0.tgz`，配置 Host 的 DashScope 凭据引用 `DASHSCOPE_API_KEY`，从侧栏底部 **Nexus** 进入。点击“接通语音”开始通话；跨会话、项目切换时右下角仍可挂断。自动语音默认关闭，可在 Nexus 设置中开启，每次启动只尝试一次。
 
-按用户最新指示，当前适配现有 Desktop `0.2.0-rc.2`，不修改或升级 Desktop 程序；原先研究的 alpha.1 适配后置。票 01 已通过受控 Host 验证、真实模型文字轮次和原生落盘验证，以及用户 Desktop 的入口、文字界面和插件 metadata 实机验收。详见[票 01 验证记录](docs/verification/01-supervisor-text-session.md)。
+完整的安装命令、模型设置、故障处理及连续验收步骤见[安装与使用指南](docs/installation-and-use.md)；独立交付目录附有相同内容的 `INSTALL.md`。本 README 的文档链接用于源码仓库，tgz 不携带内部验证记录。已装当前运行代码的用户无需为票 11 的文档与测试更新重新安装。
 
-构建：`npm ci --ignore-scripts`，`npm run build`，`npm test`，`npm pack`。测试使用 Windows 已安装的 Edge 无头模式；其他环境可通过 `NEXUS_TEST_BROWSER` 选择已安装的 Playwright 浏览器 channel。只安装打包后的 `.tgz`。Desktop 先正常退出，再通过其自带 `resources/runtime/cli/bin/dsh.cmd plugin --profile desktop add <tgz绝对路径>` 安装并重新打开；npm 版 CLI 不管理保留的 desktop profile。
+主会话支持 `/compact` 和自动上下文压缩，预算默认 128000 token。默认摘要模型为 DeepSeek 账号路由的 Flash，使用最低思考强度；需要在 Harness 登录账号，也可在 Nexus 设置另选摘要模型。预算、摘要模型与强度修改立即生效并跨重启保存。可压缩的历史不足时会跳过自动压缩，压力显示超过预算并不保证立即出现摘要；详情见[票 12 验证记录](docs/verification/12-supervisor-context-compaction.md)。用户已接受票 12 收尾，剩余实机项免验，未执行的项目保留未验证状态。
 
-本机打包安装冒烟可在构建后运行（PowerShell）：`$env:NEXUS_DESKTOP_SMOKE='1'; node --test tests/desktop.test.mjs`。它使用 `D:/DeepSeekHarness/resources/runtime/cli/bin/dsh.cmd`，在隔离目录由官方插件管理器初始化 profile 并安装当前 tgz，以无头浏览器验证原生文字输入、原生记录与重启恢复；模型为本地受控端点，不需要凭据或付费调用。未安装该 Desktop 时明确跳过。详见[本机冒烟与测试清理验证](docs/verification/desktop-activation-test-cleanup.md)。
+语音和调度请求发送给所选模型服务，工作会话使用你在 Harness 配置的模型。密钥由 Host 的原生凭据服务读取，Nexus 客户端不接收明文。未配置凭据、设备不可用或建连失败会显示实际失败。主管说“已派活”仍应以工作会话实际收到消息为准；当前模型偶尔只口头承诺而不调用工具，这是[已记录的模型限制](docs/verification/10-disconnect-and-client-lifecycle.md)。
 
-Host 配置使用凭据引用 `credentialRef`，默认 `DASHSCOPE_API_KEY`；`endpoint` 默认 `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`，专属地域或 Workspace 接入应配置完整地址。密钥由 Harness 原生 credentials 服务读取，浏览器不接收明文密钥。若首次未配置或建连失败，主会话保留用户输入并记录失败，不生成假回复。
+开发与验证（PowerShell，Node `^22.19.0 || >=24.0.0`）：
 
-重新启动 Host 后，插件恢复同一主管的原生记录，下一轮继续使用既有交流上下文。恢复保持闲置，未闭轮次和工具调用按 Harness 原生中断语义收束，不自动重跑。普通工作会话仍沿用原生工厂。票 02 已在后台隔离官方 Host 的真实退出、新进程启动和准确型号续答中验证；新版尚未安装到用户 Desktop，其当前非空会话未修改。详见[票 02 验证记录](docs/verification/02-native-supervisor-restore.md)。
+```powershell
+npm ci --ignore-scripts
+npm run typecheck
+npm run build
+npm test
+npm pack
+```
 
-按 2026-10-09 用户裁定，Nexus 只管理和调度对话会话（普通会话）的 agent；会话 agent 产生的 subagent 会话由其 parent agent 管理，Nexus 不列出、不读取、不派活也不停止，对其调用会返回明确失败。主管可读取全部对话会话，向已有会话派活，或在明确工作区创建会话；运行中的会话收到原生引导，闲置会话被唤醒。派活来源标记为 Nexus，投递成功与工作完成分别记录。票 03 已在后台隔离官方 Host 中验证准确型号工具调用、已有和新建 worker 的实际执行、失败续答；当前新版尚未安装到用户 Desktop。详见[票 03 验证记录](docs/verification/03-dispatch-work-sessions.md)。
+测试默认不调用真实付费模型，使用独立 profile、本地受控端点与无头 Edge。已安装当前 Desktop 时，可运行实际打包安装与受控完整场景：
 
-可以说“在侧栏已有的 dsh-nexus 项目新建一个会话，执行这项任务”。文字和语音主管会先查询 Harness 已登记项目的名称与绝对路径，再在目标项目创建普通会话；已登记的空白项目也可找到。查询只读，不受主管当前目录影响；项目重名或找不到时先确认，明确给出的绝对目录仍可使用。这条工具链已通过隔离官方 Host 和 Desktop 打包冒烟，真实模型按自然语言选项目、用户 Desktop 中的实际文字与语音操作仍待验收。详见[项目发现修复验证](docs/verification/workspace-discovery.md)。
+```powershell
+$env:NEXUS_DESKTOP_SMOKE = '1'
+node --test tests/desktop.test.mjs tests/clean-install.test.mjs
+Remove-Item Env:NEXUS_DESKTOP_SMOKE
+```
 
-Nexus 运行期间，除主管自身外的任何对话会话（含用户自己创建或 fork 的普通会话；subagent 会话不在范围）每结束一轮，成功、失败或中断，终态都会自动以 `nexus-work-result` 来源的原生消息回到主管，带会话与轮次身份、终态（含失败代码与消息）和该轮最后的实际文字（过长则截取头尾，细节用读会话工具获取）。subagent 会话的结束仍由原生机制通知其 parent agent（例如主管自己的子会话只有原生 `subagent-settled` 结算通知）。主管闲时被唤醒，忙时结果留在原生 inbox，在后续 step 或下一轮进入模型，用户输入与结果互不丢失；同一会话轮次只投递一次，主管自身输出不回流。是否汇报、追加、审查或停止由模型决定，Host 不预设流程。票 04 已在后台隔离官方 Host 以受控事件和准确型号完成空闲与忙时回流验证，worker 为受控 native adapter；新版尚未安装到用户 Desktop。详见[票 04 验证记录](docs/verification/04-global-result-delivery.md)。
-
-用户途中改变要求时，可以直接告诉主管，由主管判断受影响的工作会话并用原生引导转告（运行中的会话在下一步读到，不撤销已完成动作，也不立即中断正在执行的工具）；也可以直接在对话会话里输入。后者（任何 Host 入口进入的用户来源输入）会以 `nexus-user-input` 来源同步给主管，指向该会话中用户的原消息，与用户在主会话说的话、Nexus 派活和自动结果区分，用户不必在两处重复输入。同步通知说明该输入是用户写给那个会话、由其 agent 执行的要求：主管不代为执行、回答或复述，只在它改变主管自己的安排时调整（例如停止或改派其他会话），否则简短确认；语音模式下可以不出声，执行结果另以自动结果回到主管（票 13 实机验收后调整措辞）。主管闲时被唤醒，忙时在后续 step 处理；排队消息移为引导不重复同步，编辑后再同步。没有自动取消、指令版本仲裁或意图分类。票 05 已在后台隔离官方 Host 以受控事件覆盖主管忙闲与旧结果交错，并以准确型号演示自然语言改要求（主管自行判断受影响的会话，不引导无关会话）与工作会话直接引导，worker 为受控 native adapter；新版尚未安装到用户 Desktop。Nexus 通过 nexus 会话工具委派对话会话，不使用原生 `subagent_fork`/`workflow` 子会话。详见[票 05 验证记录](docs/verification/05-user-steering-priority.md)。
-
-在主管会话输入区上方点击“接通语音”即可与主管通话。通话中切换项目、工作会话或打开空白会话仍保持连接，右下角显示通话状态和挂断按钮，收起侧栏也可操作。浏览器只负责采集麦克风和播放声音，模型连接、密钥与工具执行都在 Host。同一个准确型号直接听语音、说话并调用调度工具，没有语音转写再转文字主管的拼接。每段语音成为主会话的一个原生轮次：用户转写、主管文字与工具事实都写入原生记录。工作会话执行时可以继续交谈；结果在通话中回到主管，是否开口由主管判断。状态显示的是实际情况：麦克风被拒、无设备、播放未就绪都会如实显示，模型确认语音会话之前只显示“正在接通”。同一时间只允许一个客户端通话。挂断时仍在等待回答的工作结果改用文字继续处理；Host 停止时通话以失败结束并释放麦克风。票 06 已在后台隔离官方 Host 中，以真实客户端代码（无头 Edge）、准确型号和离线合成的语音（经浏览器假采集设备）演示语音派活（既有会话与新建会话）、执行期间继续交流与结果回流，worker 为受控 native adapter；真实模型偶有未调用派活工具却声称已派活的情况（见验证记录）。物理麦克风、扬声器与 Desktop 中的实机通话尚未验证，新版也尚未安装到用户 Desktop。详见[票 06 验证记录](docs/verification/06-live-voice-dispatch.md)。
-
-通话中用户开口即打断：主管正在生成的回复按模型原生轮次停止，客户端立即停止并丢弃待播放的声音，迟到的旧音频不会在新一轮播放。原生记录与实际听到的一致：生成中被打断的回复只记已说出的部分并标为 interrupted；没播完的回复保持原文，另记一条通知写明大约听到多少秒；通知在用户打断说话期间就送进模型上下文，通常早于模型对这段语音的回答。端点在用户开口后才完成的回复保留其工具调用并照常执行。用户说话期间完成的工具与到达的工作结果不会丢失，在该段语音回答之后续答；打断不取消工作会话。票 07 在后台隔离官方 Host 中以受控端点覆盖生成中与播放中打断、迟到包、工具与结果交错，并以准确型号和合成语音演示打断（含生成中被取消）、通知先于回答送达与随后的正常交流；物理扬声器外放、回声与 Desktop 实机通话尚待用户实机验证。原生 turn 按输入身份排列，交错时与实际播放顺序可能不同，实际生成次序保留在原生 stream 块时间中。详见[票 07 验证记录](docs/verification/07-voice-interruption-and-results.md)。
-
-挂断立即停止麦克风和待播放的声音，正在等待的主管回复改为同型号纯文字；已派出的工作和正在执行的工具继续，结果与续答仍在原主会话。没播完的回复留下实际播放量通知。挂断后刷新或切换会话保持语音关闭；手动接通时重放必要交流、工具与工作结果，无需重新交代目标。票 08 已以受控延迟检查生成中、播放中与工具在途挂断，以及准确端点的文字结果和工具续答；输入仍是合成音频经假设备，物理设备与 Desktop 实机验证待用户完成。详见[票 08 验证记录](docs/verification/08-hangup-text-and-reconnect.md)。
-
-关闭 Web 页面结束该页面的通话，Host 继续在原主会话处理文字结果；重新进入后可手动接通。模型断线时显示正在重连或实际失败，重建使用原生输入、完成工具与工作结果，未结束的模型调用不冒充已执行。通话恢复沿用当前麦克风选择；恢复期间挂断或刷新仍保持语音关闭。第二客户端会在采集与播放之前被拒绝。自动恢复尝试有界，失败后保留错误记录，用户可再次操作。票 10 已通过隔离官方 Host、实际客户端与原生落盘的可控端点验证；真实 DashScope 断线、物理设备及 Desktop 隐藏窗口仍待实机验收。详见[票 10 验证记录](docs/verification/10-disconnect-and-client-lifecycle.md)。
-
-主会话按 Harness 原生方式压缩上下文：估算的请求量超过 Nexus 设置中的压缩预算（`compactionBudget`，默认 128000 token）时，在主管轮次之间把较早的历史换成摘要，保留近期原文，原始记录仍可查看；也可在主会话输入 `/compact` 手动压缩，主会话一打开即可使用。摘要由设置中的摘要模型（`summaryModel`，`provider/model`）生成，未另选时为 DeepSeek Flash，走 DeepSeek 账号登录路由（`deepseek-account/deepseek-flash`；2026-10-10 用户裁定，此前沿用普通会话的默认模型），并以设置中的摘要思考强度（`summaryReasoningEffort`，默认取该模型可用的最低强度，能关闭思考就关闭）运行；这些设置立即生效并跨重启保存。摘要失败（包括默认路由不可用，例如未登录 DeepSeek 账号）时如实记录并继续使用完整上下文，不换用其他模型（实施决定）。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算需明显高于主管每次请求的固定开销（系统提示、工具定义等，当前约 10k token），可压缩的历史不足请求量 25% 时跳过自动压缩并记一次警告；自动压缩期间会话显示通用的运行状态（与原生自动压缩一致，只有手动 `/compact` 显示“正在压缩…”）。通话中压缩后，主管在轮次边界、无人说话时在后台准备一条重放摘要的新连接，就绪后替换旧连接，通话不中断；准备期间用户开口或新连接打开失败则保留原连接，下个边界再试。每轮主管回复记录端点报告的实际 token 用量。票 12 已通过隔离官方 Host、实际客户端与原生落盘的受控验证；准确型号与真实摘要模型的一次真实压缩、Desktop 中 `/compact` 与设置仍待实机验收。详见[票 12 验证记录](docs/verification/12-supervisor-context-compaction.md)。
-
-Nexus 派活在工作会话中就是一条用户消息：来源为 `user`，另带“经由 Nexus”的标记（`via: "nexus"`、主管身份与工具 callId），正文就是 Nexus 发出的原文，不加转述前缀，工作 agent 把它当作用户的要求，界面也按用户输入显示。因此 Nexus 新建的会话和普通会话一样，先未命名，收到派活后由原生自动命名（先取开头几个词的兜底标题，再由命名模型生成）；首次派活的命名请求沿同一模型路由扩大有限输出预算，让思考型模型有空间写出短标题，标题仍由原生命名器生成，失败时保留兜底；已有会话被派活不改标题，旧的未命名会话不补。结果回流只凭该标记识别派活，不把它当作用户直接引导同步回主管；用户在同一会话亲自输入照常同步。票 13 以前落盘的 `nexus-dispatch` 派活同样识别，重启后不回流、不重复。主会话名为 Nexus：没有标题或标题是原生自动生成的（兜底或模型标题）时改为 Nexus，用户手动改名后（重启也）保留。派活也会计入原生“最近输入时间”等按用户输入统计的行为（ADR 0004）。票 13 已通过隔离官方 Host 与受控端点的多次启动验证，并在 Desktop 自带运行时的隔离 profile 中冒烟加载；Desktop 侧栏中的实际标题待用户实机验收。详见[票 13 验证记录](docs/verification/13-dispatch-as-user-and-session-titles.md)。
+这些检查使用 Desktop 自带 CLI 与真实 Web 客户端，音频为假设备，不能替代 Electron 外壳、物理设备与模型自主完成任务的实机结论。证据边界见[票 11 验证记录](docs/verification/11-clean-install-and-full-scenario.md)。
 
 - [首版 Spec](docs/spec.md)
-- [tickets 拆分草案与依赖顺序](docs/tickets.md)
-- [设计与首版验收场景](docs/design.md)
-- [实现路径与可行性验证](docs/implementation.md)
+- [设计与完整场景](docs/design.md)
+- [票与依赖顺序](docs/tickets.md)
 - [领域词汇](CONTEXT.md)
-- [现有插件调研](docs/research/existing-plugins.md)
-- [结果回流与主管唤醒调研](docs/research/agent-result-delivery.md)
-- [用户指令优先](docs/user-instruction-priority.md)
 - [架构决定](docs/adr/)
