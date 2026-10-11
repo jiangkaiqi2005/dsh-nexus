@@ -1,6 +1,6 @@
 # 票 13：派活以用户消息发出并自动命名会话验证
 
-2026-10-10，按本次明确授权实施票 13，依据 ADR 0004。实施基点为 `195444d`（票 12 收尾提交，票 10 已关闭，满足票据“待 10 完成后执行”）。没有推送、PR、打包安装或发布，没有读取真实凭据或调用付费模型，也没有操作用户现用 Desktop / profile（`~/.dsh`）。未改动票 12 的压缩代码。
+2026-10-10，按本次明确授权实施票 13，依据 ADR 0004。实施基点为 `195444d`（票 12 收尾提交，票 10 已关闭，满足票据“待 10 完成后执行”）。首轮实施阶段没有推送、PR、打包安装或发布，没有读取真实凭据或调用付费模型，也没有操作用户现用 Desktop / profile（`~/.dsh`）；后续冒烟及安装见各轮记录。未改动票 12 的压缩代码。
 
 ## 行为与边界
 
@@ -99,11 +99,28 @@ git diff --check
 
 日志保存在忽略目录 `.scratch/nexus-v1/ticket13-handoff-20261010/`。在未修改产品代码的构建上，`red-build.txt` exit 0；`red-results.txt`：15 项，13 passed / 2 failed / 0 skipped，exit 1，失败分别是镜像通知仍允许 `stay silent`、文字指令仍允许 `stay silent`。改后 `typecheck.txt`、`build.txt` 均 exit 0；`results.txt`：15 passed / 0 failed / 0 skipped，exit 0。全量 `npm-test.txt`：96 项，85 passed / 0 failed / 11 skipped，368.3 s，exit 0（比交接基线多出本轮模式回归 1 项）；11 项 skipped 是需要真实端点或显式启用 Desktop 的既有用例，没有计作通过。`git diff --check` exit 0，没有空白错误，仅 Git 的 LF 到 CRLF 提示。
 
-本实施单元没有打包、安装或调用真实模型，受控验证锁定的是通知与模式指令文本；真实主管是否在文字模式下不再代为执行、复述或因保持安静产生 `EMPTY_RESPONSE`，仍待安装新包后用户在 Desktop 复验。
+实施代理阶段没有打包、安装或调用真实模型，受控验证锁定的是通知与模式指令文本；完成后交由协调者评审并打包安装，过程如下。真实主管是否在文字模式下不再代为执行、复述或因保持安静产生 `EMPTY_RESPONSE`，仍待用户在 Desktop 复验。
+
+### 第 3 轮双轴评审与安装
+
+实施提交为 `1bfaabde4e6a73e76db98ba0d609d9572ee640bb`，本轮首轮双轴评审使用固定快照 `8a635afdeead48f801892e5d8b6dc3f0f6480644...1bfaabde4e6a73e76db98ba0d609d9572ee640bb`。标准轴 `approve`、问题列表为空；规格轴 `approve`、新增问题 0。交接遗留的文字静默许可 medium 已 fixed；点名 Nexus 的 low 维持待实机观察，不阻断本轮。本会话评审后没有代码修复（0 轮）；“第 3 轮”指交接中的票 13 修复轮次。
+
+以下由协调者在评审通过后执行，实施代理核对已保存日志与验证报告后记入文档，没有重跑这些命令或套件。命令日志同在 `.scratch/nexus-v1/ticket13-handoff-20261010/`：
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| `npm ci --ignore-scripts` | exit 0，`pack-npm-ci.txt`。 |
+| `npm run build` | exit 0，`pack-build.txt`。 |
+| `npm pack --json --pack-destination .scratch/nexus-v1/ticket13-handoff-20261010` | exit 0，`pack.json`；产物 `E:\Agent\dsh-nexus\.scratch\nexus-v1\ticket13-handoff-20261010\dsh-nexus-0.2.0.tgz`，shasum `0e91e9bfdf8ef7857e1d50093e448756fad6d1e8`。 |
+| `NEXUS_DESKTOP_SMOKE=1 node --test tests/desktop.test.mjs` | 1 passed / 0 failed / 0 skipped，16.605 s，exit 0，`desktop-smoke.txt`；隔离证据 `.scratch/nexus-v1/desktop-smoke-ikpIeY`，使用 fixture 凭据与本地受控 WebSocket，没有调用真实模型。 |
+| Desktop 官方 CLI 安装上述 tgz | `D:\DeepSeekHarness\resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add <上述 tgz 绝对路径>` exit 0，`desktop-install.txt`。 |
+| 安装后哈希核对 | `install-verification.json`：`dist/index.js`、`realtime.js`、`results.js`、`compaction.js`、`supervisor.js` 及 `client.js` 均与当前构建一致；`dist/index.js` SHA256 为 `3D1B229113ADB9608463505B4C03D8A7D9BFD19EF147028D58C9911F3BA85F4D`。 |
+
+用户明确回复“已退出”后，协调者在安装前两次检查 Desktop 进程均为空；仅复制备份 `sessions`、`storages` 和 desktop 顶层配置文件到 `C:\Users\25330\.dsh-backup-20261010-ticket13-bf79aa29`。`backup-verification.json` 确认数据文件数、字节数与配置文件哈希一致，未读取配置内容。没有启动用户 Desktop，以免自动语音触发真实模型调用；新包已安装，用户实机复验尚未完成，没有推送或创建 PR。
 
 ## 未验证与待用户验收
 
-- 第 3 轮镜像措辞调整后，真实主管模型面对工作会话中的直接输入是否不再代为执行或复述、只在需要时调整安排并在结果回来后汇报，文字模式是否不再因保持安静出现 `EMPTY_RESPONSE`，待安装新包后用户在 Desktop 复验；用户点名 Nexus 做事的输入也需留意。
+- 第 3 轮镜像措辞调整后，真实主管模型面对工作会话中的直接输入是否不再代为执行或复述、只在需要时调整安排并在结果回来后汇报，文字模式是否不再因保持安静出现 `EMPTY_RESPONSE`，新包已安装，待用户在 Desktop 复验；用户点名 Nexus 做事的输入也需留意。
 - 实机发现 A：Desktop 默认模型 glm-5.3-flash 下 Nexus 新建会话只有兜底标题（见上节，证据工作会话 `session-10dec8d3` seq 14/15，对照 `session-d1f309d6` seq 19）；同一模型下普通会话是否同样只有兜底、Desktop 日志中的失败原文，未验证；为 `session-title-llm` 指定不推理命名模型后的效果待用户确认。
 
 - Desktop 程序中侧栏的实际标题（新建会话的自动命名、主会话显示 Nexus 或用户改的名称）与派活在会话中的显示，待用户实机验收；本票只以官方 Web 客户端代码在 headless Edge 中验证。
