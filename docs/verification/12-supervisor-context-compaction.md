@@ -6,9 +6,9 @@
 
 主会话复用 Harness 原生压缩引擎：Nexus 只决定“何时、压哪段”和“谁写摘要”，压缩括号（`compaction/start` → `compaction/summary` → 检查点 → `compaction/end`）、检查点替换、原始记录保留与落盘全部由原生引擎完成，没有另建摘要机制或状态表。引擎取自主管自身绑定的原生预设（`agentPresets.serviceFor(agent, 'compaction')`），没有改写共享引擎：Nexus 调用时使用一个只覆盖 `summarize` 的派生对象，把摘要目标换成设置中的摘要模型，其余步骤仍是原生实现；改动与落盘始终作用于真实主管会话。原生 `summarize` 按自身 config 的摘要字段（顶层或针对目标模型的 `modelPolicies`）优先于路由目标，所以派生调用时清空这两个字段，Nexus 设置始终决定摘要模型，其余策略字段（如 `maxTokens`）照常生效。
 
-**依赖的非公共接口与升级风险：** `@deepseek-ai/dsh-compaction-basic` 0.2.0-rc.2 的 `BasicCompactionEngine.summarize`（原生注释称其为唯一子类定制钩子，所有压缩路径经它调用）及其 `config` 的摘要字段形状；cordis 4.0.4 服务代理的接收者语义（经代理读取的 `ctx` 是读取者的上下文，派生摘要器因此使用引擎自身 `ctx` 属性值，否则无法取得引擎注入的 `llm`）。区间选择 `compactableRange` 是同版本原生选择规则（未导出）的等价重写，`MANUAL_FAILURES` 复制同版本 `@deepseek-ai/dsh-command-compact` 文案，代码注释均标明来源版本。缺少上述引擎形状时 Nexus 明确报错，不静默退回原生摘要路由。升级 Harness 时须重跑 `tests/compaction.test.mjs` 复核。本票未接原生免模型的 `compaction/prune`（工具结果裁剪），只做摘要压缩。
+**依赖的非公共接口与升级风险：** `@deepseek-ai/dsh-compaction-basic` 0.2.0-rc.2 的 `BasicCompactionEngine.summarize`（原生注释称其为唯一子类定制钩子，所有压缩路径经它调用）及其 `config` 的摘要字段形状；cordis 4.0.4 服务代理的接收者语义（经代理读取的 `ctx` 是读取者的上下文，派生摘要器因此使用引擎自身 `ctx` 属性值，否则无法取得引擎注入的 `llm`）。区间选择 `compactableRange` 是同版本原生选择规则（未导出）的等价重写，`MANUAL_FAILURES` 复制同版本 `@deepseek-ai/dsh-command-compact` 文案，代码注释均标明来源版本。设置了摘要思考强度时，派生摘要器把传给原生摘要函数的 `ctx.llm` 换成只含 `stream` 的对象（其余 `ctx` 成员沿原型取引擎自身的），依赖同版本 `summarizeWithLlm` 只调用 `ctx.llm.stream`；若升级后它调用 `ctx.llm` 的其他方法，摘要会抛错并按失败如实记录，而不是静默丢失强度。缺少上述引擎形状时 Nexus 明确报错，不静默退回原生摘要路由。升级 Harness 时须重跑 `tests/compaction.test.mjs` 复核。本票未接原生免模型的 `compaction/prune`（工具结果裁剪），只做摘要压缩。
 
-- **预算与摘要模型：** Nexus 原生设置新增 `compactionBudget`（默认 128000）、`summaryModel`（`provider/model`；空值为 DeepSeek Flash `deepseek-official/deepseek-flash`，2026-10-10 用户裁定，此前沿用普通会话的默认模型）与 `summaryReasoningEffort`（空值取摘要模型公布的最低思考强度，`model-default` 不传）。三者均为 volatile，修改后在同一进程内立即按新值生效，并由原生设置文档跨重启保存。不再以 Realtime 模型约 1M 的上下文窗口为触发依据。
+- **预算与摘要模型：** Nexus 原生设置新增 `compactionBudget`（默认 128000）、`summaryModel`（`provider/model`；空值为 DeepSeek Flash 账号登录路由 `deepseek-account/deepseek-flash`，2026-10-10 用户裁定，此前沿用普通会话的默认模型）与 `summaryReasoningEffort`（空值取摘要模型公布的最低思考强度，`model-default` 不传）。三者均为 volatile，修改后在同一进程内立即按新值生效，并由原生设置文档跨重启保存。不再以 Realtime 模型约 1M 的上下文窗口为触发依据。
 - **自动压缩：** 每个主管轮次的最后一步结束后（`step/end` 之后、`turn/end` 之前；此时没有正在生成的回复，也没有执行中的工具），用原生 token meter 估算下一次请求的总量，超过预算才压缩。压缩区间按原生选择规则：跳过首个系统消息，保留不少于预算 20% 的近期原文，且不在工具调用与结果之间切开（`toolPairingBalancedBefore`）。选出的区间不足测量值 25%（`USEFUL_SHARE`）时跳过本次自动压缩、不生成检查点：其余部分（系统提示、工具定义、保留的近期原文）已超预算，摘要几乎不能缩小请求。同一段持续无效的状态只记一次警告，请求回到预算内或实际压缩后才会再次警告。手动 `/compact` 不受此限制。原生引擎要求开着的轮次才能 `compactRegion`，所以括号落在该轮内、所有步骤之后，语义上仍是轮次之间。失败时记录警告，原生括号带 `error` 结束，不产生检查点，完整上下文继续使用。与原生自动压缩相同：压缩期间该轮保持 running，摘要调用的时长会推迟下一轮（新输入照常进入 inbox）；失败没有退避，之后每个仍超预算的轮次都会再调用一次摘要模型，摘要模型持续不可用时每轮多一次失败调用的费用与延迟。
 - **手动 `/compact`：** 主管在自身作用域注册同一原生定义身份（`@deepseek-ai/dsh-command-compact`）的 `/compact`，遮蔽预设中的同名命令；因此主会话一打开、预设尚未延迟绑定时命令列表已有它，客户端也按原生身份本地化显示。执行走原生 `compactNow`（独立括号、`turn: null`、`sourceCommandId`、维护期排他与 flush），只换摘要模型；结果与失败文案沿用原生命令。按错误 `name` 判别 `ManualCompactionError`，不用 `instanceof`。
 - **重放：** 主管按 surface 顺序（不是 seq 顺序）重放，检查点位于被替换区间原位置；Realtime 文本连接每轮全量重放，语音新连接打开时重放，都只含摘要与近期原文。运行时快照的去重改为只看 surface，压缩掉旧快照后会重新附上当前快照。
@@ -27,7 +27,7 @@
 | --- | --- | --- |
 | 超预算后在轮次间隙自动压缩，原生记录完整、原记录可查 | 预算 19000、7 条长输入（每条约 1.8k token）后自动压缩：`compaction/start < summary < 检查点 < end`，`end` 无 error，括号前一事件是 `step/end`、在同轮 `turn/end`（completed）之前；`shadowedSeqs` 含 LONG-1，落盘日志中 LONG-1 原文仍在。 | 预算按原生 token meter 估算，非端点计费数。 |
 | 一打开即有 `/compact`，执行成功并使用设置中的摘要模型 | Host：首轮前 `commands.list` 已含 compact；浏览器：未发任何消息即在主会话输入 `/comp`，候选出现原生本地化的“压缩 compact”。执行：首轮前返回 No compactable history yet.；三轮后成功，独立括号 `turn: null`，`sourceCommandId` 与检查点均等于该命令 id，`sourceEventSeq` 指向摘要；带参数返回原生 Usage 错误。自动、手动、设置三种场景分别由 configured-sum / default-sum / ui-sum 写摘要（均为显式设置）；自动与手动场景在首轮后把预设引擎 config 的顶层及对应 `modelPolicies` 摘要字段设为 `broken`，摘要仍由 Nexus 设置的模型写出。 | Desktop 中可见与执行待实机。 |
-| 设置可改、跨重启保存、按新值生效 | 浏览器 Nexus 设置初始为 128000 与空值（“默认 (deepseek-official/deepseek-flash)”），摘要模型候选来自原生 model catalog；改为 19000 与 `nexus-test-summary/ui-sum` 后，摘要思考强度候选为“最低 (Low)、模型默认、High、Medium、Low”，选 High；同一 Host 进程随后的长对话按 19000 压缩、由 ui-sum 以 `high` 写摘要；关闭并启动新 Host 进程后，插件配置与设置页均仍为新值。 | Desktop 设置页未实机。 |
+| 设置可改、跨重启保存、按新值生效 | 浏览器 Nexus 设置初始为 128000 与空值（“默认 (deepseek-account/deepseek-flash)”），摘要模型候选来自原生 model catalog；改为 19000 与 `nexus-test-summary/ui-sum` 后，摘要思考强度候选为“最低 (Low)、模型默认、High、Medium、Low”，选 High；同一 Host 进程随后的长对话按 19000 压缩、由 ui-sum 以 `high` 写摘要；关闭并启动新 Host 进程后，插件配置与设置页均仍为新值。 | Desktop 设置页未实机。 |
 | 压缩后文字续答与新接通语音只重放摘要与近期原文，仍能理解结果并派活 | 压缩后首个请求按 surface 顺序：检查点（带 compact-checkpoint 来源前缀与 SUMMARY）在前，其后是全部保留的近期原文与当前运行时快照，不含 LONG-1；随后工作会话完成，主管收到自动工作结果并实际调用 `nexus_send_session` 成功，worker 收到 FOLLOW-UP-AFTER-COMPACTION。通话重建后的新连接与之后新接通的通话同样以检查点开头、不含被压缩原文。 | 派活由受控端点按规则触发，不代表真实模型的理解质量。 |
 | 通话中压缩不打断播放或工具，重建状态如实 | 通话中的自动压缩发生在轮次的所有步骤之后；新连接重放完成后才替换，客户端状态全程不变（无 connecting / failed），重建前 flush 次数为 0；新连接上用户说话时，旧连接已播放的声音被正确 flush，并以 nexus-voice 记录“ack c0 … about 0.5 s of its 1.0 s”，证明播放核算跨连接延续。新连接两次打开失败（端点在配置时关闭）：通话不结束，后续请求仍在原连接回答且原连接从未收到检查点条目，下一个边界的第三条新连接以检查点开头替换成功。新连接打开期间（端点延迟确认 1.5 s）用户开口：该语音在原连接提交并被回答，新连接未被使用即关闭，该轮结束后的新连接重放含该语音与检查点。新连接打开期间主管空闲时执行 `/compact`：新连接因 surface 变化被丢弃，未等下一轮，立即重试的第三条连接以最新检查点（最后一次摘要）开头，下一条输入在它上面回答。所有轮次 completed。 | 声音为受控 PCM；物理扬声器 / 麦克风未实机。两条连接并存与替换瞬间的开头丢失未经真实端点验证。 |
 | 每轮回复记录实际用量，原生用量与上下文压力为真实数据 | 每条主管 assistant 消息有 `usage {inputTokens: 234, outputTokens: 5, totalTokens: 1239, cacheReadTokens: 1000}`（端点报 input 1234 / cached 1000），流中有 usage 块；`tokenUsage` 输出总量 = 5 × 回复数；`contextPressure.pressureTokens = 1234`、`contextWindow = 19000`。语音中沉默回答的用量记为 `assistant/attempt` 的 usage 块，`tokenUsage` 输出总量 = 5 ×（消息 + 无内容结算）数。 | DashScope 实际 `usage` 字段形状按 OpenAI Realtime 约定处理，未用真实端点核对；客户端用量 / 压力显示仅经投影数据验证，未截图核对。 |
@@ -93,10 +93,10 @@
 
 **发现一：自动压缩期间显示“深度求索中”。** `node replay.cjs` 两次结果一致：手动 `/compact`（seq 649、984）显示“compact · 正在压缩…”卡片；自动压缩（seq 682、978、1191，分别 98.8 s、41.9 s、75.1 s）只有通用运行状态。原生依据：`dsh-client-ui-chat` 的自动压缩节点在检查点写入前不生成（`compactionDefinition.buildViewNode`），“正在压缩…”只属于经 `sourceCommandId` 关联的命令卡片；会话运行期间显示 `chat.deepDiving`。原生自动压缩同样在打开的轮次内（`agent/pre-step`，`compactRegion` 要求开着的轮次）执行，事件与 Nexus 相同（`{compactionId, turn}`），所以原生自动压缩也只显示通用运行状态；轨迹详情面板对任何未结束的压缩显示“正在压缩上下文…”。按裁定保持一致，不伪造命令、不改时机。体验差异：原生在下一步请求前压缩，Nexus 在回复说完后、`turn/end` 前压缩，回复结束后“深度求索中”还会停留整个摘要时长，期间新输入排队。摘要耗时主要来自思考：五次摘要均由 `ark-coding-plan/glm-5.3-flash` 写出，输出 1.7k–4.7k token，最长推理文本 12k 字符。建议摘要使用不思考的快速模型；按随后的用户裁定，默认已改为 DeepSeek Flash 并关闭思考（见下）。
 
-**发现二：预算低于固定开销时每轮无效压缩。** 33 个工具定义 24,811 字符、系统提示 9,300 字符、检查点约 4,300 字符；刚 `/compact` 后首个请求端点输入 9802（seq 662，预算 8000）与 10432（seq 998）token，用户未说话已超预算。seq 682 只替换 651–661（上一检查点、本轮输入与快照），耗时 98.8 s，请求输入 25418 → 25749，不降反升；seq 978 替换 684–927，65084 → 10432。修复：上面“自动压缩”一条的 25% 跳过规则（约 10 行）。按日志估算它跳过 seq 682（约 5%），保留 seq 978（约 85%）。设置说明（中英）写明预算需高于约 10k 的固定开销与跳过行为，不写死下限。
+**发现二：预算低于固定开销时每轮无效压缩。** 33 个工具定义 24,811 字符、系统提示 9,300 字符、检查点约 4,300 字符；刚 `/compact` 后首个请求端点输入 9802（seq 662，预算 8000）与 10432（seq 998）token，用户未说话已超预算。seq 682 只替换 651–661（上一检查点、本轮输入与快照），耗时 98.8 s，请求输入 25418 → 25749，不降反升；seq 978 替换 684–927，65084 → 10432。修复：上面“自动压缩”一条的 25% 跳过规则（约 10 行）。按日志估算它跳过 seq 682（约 5%），保留 seq 978（约 85%）。设置说明（中英）写明预算需明显高于主管每次请求的固定开销与跳过行为，不写死数字或下限（第 4 轮去掉了设置说明中的“约 10k token”；README 保留并注明“当前”）。
 
 **用户追加裁定：**
-- **摘要模型默认 DeepSeek Flash：** 空值为 `deepseek-official/deepseek-flash`。核实依据：`@deepseek-ai/dsh-base` 的 `agent-default-model` 即该路由，`deepseek-official` 由 `dsh-llm-deepseek-api-key` 注册（API key），其目录默认含 `deepseek-flash`；用户 profile 的入门记录为 api-key、子代理白名单为同一路由，用户会话中也用过 `deepseek-official`（v4-pro）与 `deepseek-account/deepseek-flash`。原生没有“不可用时换模型”的约定（会话命名等辅助调用同样只用配置或已记录的路由），所以默认路由不可用时如实失败，不回退普通会话的默认模型。Nexus 不再注入 `agentDefaultModel`。
+- **摘要模型默认 DeepSeek Flash（第 4 轮更正路由）：** 用户裁定默认 deepseek-flash、走 DeepSeek 账号登录路由，空值为 `deepseek-account/deepseek-flash`。第 3 轮曾按 `@deepseek-ai/dsh-base` 的 `agent-default-model` 取 `deepseek-official/deepseek-flash`（API key 路由），复审时用户指出近期 flash 会话都走账号登录路由，已更正。核实依据：`@deepseek-ai/dsh-llm-deepseek-account` 0.2.0-rc.2 以 `PROVIDER = "deepseek-account"` 调用 `registerDeepSeekProvider`，模型目录默认含 `deepseek-flash`；只读副本中 `session-d1f309d6` 有 18 处 `deepseek-account/deepseek-flash`（另有 6 处 `ark-coding-plan/glm-5.3-flash`；唯一一处 `deepseek-official/deepseek-flash` 是子代理白名单 `subagent/model-selection-policy`），`session-ee82686b` 全部 4 处都是 `deepseek-account/deepseek-flash`。未登录时该路由的 `resolveAuth` 抛 `ACCOUNT_SIGN_IN_REQUIRED`（“Sign in to DeepSeek to use the account provider…”），压缩如实失败。不可用时不回退是实施与协调者决定（原生没有“不可用时换模型”的约定，会话命名等辅助调用同样只用配置或已记录的路由），不是用户裁定。Nexus 不再注入 `agentDefaultModel`，也不再声明 `@deepseek-ai/dsh-agent-default-model` 依赖。
 - **摘要思考强度：** 原生 `summarizeWithLlm` 只取请求头里的 provider 与 model，请求头中的 `reasoningEffort` 不会生效；因此派生摘要器同时把强度写进请求头并加入它流式调用的 `GenerateOptions.reasoningEffort`。强度按 `summaryEffort` 取：设置值在模型公布的 efforts 中就用它，否则取最低（id/name 为 none/off/disabled，其次 minimal，其次 low），都没有或模型不公布 efforts 时不传；`model-default` 不传，此时 dsh-llm 会套用模型的 `defaultEffort`（受控用例中为 high）。设置页候选来自所选摘要模型在原生 model catalog 中公布的 efforts。
 - **Desktop 模型目录中的 efforts（源码核实）：** `deepseek-official/deepseek-flash` 与 `deepseek-account/deepseek-flash` 同由 `registerDeepSeekProvider` 提供，efforts 为 Off、Low、High、Max，`defaultEffort` 未配置时为 high；默认会选 **off**（关闭思考）。`ark-coding-plan/glm-5.3-flash` 经 `dsh-llm-pi-ai` 的自定义路由提供，安装的 pi-ai 目录没有该路由（无基础条目），用户配置也未声明 `reasoningEfforts`，于是 `reasoning: false`、不公布 efforts（`reasoningInfo` 返回空）；若用户改选它，Nexus 不传强度，按提供方默认（验收日志显示会思考）。
 
@@ -115,6 +115,25 @@
 - 测试 Host 一律设 `DEEPSEEK_API_KEY` 为空：credentials-local 以继承的环境变量为最高优先，默认路由在任何机器上都不会调用真实 DeepSeek。
 - 完整 `npm test`（`ticket12-r4-npm-test.txt`）：95 项，84 passed / 0 failed / 11 skipped（需真实模型或已安装 Desktop 的用例），exit 0。
 
+### 第 3 轮复审处置（第 4 轮）
+
+| 复审项 | 处置 | 说明 |
+|---|---|---|
+| 1 默认路由（用户裁定） | fixed | `DEFAULT_SUMMARY_MODEL` 与 client.js 常量改为 `deepseek-account/deepseek-flash`；依据见上方“摘要模型默认 DeepSeek Flash（第 4 轮更正路由）”。spec 与票 12 的归属改为：默认 deepseek-flash、走 deepseek-account 路由是用户裁定；不可用时如实失败不回退是实施与协调者决定。 |
+| 2 标准#1 多余依赖 | fixed | 删除 `src/supervisor.ts` 的 `import type {} from '@deepseek-ai/dsh-agent-default-model'` 与 package.json、package-lock.json 根 peer 声明。源码、client.js、typert.js、cordis.patch.yml 再无引用；测试探针中的 `agentDefaultModel` 保留（Harness 基础包仍带该包，lock 中的包条目随其他原生包保留）。`npm install --package-lock-only --offline` 重新生成的 lock 与手工删除一行完全相同。 |
+| 3 标准#2 非公共依赖 | fixed | “依赖的非公共接口与升级风险”补上派生摘要器以只含 `stream` 的对象替换 `ctx.llm`、依赖 `summarizeWithLlm` 只调用 `ctx.llm.stream`。 |
+| 4 标准#3 字面量出处 | fixed | client.js 的 `'model-default'` 注释注明对应 `src/compaction.ts` 的 `MODEL_DEFAULT_EFFORT`。 |
+| 5 标准#4 自定义类型 | fixed | 删除 `ReasoningEffort` 接口，改用 `@deepseek-ai/dsh-llm` 导出的 `LlmReasoningEffortInfo`（即 `LlmModelReasoningInfo['efforts'][number]`）。 |
+| 6 标准#5 写死数字 | fixed | 设置页中英提示去掉“约 10k token”，改为定性描述；README 保留“当前约 10k token”。 |
+| 7 规格#2 票据括注 | fixed | 票 12 自动压缩验收行补充：无效压缩跳过只记 warn（Desktop 默认日志不显示），预算接近固定开销时会出现“压力超预算但不压缩”；按协调者裁定不加可见通知。 |
+
+检查：
+- 红测试 `ticket12-r5-red.txt`：默认摘要模型用例对第 3 轮实现失败，实际错误为 `llm-deepseek: no API key for provider route "deepseek-official"…`，期望的是账号路由的登录错误。
+- `ticket12-r5-typecheck.txt`、`ticket12-r5-build.txt` 均 exit 0。
+- 整文件 `ticket12-r5-green.txt`：10 passed / 0 failed。`compaction-default-summary-1791691236680` 中 `compaction/end.error` 为 “Sign in to DeepSeek to use the account provider. The request destination must allow account authentication.”，没有调用 fixture 摘要模型，也没有检查点。
+- 账号令牌由 credentials-local 从 `$DSH_HOME/.credentials.yaml` 的记录读取，测试 Host 的 `DSH_HOME` 是临时目录，所以默认路由在任何机器上都不会用到真实账号。
+- 完整 `npm test`（`ticket12-r5-npm-test.txt`）：95 项，84 passed / 0 failed / 11 skipped，exit 0。
+
 ```powershell
 npm run typecheck
 npm run build
@@ -127,7 +146,7 @@ git diff --check
 
 - 准确型号 `qwen3.8-omni-flash-realtime` 与实际摘要模型的一次真实压缩（摘要质量、来源含义保持、真实 `usage` 字段形状）。
 - Desktop 中主会话 `/compact` 可见与实际执行、Desktop 设置页修改与重启保存（含摘要思考强度）。
-- 默认 DeepSeek Flash（`deepseek-official`，需 Desktop 中已存 DeepSeek API key）以 off 强度的一次真实压缩：摘要质量与耗时；未存 key 时每次自动压缩都会如实失败。
+- 默认 DeepSeek Flash（`deepseek-account`，需 Desktop 中已登录 DeepSeek 账号）以 off 强度的一次真实压缩：摘要质量与耗时；未登录时每次自动压缩都会如实失败。
 - 真实通话（物理音频）中的轮次边界重建体验；Realtime 单连接最大轮次限制。
 - 重建期间新旧两条 Realtime 连接并存：DashScope 对同一凭据并发连接是否允许、是否计费或限流，未核实。
 - 替换瞬间用户开口时开头极短音频的丢失程度（受 DashScope VAD 起始延迟影响），未实机。
