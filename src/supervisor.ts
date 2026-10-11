@@ -7,7 +7,7 @@ import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-sess
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
 import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type Response, type ServerTurn } from './realtime.js'
-import { MANUAL_FAILURES, RETAIN_SHARE, compactableRange, summaryTarget, withSummaryModel } from './compaction.js'
+import { MANUAL_FAILURES, RETAIN_SHARE, USEFUL_SHARE, compactableRange, summaryTarget, withSummaryModel } from './compaction.js'
 import { registerWorkSessions } from './work-sessions.js'
 import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
@@ -31,9 +31,10 @@ declare module '@deepseek-ai/dsh-llm' {
 
 /**
  * compactionBudget: estimated request tokens above which the main conversation compacts between turns.
- * summaryModel: `provider/model` that writes compaction summaries; empty follows the default model of ordinary sessions.
+ * summaryModel: `provider/model` that writes compaction summaries; empty is DeepSeek Flash (`DEFAULT_SUMMARY_MODEL`).
+ * summaryReasoningEffort: reasoning effort of summaries; empty takes the lowest the summary model offers, `model-default` sends none.
  */
-export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; compactionBudget: Volatile<number>; summaryModel: Volatile<string> }
+export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
 export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void }
@@ -96,6 +97,8 @@ export class Supervisor implements Agent {
   private connection?: RealtimeConnection
   private call?: Call
   private readonly voiceTurns: ServerTurn[] = []
+  /** Automatic compaction was skipped as useless and warned about; cleared once the request is within budget or compacts. */
+  private uselessWarned = false
   /** Notices of playback the user's speech stopped: already sent to the model, recorded with the next turn's input. */
   private readonly notices: UserMessage[] = []
   /** Call connections the user hung up; their unfinished requests continue on a text connection. */
@@ -245,7 +248,7 @@ export class Supervisor implements Agent {
   private compaction() {
     const engine = this.ctx.agentPresets.serviceFor(this, 'compaction')
     if (!engine) throw new Error('The selected native preset must provide compaction')
-    return withSummaryModel(engine, () => summaryTarget(this.config.summaryModel.get(), this.ctx.agentDefaultModel.currentSelection()))
+    return withSummaryModel(engine, () => summaryTarget(this.config.summaryModel.get()), () => this.config.summaryReasoningEffort.get())
   }
   /**
    * Natively compact older history once the conversation exceeds the Nexus budget, keeping a recent
@@ -254,9 +257,15 @@ export class Supervisor implements Agent {
   private async compactOverBudget(signal: AbortSignal) {
     const budget = this.config.compactionBudget.get()
     const measurement = this.ctx.tokenMeter.measure(this.session)
-    if (measurement.totalTokens <= budget) return
+    if (measurement.totalTokens <= budget) { this.uselessWarned = false; return }
     const range = compactableRange(this.session, measurement, Math.floor(budget * RETAIN_SHARE))
     if (!range) return
+    if (range.tokens < measurement.totalTokens * USEFUL_SHARE) {
+      if (!this.uselessWarned) this.ctx.logger.warn(`nexus: automatic compaction skipped: the compactable history (~${range.tokens} tokens) is under ${USEFUL_SHARE * 100}% of the request (~${measurement.totalTokens} tokens); a compaction budget (${budget}) close to the fixed supervisor prompt cannot be reached by summarizing`)
+      this.uselessWarned = true
+      return
+    }
+    this.uselessWarned = false
     try { await this.compaction().compactRegion(range.start, range.end, this, signal) }
     catch (error) {
       if (!signal.aborted) this.ctx.logger.warn(`nexus: automatic compaction failed; the conversation is kept whole: ${error instanceof Error ? error.message : String(error)}`)

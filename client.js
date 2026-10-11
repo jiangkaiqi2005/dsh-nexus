@@ -214,6 +214,14 @@ window.__ModuleLoader__.load({
       }, busy ? t('hangup') : t('start')))
     }
 
+    // As DEFAULT_SUMMARY_MODEL in src/compaction.ts: the summary model while the setting is empty.
+    const DEFAULT_SUMMARY_MODEL = 'deepseek-official/deepseek-flash'
+    // As lowestEffort in src/compaction.ts: an effort that turns thinking off, then minimal, then low.
+    const lowestEffort = efforts => {
+      const named = pattern => efforts.find(effort => pattern.test(effort.id) || pattern.test(effort.name))
+      return named(/^(?:none|off|disabled?)$/i) ?? named(/^minimal$/i) ?? named(/^low$/i)
+    }
+
     function Settings({ form, catalog, t }) {
       const snapshot = React.useSyncExternalStore(listener => form.subscribe(listener), () => form.getSnapshot())
       const [error, setError] = React.useState(false)
@@ -240,7 +248,19 @@ window.__ModuleLoader__.load({
       const summaryModel = snapshot.value?.summaryModel ?? ''
       const routes = (models?.groups ?? []).flatMap(group => group.models.map(model => ({ value: `${group.id}/${model.id}`, label: `${group.name} / ${model.name || model.id}` })))
       if (summaryModel && !routes.some(route => route.value === summaryModel)) routes.unshift({ value: summaryModel, label: summaryModel })
-      const fallback = models ? ` (${models.default.provider}/${models.default.model})` : ''
+      // Efforts the summary model offers; empty takes the lowest of them, model-default sends none.
+      const route = summaryModel || DEFAULT_SUMMARY_MODEL
+      const slash = route.indexOf('/')
+      const [provider, modelId] = [route.slice(0, slash), route.slice(slash + 1)]
+      const efforts = models?.groups.find(group => group.id === provider)?.models.find(model => model.id === modelId)?.reasoning?.efforts ?? []
+      const lowest = lowestEffort(efforts)
+      const savedEffort = snapshot.value?.summaryReasoningEffort ?? ''
+      const effort = savedEffort === 'model-default' || efforts.some(item => item.id === savedEffort) ? savedEffort : ''
+      const effortOptions = !efforts.length ? [h('option', { key: '', value: '' }, t('effort-none'))] : [
+        h('option', { key: '', value: '' }, lowest ? `${t('effort-lowest')} (${lowest.name})` : t('effort-model-default')),
+        ...lowest ? [h('option', { key: 'model-default', value: 'model-default' }, t('effort-model-default'))] : [],
+        ...efforts.map(item => h('option', { key: item.id, value: item.id }, item.name)),
+      ]
       return h('div', { style: { padding: 16 } },
         h('h2', null, 'Nexus'),
         h('label', null, h('input', {
@@ -256,7 +276,11 @@ window.__ModuleLoader__.load({
         h('label', { style: { display: 'block', marginTop: 12 } }, t('summary-model'), ' ', h('select', {
           value: summaryModel, disabled,
           onChange: event => save('summaryModel', event.target.value),
-        }, h('option', { value: '' }, t('summary-default') + fallback), ...routes.map(route => h('option', { key: route.value, value: route.value }, route.label)))),
+        }, h('option', { value: '' }, `${t('summary-default')} (${DEFAULT_SUMMARY_MODEL})`), ...routes.map(route => h('option', { key: route.value, value: route.value }, route.label)))),
+        h('label', { style: { display: 'block', marginTop: 12 } }, t('summary-effort'), ' ', h('select', {
+          value: effort, disabled: disabled || !efforts.length,
+          onChange: event => save('summaryReasoningEffort', event.target.value),
+        }, ...effortOptions)),
         h('p', null, t('compaction-hint')),
         error ? h('p', { role: 'alert' }, t('save-failed')) : null)
     }
@@ -264,8 +288,8 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'uiWorkspace', 'locale'],
       apply(ctx) {
-        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default model', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget and summary model apply immediately.', ...states(STATES.en) })
-        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认模型', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算与摘要模型立即生效。', ...states(STATES.zh) })
+        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless you choose another model, at the lowest reasoning effort the model offers. Known limits: a reasoning model summarizes markedly slower, and its reasoning counts toward the output limit. Keep the budget well above the fixed part of each supervisor request (system prompt, tool definitions and similar, currently about 10k tokens): summarizing cannot bring a request below it, so automatic compaction is skipped when it would barely help. During automatic compaction the conversation shows the general running status, as native automatic compaction does.', ...states(STATES.en) })
+        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算应明显高于主管每次请求的固定开销（系统提示、工具定义等，当前约 10k token），摘要无法让请求低于这部分，压缩几乎无效时会跳过自动压缩；自动压缩期间会话显示通用的运行状态，与原生自动压缩一致。', ...states(STATES.zh) })
         ctx.inject(['configForms', 'remote', 'remote.session'], settingsCtx => {
           const form = settingsCtx.configForms.get('nexus')
           const catalog = () => settingsCtx.remote.session.modelCatalog()

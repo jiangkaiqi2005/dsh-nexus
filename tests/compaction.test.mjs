@@ -102,7 +102,7 @@ async function scenario(name, { steps, nexus = '', defaultModel, model: endpoint
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-compaction-probe'] } } }))
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n${nexus}`)
   let output = ''
-  const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-compaction', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_COMPACTION_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' } }, async child => {
+  const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-compaction', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_COMPACTION_KEY: 'fixture-not-a-secret', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => {
     child.stdout.on('data', data => { output += data })
     child.stderr.on('data', data => { output += data })
     return {}
@@ -132,7 +132,7 @@ const userText = event => event.data.content.map(part => part.text).join('')
 
 test('the main conversation compacts natively between turns once it exceeds the Nexus budget', { timeout: 180000 }, async () => {
   const report = await scenario('auto', {
-    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/configured-sum\n',
     steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { summarizationOverride: true }, { long: 7 }, { worker: 'AFTER-COMPACTION-WORK' }],
   })
   const { events, requests } = report
@@ -155,6 +155,8 @@ test('the main conversation compacts natively between turns once it exceeds the 
   assert.equal(report.overridden, 'broken')
   assert.deepEqual([summary.data.provider, summary.data.model], ['nexus-test-summary', 'configured-sum'])
   assert.ok(report.summaries.every(call => call.model === 'configured-sum'))
+  // By default it ran at the lowest effort the model offers: off, although the adapter lists it last.
+  assert.ok(report.summaries.every(call => call.reasoningEffort === 'off'))
   assert.equal(report.summaries[0].purpose, 'compaction')
   assert.equal(report.summaries[0].sessionId, 'nexus-supervisor')
   assert.match(report.summaries[0].input, /KESTREL-9/)
@@ -185,13 +187,13 @@ test('the main conversation compacts natively between turns once it exceeds the 
     assert.ok(reply.data.stream.some(record => record.chunk?.type === 'usage'))
   }
   assert.equal(report.contextPressure.pressureTokens, 1234)
-  assert.equal(report.contextPressure.contextWindow, 12000)
+  assert.equal(report.contextPressure.contextWindow, 19000)
   assert.equal(report.tokenUsage.totals.outputTokens, 5 * replies.length)
 })
 
-test('/compact is listed before the first turn and compacts with the default model between turns', { timeout: 180000 }, async () => {
+test('/compact is listed before the first turn and compacts with the configured summary model between turns', { timeout: 180000 }, async () => {
   const report = await scenario('manual', {
-    defaultModel: { provider: 'nexus-test-summary', model: 'default-sum' },
+    nexus: '    summaryModel: nexus-test-summary/default-sum\n',
     steps: [
       { command: '/compact' },
       { prompt: 'Remember the codename KESTREL-9.' }, { summarizationOverride: true }, { prompt: 'Second request.' }, { prompt: 'Third request.' },
@@ -215,9 +217,11 @@ test('/compact is listed before the first turn and compacts with the default mod
   const turnBoundaries = events.filter(event => event.type === 'turn/start' || event.type === 'turn/end')
   assert.equal(turnBoundaries.filter(event => event.seq < start.seq).at(-1).type, 'turn/end')
   assert.ok(turnBoundaries.filter(event => event.seq > start.seq && event.seq < end.seq).length === 0)
-  // The default model of ordinary sessions wrote it, also over summarization fields of the native engine's own config.
+  // The configured summary model wrote it, also over summarization fields of the native engine's own config.
   assert.equal(report.overridden, 'broken')
   assert.deepEqual([summary.data.provider, summary.data.model], ['nexus-test-summary', 'default-sum'])
+  // That model offers no off effort: the lowest it offers is low.
+  assert.ok(report.summaries.length && report.summaries.every(call => call.reasoningEffort === 'low'))
   assert.match(commands[1].result.text, /^Compacted \d+ history items \(~\d+ tokens\)\.$/)
   assert.equal(commands[1].result.kind, 'success')
   assert.equal(commands[1].result.sourceEventSeq, summary.seq)
@@ -233,7 +237,7 @@ test('/compact is listed before the first turn and compacts with the default mod
 
 test('a failed summary records the attempt and keeps the whole conversation', { timeout: 180000 }, async () => {
   const report = await scenario('failure', {
-    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/broken\n',
+    nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/broken\n',
     steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { long: 7 }, { command: '/compact' }, { prompt: 'After failed compaction.' }],
   })
   const { events, requests, commands } = report
@@ -247,6 +251,8 @@ test('a failed summary records the attempt and keeps the whole conversation', { 
   assert.equal(of(events, 'compaction/summary').length, 0)
   assert.ok(!events.some(event => sourceOf(event) === 'compact-checkpoint'))
   assert.ok(report.summaries.length >= starts.length && report.summaries.every(call => call.model === 'broken'))
+  // A model that offers no reasoning efforts is called without one.
+  assert.ok(report.summaries.every(call => call.reasoningEffort === undefined))
   assert.deepEqual(commands[0].result, { kind: 'error', text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.' })
   assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
   // The next request still replays the whole conversation.
@@ -258,7 +264,7 @@ test('a failed summary records the attempt and keeps the whole conversation', { 
 
 test('during a call a compaction rebuilds the model connection at a turn boundary, keeping playback accounting', { timeout: 180000 }, async () => {
   const report = await scenario('call', {
-    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/configured-sum\n',
     steps: [
       { call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 7 },
       { until: 'rebuilt' }, { speak: true }, { prompt: 'After the cut.' },
@@ -293,7 +299,7 @@ test('during a call a compaction rebuilds the model connection at a turn boundar
 const until = async (predicate, label, limit = 45000) => { for (const start = Date.now(); !(await predicate()); await delay(100)) if (Date.now() - start > limit) throw new Error(`timeout waiting for ${label}`) }
 const readJson = async path => { try { return JSON.parse(await readFile(path, 'utf8')) } catch { return undefined } }
 
-test('the Nexus conversation lists /compact on first open; budget and summary model are set in Nexus settings, apply at once and survive a restart', { timeout: 240000 }, async t => {
+test('the Nexus conversation lists /compact on first open; budget, summary model and summary effort are set in Nexus settings, apply at once and survive a restart', { timeout: 240000 }, async t => {
   const home = resolve('.scratch/nexus-v1', `compaction-ui-${Date.now()}`)
   const profile = resolve(home, 'profiles/nexus-compaction')
   const fixture = resolve(home, 'probe')
@@ -309,7 +315,7 @@ test('the Nexus conversation lists /compact on first open; budget and summary mo
   const cycle = async (report, steps) => {
     await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-compaction-probe\n      name: nexus-compaction-probe\n      config:\n        dir: ${JSON.stringify(home)}\n        report: ${report}\n        live: true\n        steps: ${JSON.stringify(steps)}\n`)
     let output = ''
-    const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-compaction', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_COMPACTION_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' } }, async child => {
+    const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-compaction', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_COMPACTION_KEY: 'fixture-not-a-secret', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => {
       child.stdout.on('data', data => { output += data })
       child.stderr.on('data', data => { output += data })
       return {}
@@ -340,7 +346,7 @@ test('the Nexus conversation lists /compact on first open; budget and summary mo
       await page.getByRole('button', { name: 'Nexus', exact: true }).click({ timeout: 1000 }).catch(() => {})
       return page.getByRole('spinbutton', { name: /主会话压缩预算/ }).isVisible()
     }, 'Nexus settings')
-    return { budget: page.getByRole('spinbutton', { name: /主会话压缩预算/ }), summary: page.getByRole('combobox', { name: /压缩摘要模型/ }) }
+    return { budget: page.getByRole('spinbutton', { name: /主会话压缩预算/ }), summary: page.getByRole('combobox', { name: /压缩摘要模型/ }), effort: page.getByRole('combobox', { name: /摘要思考强度/ }) }
   }
   const evidence = resolve(home, 'browser')
   await mkdir(evidence)
@@ -364,23 +370,30 @@ test('the Nexus conversation lists /compact on first open; budget and summary mo
     assert.equal(await fields.budget.inputValue(), '128000')
     assert.equal(await fields.summary.inputValue(), '')
     await until(async () => (await fields.summary.locator('option').allTextContents()).some(text => text.includes('ui-sum')), 'model catalog in the summary model choice')
-    await fields.budget.fill('12000')
+    await fields.budget.fill('19000')
     await fields.budget.press('Enter')
-    await until(async () => !(await fields.budget.isDisabled()) && await fields.budget.inputValue() === '12000', 'budget saved')
+    await until(async () => !(await fields.budget.isDisabled()) && await fields.budget.inputValue() === '19000', 'budget saved')
     await fields.summary.selectOption('nexus-test-summary/ui-sum')
     await until(async () => !(await fields.summary.isDisabled()) && await fields.summary.inputValue() === 'nexus-test-summary/ui-sum', 'summary model saved')
+    // Efforts of the chosen model, led by its lowest (the default) and the model default.
+    await until(async () => (await fields.effort.locator('option').allTextContents()).join('|') === '最低 (Low)|模型默认|High|Medium|Low', 'efforts of the summary model')
+    assert.equal(await fields.effort.inputValue(), '')
+    await fields.effort.selectOption('high')
+    await until(async () => !(await fields.effort.isDisabled()) && await fields.effort.inputValue() === 'high', 'summary effort saved')
     assert.equal(await page.getByRole('alert').count(), 0)
     await page.screenshot({ path: resolve(evidence, 'settings-saved.png') })
     await writeFile(resolve(home, 'settings-saved'), '')
     let report
-    await until(async () => (report = await readJson(resolve(home, 'report-1.json'))), 'first cycle report', 120000)
+    await until(async () => (report = await readJson(resolve(home, 'report-1.json'))), 'first cycle report', 190000)
     assert.equal(report.error, undefined, report.stack)
     // The same process compacted at the new budget with the chosen summary model.
-    assert.equal(report.config.compactionBudget, 12000)
+    assert.equal(report.config.compactionBudget, 19000)
     assert.equal(report.config.summaryModel, 'nexus-test-summary/ui-sum')
+    assert.equal(report.config.summaryReasoningEffort, 'high')
     const summary = report.events.find(event => event.type === 'compaction/summary')
     assert.ok(summary, 'the new budget triggers compaction without a restart')
     assert.deepEqual([summary.data.provider, summary.data.model], ['nexus-test-summary', 'ui-sum'])
+    assert.ok(report.summaries.length && report.summaries.every(call => call.reasoningEffort === 'high'), 'the chosen effort applies without a restart')
     await page.close()
     await current.host.close()
     // A new Host process keeps the values.
@@ -388,11 +401,12 @@ test('the Nexus conversation lists /compact on first open; budget and summary mo
     let restarted
     await until(async () => (restarted = await readJson(resolve(home, 'report-2.json'))), 'second cycle report')
     assert.equal(restarted.error, undefined, restarted.stack)
-    assert.equal(restarted.config.compactionBudget, 12000)
+    assert.equal(restarted.config.compactionBudget, 19000)
     assert.equal(restarted.config.summaryModel, 'nexus-test-summary/ui-sum')
+    assert.equal(restarted.config.summaryReasoningEffort, 'high')
     page = await open(current.url)
     const kept = await settings(page)
-    await until(async () => await kept.budget.inputValue() === '12000' && await kept.summary.inputValue() === 'nexus-test-summary/ui-sum', 'settings after restart')
+    await until(async () => await kept.budget.inputValue() === '19000' && await kept.summary.inputValue() === 'nexus-test-summary/ui-sum' && await kept.effort.inputValue() === 'high', 'settings after restart')
     await page.screenshot({ path: resolve(evidence, 'settings-restarted.png') })
     console.log('compaction ui evidence:', home)
   } catch (error) {
@@ -407,7 +421,7 @@ test('the Nexus conversation lists /compact on first open; budget and summary mo
 
 test('during a call a replacement connection that cannot open leaves the call on its connection, which never receives the summary as a new item', { timeout: 180000 }, async () => {
   const report = await scenario('call-rejected', {
-    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/configured-sum\n',
     model: { opening: { 1: 'reject', 2: 'reject' } },
     steps: [
       { call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 7 },
@@ -437,7 +451,7 @@ test('during a call a replacement connection that cannot open leaves the call on
 
 test('during a call speech while a replacement opens keeps the old connection; a silent answer records its usage', { timeout: 180000 }, async () => {
   const report = await scenario('call-speech', {
-    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/configured-sum\n',
     model: { opening: { 1: 'delay' }, speech: 'commit' },
     steps: [
       { call: 'start' }, { speakOnRebuild: true }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 7 },
@@ -468,7 +482,7 @@ test('during a call speech while a replacement opens keeps the old connection; a
 
 test('during a call a replacement discarded once the agent is idle is retried at once, not at the next turn', { timeout: 180000 }, async () => {
   const report = await scenario('call-discarded', {
-    nexus: '    compactionBudget: 12000\n    summaryModel: nexus-test-summary/configured-sum\n',
+    nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/configured-sum\n',
     model: { opening: { 1: 'delay' } },
     // The manual compaction runs between turns while the first replacement opens, so no turn ends after it is discarded.
     steps: [{ call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 6 }, { command: '/compact' }, { until: 'rebuilt' }, { prompt: 'After rebuild.' }, { call: 'end' }],
@@ -488,4 +502,55 @@ test('during a call a replacement discarded once the agent is idle is retried at
   assert.deepEqual(link.failed, [])
   assert.deepEqual(link.states, [])
   assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
+})
+
+test('automatic compaction skips a span too small to shrink the request, warning once per stretch, and still compacts a useful span; /compact is not limited', { timeout: 180000 }, async () => {
+  // A budget just above the fixed supervisor prompt: early spans and a lone checkpoint are too small to matter.
+  const report = await scenario('useless', {
+    nexus: '    compactionBudget: 9000\n    summaryModel: nexus-test-summary/configured-sum\n    summaryReasoningEffort: model-default\n',
+    steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { long: 4 }, { command: '/compact' }],
+  })
+  const { events, pressure, commands, warnings } = report
+  const turnOf = text => events.find(event => sourceOf(event) === 'user' && userText(event).startsWith(text)).seq
+  const compactedIn = text => {
+    const start = events.find(event => event.type === 'turn/start' && event.seq < turnOf(text) && events.filter(item => item.type === 'turn/start' && item.seq < turnOf(text)).at(-1) === event)
+    const end = events.find(event => event.type === 'turn/end' && event.data.turn === start.data.turn)
+    return events.some(event => event.type === 'compaction/start' && event.seq > start.seq && event.seq < end.seq)
+  }
+  const automatic = of(events, 'compaction/start').filter(event => typeof event.data.turn === 'number')
+  // Over budget from the first long prompt, but the first spans are mostly prompt and retained tail: skipped, no checkpoint.
+  assert.ok(pressure[1] > 9000)
+  assert.equal(compactedIn('LONG-1 '), false)
+  // Once the history outweighs that, it compacts with the configured model.
+  assert.equal(automatic.length, 1)
+  const useful = events.find(event => event.type === 'compaction/summary' && event.data.compactionId === automatic[0].data.compactionId)
+  assert.deepEqual([useful.data.provider, useful.data.model], ['nexus-test-summary', 'configured-sum'])
+  // The model-default effort setting sends none, so the model's own default effort (high) applies, not its lowest.
+  assert.ok(report.summaries.length && report.summaries.every(call => call.reasoningEffort === 'high'))
+  // Afterwards the request stays over budget, but the checkpoint alone is not summarized again.
+  assert.ok(pressure.at(-1) > 9000)
+  assert.equal(compactedIn('LONG-4 '), false)
+  // One warning before the compaction and one after it, not one per turn.
+  assert.equal(warnings.filter(warning => warning.includes('automatic compaction skipped')).length, 2)
+  // /compact still compacts on request.
+  assert.equal(commands[0].result.kind, 'success')
+  assert.ok(of(events, 'compaction/start').some(event => event.data.sourceCommandId === commands[0].commandId))
+  assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
+})
+
+test('an unset summary model is DeepSeek Flash; when that route cannot run, compaction fails as recorded instead of using another model', { timeout: 180000 }, async () => {
+  // The default model of ordinary sessions is a working fixture model; the summary must not fall back to it.
+  const report = await scenario('default-summary', {
+    defaultModel: { provider: 'nexus-test-summary', model: 'default-sum' },
+    steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { prompt: 'Second request.' }, { prompt: 'Third request.' }, { command: '/compact' }],
+  })
+  const { events, commands } = report
+  const ends = of(events, 'compaction/end')
+  assert.equal(ends.length, 1)
+  // The isolated Host has no DeepSeek key, so the DeepSeek Flash route fails before any request.
+  assert.match(ends[0].data.error, /deepseek-official/)
+  assert.equal(of(events, 'compaction/summary').length, 0)
+  assert.ok(!events.some(event => sourceOf(event) === 'compact-checkpoint'))
+  assert.deepEqual(commands[0].result, { kind: 'error', text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.' })
+  assert.deepEqual(report.summaries, [])
 })

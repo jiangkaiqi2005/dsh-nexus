@@ -11,16 +11,23 @@ const text = message => message.content.flatMap(part => part.type === 'text' ? [
 
 /**
  * Host-side fixture for main-conversation compaction: a controlled summary model
- * (model "broken" fails), a controlled native worker, and one scenario driven
+ * (model "broken" fails; some models offer reasoning efforts), a controlled native worker, and one scenario driven
  * through native entry points, reporting the persisted supervisor log.
  */
+// Reasoning efforts of the fixture summary models in adapter-preferred order; a model not listed offers none.
+const EFFORTS = { 'configured-sum': ['high', 'low', 'off'], 'default-sum': ['high', 'low'], 'ui-sum': ['high', 'medium', 'low'] }
+
 export function apply(ctx, config) {
   const summaries = []
   class SummaryAdapter extends LlmAdapter {
     async listModels(provider) { return ['configured-sum', 'default-sum', 'ui-sum', 'broken'].map(id => ({ provider, id, name: `Fixture ${id}` })) }
+    async resolveModel(provider, id) {
+      const efforts = EFFORTS[id]?.map(effort => ({ id: effort, name: effort[0].toUpperCase() + effort.slice(1) }))
+      return { provider, id, name: `Fixture ${id}`, ...efforts ? { reasoning: { efforts, defaultEffort: 'high' } } : {} }
+    }
     async *stream(options) {
       const input = options.messages.map(message => text(message)).join('\n')
-      summaries.push({ provider: options.provider, model: options.model, purpose: options.purpose, sessionId: options.sessionId, input })
+      summaries.push({ provider: options.provider, model: options.model, reasoningEffort: options.reasoningEffort, purpose: options.purpose, sessionId: options.sessionId, input })
       if (options.model === 'broken') throw new Error('fixture summary model unavailable')
       const summary = `SUMMARY-${summaries.length}: the user sent long numbered prompts; work results arrive as automatic work-session reports.`
       yield { type: 'block-start', index: 0, blockType: 'text' }
@@ -38,6 +45,9 @@ export function apply(ctx, config) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
   }
+  // Warnings the supervisor logs (the isolated Host does not print them; exporters take only info and errors by default).
+  const warnings = []
+  ctx.logger.exporter({ levels: { default: 2 }, export: message => { if (message.type === 'warn' && typeof message.args[0] === 'string' && message.args[0].startsWith('nexus:')) warnings.push(message.args[0]) } })
   ctx.llm.registerAdapter(['nexus-test-summary'], new SummaryAdapter())
   ctx.llm.registerAdapter(['nexus-test-worker'], new WorkerAdapter())
   ctx.effect(() => {
@@ -81,7 +91,7 @@ export function apply(ctx, config) {
           if (step.wait) while (!(await exists(resolve(config.dir, step.wait)))) { if (stopped) return; await sleep(100) }
           if (step.config) report.config = structuredClone([...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus').options.config)
           if (step.prompt) await prompt(SUPERVISOR, step.prompt)
-          if (step.long) for (let i = 0; i < step.long; i++) await prompt(SUPERVISOR, `LONG-${report.pressure.length} ${'x'.repeat(2400)}`)
+          if (step.long) for (let i = 0; i < step.long; i++) await prompt(SUPERVISOR, `LONG-${report.pressure.length} ${'x'.repeat(7200)}`)
           if (step.worker) {
             if (!ctx.agents.get(WORKER)) await ctx.agents.create({ sessionId: WORKER, meta: { cwd: process.cwd() }, agentOptions: { provider: 'nexus-test-worker', model: 'worker-model' } })
             await prompt(WORKER, step.worker)
@@ -116,6 +126,7 @@ export function apply(ctx, config) {
         report.tokenUsage = ctx.sessionProjections.stateOf(agent.session, 'tokenUsage')
         report.contextPressure = ctx.sessionProjections.stateOf(agent.session, 'contextPressure')
         report.summaries = summaries
+        report.warnings = warnings
         const worker = ctx.agents.get(WORKER)
         report.worker = worker?.session.snapshotEvents()
         // A Host that lives on for another cycle keeps the plugin enabled and reports the live log.
