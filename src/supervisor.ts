@@ -16,7 +16,6 @@ import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-token-meter'
-import type {} from '@deepseek-ai/dsh-agent-default-model'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {

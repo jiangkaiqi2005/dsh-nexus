@@ -1,4 +1,5 @@
 import { toolPairingBalancedBefore, type CompactionEngine } from '@deepseek-ai/dsh-compaction'
+import type { LlmReasoningEffortInfo } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { TokenMeasurement } from '@deepseek-ai/dsh-token-meter'
 
@@ -24,11 +25,11 @@ export const USEFUL_SHARE = 0.25
 export const SUMMARY_MODEL = /^(?:|[^/\s]+\/\S+)$/
 
 /**
- * The summary model unless the user picks another (user ruling 2026-10-10): DeepSeek Flash on the route
- * Harness itself defaults to (`agent-default-model` in `@deepseek-ai/dsh-base`). It is not replaced by
- * another model when unavailable; the compaction then fails as recorded.
+ * The summary model unless the user picks another: DeepSeek Flash on the DeepSeek account route
+ * (`@deepseek-ai/dsh-llm-deepseek-account`), as the user ruled on 2026-10-10. It is not replaced by
+ * another model when unavailable, for example while signed out; the compaction then fails as recorded.
  */
-export const DEFAULT_SUMMARY_MODEL: ModelTarget = { provider: 'deepseek-official', model: 'deepseek-flash' }
+export const DEFAULT_SUMMARY_MODEL: ModelTarget = { provider: 'deepseek-account', model: 'deepseek-flash' }
 
 export function summaryTarget(setting: string | undefined): ModelTarget {
   const slash = setting?.indexOf('/') ?? -1
@@ -39,11 +40,8 @@ export function summaryTarget(setting: string | undefined): ModelTarget {
 export const MODEL_DEFAULT_EFFORT = 'model-default'
 const NO_THINKING = /^(?:none|off|disabled?)$/i
 
-/** One reasoning effort a model offers, as `LlmModelReasoningInfo.efforts` lists them. */
-export interface ReasoningEffort { id: string; name: string }
-
 /** The lowest effort among those offered: one that turns thinking off, then minimal, then low. */
-export function lowestEffort(efforts: readonly ReasoningEffort[]): ReasoningEffort | undefined {
+export function lowestEffort(efforts: readonly LlmReasoningEffortInfo[]): LlmReasoningEffortInfo | undefined {
   const named = (pattern: RegExp) => efforts.find(effort => pattern.test(effort.id) || pattern.test(effort.name))
   return named(NO_THINKING) ?? named(/^minimal$/i) ?? named(/^low$/i)
 }
@@ -53,7 +51,7 @@ export function lowestEffort(efforts: readonly ReasoningEffort[]): ReasoningEffo
  * the lowest the model offers. None — the model's own default — when the setting asks for it, when the
  * model offers no efforts, or when none of its efforts is a low one.
  */
-export function summaryEffort(setting: string, efforts: readonly ReasoningEffort[] = []): string | undefined {
+export function summaryEffort(setting: string, efforts: readonly LlmReasoningEffortInfo[] = []): string | undefined {
   if (!efforts.length || setting === MODEL_DEFAULT_EFFORT) return undefined
   if (efforts.some(effort => effort.id === setting)) return setting
   return lowestEffort(efforts)?.id

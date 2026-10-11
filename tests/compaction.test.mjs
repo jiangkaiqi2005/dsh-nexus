@@ -538,7 +538,7 @@ test('automatic compaction skips a span too small to shrink the request, warning
   assert.ok(of(events, 'turn/end').every(event => event.data.reason.kind === 'completed'))
 })
 
-test('an unset summary model is DeepSeek Flash; when that route cannot run, compaction fails as recorded instead of using another model', { timeout: 180000 }, async () => {
+test('an unset summary model is DeepSeek Flash on the account route; when that route cannot run, compaction fails as recorded instead of using another model', { timeout: 180000 }, async () => {
   // The default model of ordinary sessions is a working fixture model; the summary must not fall back to it.
   const report = await scenario('default-summary', {
     defaultModel: { provider: 'nexus-test-summary', model: 'default-sum' },
@@ -547,8 +547,8 @@ test('an unset summary model is DeepSeek Flash; when that route cannot run, comp
   const { events, commands } = report
   const ends = of(events, 'compaction/end')
   assert.equal(ends.length, 1)
-  // The isolated Host has no DeepSeek key, so the DeepSeek Flash route fails before any request.
-  assert.match(ends[0].data.error, /deepseek-official/)
+  // The isolated Host has no signed-in DeepSeek account, so the deepseek-account route fails before any request.
+  assert.match(ends[0].data.error, /Sign in to DeepSeek to use the account provider/)
   assert.equal(of(events, 'compaction/summary').length, 0)
   assert.ok(!events.some(event => sourceOf(event) === 'compact-checkpoint'))
   assert.deepEqual(commands[0].result, { kind: 'error', text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.' })
