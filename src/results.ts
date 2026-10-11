@@ -112,7 +112,7 @@ export class ResultRelay {
       `Content:\n${bound(text)}`,
       'The input is already in that session queue and need not be resent; the user may still edit or remove a queued input before the work agent reads it.',
       'It is addressed to the agent of that work session, which carries it out; its outcome reaches you later as an automatic work-session result. Do not carry out or answer its content yourself, and do not repeat it back.',
-      'As an explicit user instruction it takes priority over your earlier dispatches: adjust your own arrangements only where it changes them (for example stop or redirect another session, or change later dispatches, reviews and reports); otherwise acknowledge briefly or stay silent.',
+      'As an explicit user instruction it takes priority over your earlier dispatches: adjust your own arrangements only where it changes them (for example stop or redirect another session, or change later dispatches, reviews and reports); otherwise acknowledge briefly.',
     ]
     this.delivered.add(id)
     this.inputs.add(inputKey(session.id, input.id))

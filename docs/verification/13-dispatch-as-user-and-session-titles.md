@@ -88,9 +88,22 @@ git diff --check
 
 第 2 轮检查（未调用付费真实模型）：在旧措辞构建上运行新用例 `ticket13/r3-red-results.txt`：14 项，13 passed / 1 failed，失败的就是新用例（旧通知不含“addressed to the agent of that work session …”），exit 1；改后 `ticket13/r3-typecheck.txt`、`ticket13/r3-build.txt` exit 0，`ticket13/r3-results.txt` 14 passed / 0 failed，`ticket13/r3-steering.txt` 1 passed / 0 failed / 1 skipped（真实端点用例，证据 `steering-controlled-1791687448554`），全量 `ticket13/r3-npm-test.txt`：93 项，82 passed / 0 failed / 11 skipped，371.5 s，exit 0（比上轮多出本轮新用例 1 项；本票 Host 证据 `titles-1791687523105`；11 项 skipped 同前）；`git diff --check` 无输出。受控验证只锁定文本；真实实时模型是否据此不再代为执行，待用户在 Desktop 复验。
 
+## 第 3 轮修复：文字镜像通知要求简短确认
+
+2026-10-10，依据票 13 交接继续处理两轴评审共同指出的 medium，实施基点为 `8a635af`。第 2 轮措辞在文字与语音共用的 `TAIL` 以及镜像通知中允许 `stay silent`，而文字连接的空回复会被视为 `EMPTY_RESPONSE` 并成为错误轮次（`src/realtime.ts` 文字指令上方注释及 `docs/verification/04-global-result-delivery.md` 首轮评审处置第 4 项）。
+
+- `src/realtime.ts` 共用指令与 `src/results.ts` 镜像通知均只保留 `otherwise acknowledge briefly.`。文字模式继续要求文字回复；语音模式保留 `VOICE_INSTRUCTIONS` 原有的 `you may say nothing when the user need not hear about it yet`。
+- 保留输入由工作 agent 执行、用户明确指令优先于此前派活、主管只调整受影响安排的语义，以及票 05 的忙闲唤醒与处理方式。没有修改票 12 的压缩代码、设置或 Desktop 配置。
+- `tests/results.test.mjs` 更新现有通知用例，断言通知不含 `stay silent`、两种主管指令共用段只要求简短确认；新增文字与语音模式回归，断言文字不允许 `stay silent` 或 `you may say nothing`，语音保留原有不出声许可。README 同一句改为说明语音模式下可以不出声。
+- 规格轴 low 关于用户点名 Nexus 时“不要自己执行”的绝对措辞只作核实：后续句仍允许调整自己的安排，包括后续派活、评审与汇报；本轮按交接裁定不扩大修法。真实模型面对“让 Nexus 再开一个会话”等输入的行为仍待用户复验。
+
+日志保存在忽略目录 `.scratch/nexus-v1/ticket13-handoff-20261010/`。在未修改产品代码的构建上，`red-build.txt` exit 0；`red-results.txt`：15 项，13 passed / 2 failed / 0 skipped，exit 1，失败分别是镜像通知仍允许 `stay silent`、文字指令仍允许 `stay silent`。改后 `typecheck.txt`、`build.txt` 均 exit 0；`results.txt`：15 passed / 0 failed / 0 skipped，exit 0。全量 `npm-test.txt`：96 项，85 passed / 0 failed / 11 skipped，368.3 s，exit 0（比交接基线多出本轮模式回归 1 项）；11 项 skipped 是需要真实端点或显式启用 Desktop 的既有用例，没有计作通过。`git diff --check` exit 0，没有空白错误，仅 Git 的 LF 到 CRLF 提示。
+
+本实施单元没有打包、安装或调用真实模型，受控验证锁定的是通知与模式指令文本；真实主管是否在文字模式下不再代为执行、复述或因保持安静产生 `EMPTY_RESPONSE`，仍待安装新包后用户在 Desktop 复验。
+
 ## 未验证与待用户验收
 
-- 第 2 轮镜像措辞调整后，真实主管模型面对工作会话中的直接输入是否不再代为执行或复述、只在需要时调整安排并在结果回来后汇报，待用户在 Desktop 复验。
+- 第 3 轮镜像措辞调整后，真实主管模型面对工作会话中的直接输入是否不再代为执行或复述、只在需要时调整安排并在结果回来后汇报，文字模式是否不再因保持安静出现 `EMPTY_RESPONSE`，待安装新包后用户在 Desktop 复验；用户点名 Nexus 做事的输入也需留意。
 - 实机发现 A：Desktop 默认模型 glm-5.3-flash 下 Nexus 新建会话只有兜底标题（见上节，证据工作会话 `session-10dec8d3` seq 14/15，对照 `session-d1f309d6` seq 19）；同一模型下普通会话是否同样只有兜底、Desktop 日志中的失败原文，未验证；为 `session-title-llm` 指定不推理命名模型后的效果待用户确认。
 
 - Desktop 程序中侧栏的实际标题（新建会话的自动命名、主会话显示 Nexus 或用户改的名称）与派活在会话中的显示，待用户实机验收；本票只以官方 Web 客户端代码在 headless Edge 中验证。

@@ -171,13 +171,20 @@ test('a mirrored user input tells the supervisor the work agent carries it out: 
   assert.match(text, /\nContent:\n发个你好，不要发其他的任何信息\n/)
   assert.match(text, /addressed to the agent of that work session, which carries it out; its outcome reaches you later as an automatic work-session result\./)
   assert.match(text, /Do not carry out or answer its content yourself, and do not repeat it back\./)
-  assert.match(text, /explicit user instruction it takes priority over your earlier dispatches: adjust your own arrangements only where it changes them \(for example stop or redirect another session[^)]*\); otherwise acknowledge briefly or stay silent\.$/)
+  assert.match(text, /explicit user instruction it takes priority over your earlier dispatches: adjust your own arrangements only where it changes them \(for example stop or redirect another session[^)]*\); otherwise acknowledge briefly\.$/)
+  assert.doesNotMatch(text, /stay silent/)
   assert.doesNotMatch(text, /Treat it as the current user requirement/)
   // The standing instructions, text and voice alike, frame the same source the same way.
   for (const instructions of [INSTRUCTIONS, VOICE_INSTRUCTIONS]) {
     assert.match(instructions, /source nexus-user-input mirror what the user typed directly into a work session: they are explicit user instructions addressed to the agent of that session, which already has them \(no need to resend\) and carries them out; its outcome reaches you later as an automatic work-session result\. Do not carry out, answer or repeat their content yourself\. They take priority over your earlier dispatches: adjust your own arrangements only where they change them/)
-    assert.match(instructions, /otherwise acknowledge briefly or stay silent\./)
+    assert.match(instructions, /otherwise acknowledge briefly\./)
   }
+})
+
+test('text instructions require a reply; only voice instructions allow no spoken acknowledgement', () => {
+  assert.match(INSTRUCTIONS, /always answer in text, briefly when there is nothing to tell the user/)
+  assert.doesNotMatch(INSTRUCTIONS, /stay silent|you may say nothing/)
+  assert.match(VOICE_INSTRUCTIONS, /you may say nothing when the user need not hear about it yet/)
 })
 
 test('only the user own input to conversation sessions is mirrored: no supervisor feedback, Nexus dispatch, agent message, subagent session, claim or replayed notice', () => {
