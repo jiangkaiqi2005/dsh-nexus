@@ -97,4 +97,12 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
       return { sessionId: agent.id, accepted: true, completed: false, scope: 'current-turn', backgroundJobsCancelled: false }
     },
   }))
+  tools.register(defineTool({ name: 'nexus_archive_session', description: 'Archive a native conversation session reversibly and request native stops of its running activity, including turns, subagents, jobs and schedules. Keeps session data; restore it through the native archive interface. The main Nexus conversation cannot be archived. Stops are requested, not awaited to settlement.', parameters: { sessionId }, output,
+    execute: async (args, exec) => {
+      const state = await conversation(args.sessionId, exec.signal)
+      exec.signal.throwIfAborted()
+      await ctx.workspaceRegistry.archiveSession(state.meta.id, { stopActivity: true })
+      return { sessionId: state.meta.id, archived: true }
+    },
+  }))
 }
