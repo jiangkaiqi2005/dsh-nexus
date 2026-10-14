@@ -6,7 +6,7 @@
 
 客户端点“开始录音”时同步停止播放节点，随控制帧回报每条回复累计实际播放的 PCM samples，不等待 Host 往返。播放完成节点与仍在播放的部分节点都计入账目。Host 保留已经完成合成但仍排队播放的回复，按回报取消被插话回复的合成、清理其尾音，不取消主管模型或已经发出的工具。
 
-供应商的 `result-generated/sentence-end`、`sentence.original_text` 与真实累计 PCM 边界用于匹配 Nexus 交付的完整句。供应商进一步拆句、多个 binary 帧不被当成多个完整 Nexus 句子；只计真实全部播完的整句，不按时长均分或字符长度猜测。一次插话即使涉及多个排队回复，也只产生一条 `nexus-voice/form=notice` 原生记录，按播放顺序列出已听整句。它不是用户的新要求，不单独唤醒一轮；主管的下一次原生请求会看到记录，ASR 新发言仍沿票 04 的原生 user/steer 交付。
+供应商的 `result-generated/sentence-end`、`payload.output.original_text`（与 `sentence` 同级）与真实累计 PCM 边界用于匹配 Nexus 交付的完整句。供应商进一步拆句、多个 binary 帧不被当成多个完整 Nexus 句子；只计真实全部播完的整句，不按时长均分或字符长度猜测。一次插话即使涉及多个排队回复，也只产生一条 `nexus-voice/form=notice` 原生记录，按播放顺序列出已听整句。它不是用户的新要求，不单独唤醒一轮；主管的下一次原生请求会看到记录，ASR 新发言仍沿票 04 的原生 user/steer 交付。字段位置依据 [阿里云官方服务端事件](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-server-events) 的 sentence-end 示例，初版错误与修复证据见下文。
 
 录音门由 Host 的录音生命周期控制。录音期间的新 PCM 在 Host 排队，结束录音、空录音、识别失败或 60 秒自动结束都会释放播放门；按原次序下发，合成失败仍只清理该回复。挂断和断线丢弃全部缓冲。每次插话只取消客户端已经见到的回复；客户端本地开始与 Host 收到控制帧之间到达的未知新回复 PCM 暂存，在结束录音后先于 Host 后续缓存播放，避免传输延迟让新回复永久消失。结束按钮立即停采集，但独立的客户端播放门继续保持到 Host 确认识别/未听清状态，防止后包先于早先缓存播放。旧回复 ID 的晚 PCM 被丢弃，不恢复被打断尾音。
 
@@ -68,4 +68,23 @@ Graph 在本轮已经两次返回 `Transport closed`，按已确认工具故障 
 
 ## 双轴评审
 
-实施完成后由协调者以固定基线/提交启动恰好两个独立评审轴；此处等待评审结果，不把实施代理自检当作独立评审。
+固定 unitBase：`e03c44f0ec6edeb5e4e11925650e708c51454e14`；初评 reviewHead：`811ea3430b158c7091e7c2e81ec2ed5c44fd92fe`。协调者在冻结提交上启动 standards_05 / spec_05 恰好两个独立只读评审。
+
+| 初评轴 | 结果 | 处置 |
+| --- | --- | --- |
+| 仓库标准 | approve，issues: [] | 确认协议有效/无效帧边界、测试窗口修复没有削弱原验收，并保留历史 races 未知原因限制。 |
+| 票据与 Spec | changes_requested，1 项 P1 | 官方 sentence-end 的 original_text 字段位置错误，影响实际已听整句；第 1 轮修复，尚待同两轴复审。 |
+
+### 第 1 轮：官方 sentence-end 字段位置
+
+原问题：初版读取 `payload.output.sentence.original_text`，barge/spoken 受控元信息夹具也把文本放在相同错误位置，初版验证记录跟随这个错误。真实官方 shape 是 `payload.output.original_text`，与包含 index/words 的 sentence 同级。Spec 评审用真实 loopback WS 对照发现：两句各 1000 samples、played=1000 时，官方字段得到 heard=[]，错误嵌套夹具却能得到第一句。这是已确认的 P1，而非可以豁免的真实端点验收限制；之前 135 项全绿只证明错误夹具下的实现，不证明实际官方协议的已听句子识别正确。
+
+处置：**fixed**。先仅纠正外部受控 TTS 事件的官方位置，补齐 sentence.index/words、句首原文、句末 usage，并保证每次 sentence-synthesis 后紧接一帧 binary；保留供应商进一步拆句、多 binary、已经完成合成但仍排队、跨 reply 单 notice 和所有原断言。没有先改 parser，也没有增加错误格式 fallback。
+
+- `05-r1-red-official-metadata.log`：在原产品 parser 上运行已有官方 Host/真实浏览器首用例，7.016 秒有效 red。实际 notice 为 `Complete sentences heard: (none)`，原“第一句。”完整 heard 断言失败；本地即停与运输控制已经经过真实流程。
+- 随后 runtime 仅一行改为读取 `payload.output.original_text`；不推断旧字段、不改任何播放/录音时间门槛。
+- `05-r1-focused-official-metadata.log`：修复后完整 barge + spoken 两文件串行检查，14 项、13 通过、1 真实端点默认跳过、0 失败，150.904 秒；供应商再拆句、多 binary、跨 reply、完整已听第一句及既有失败隔离均保留并通过。
+
+typecheck/build、两份 fixture 语法和 diff-check 通过；修复后重新冻结并实际运行完整 `npm test`，`05-r1-full.log`：**135 项、121 通过、14 默认跳过、0 失败，1036.068 秒，exit 0**。所有原断言保留，races 为 11.132 秒，several-flushes-pending 为 6.675 秒。最终全集开始后没有再改 runtime/fixture、断言或超时，结束后只补真实统计与源提交记录。
+
+第 1 轮修复代码 SHA：`0798595f01e8c1dea957201885796ea4751d63cc`（基于初评 `811ea3430b158c7091e7c2e81ec2ed5c44fd92fe`，仅 source 字段与两份相关 TTS fixture）。这个 P1 的 fixed 判断依据是官方字段核查、未改 parser 的有效红及最小修复后的官方形状 green/完整集合，尚待原 standards_05 / spec_05 对修复后的固定 reviewHead 复审；实施代理自验不是复审批准。真实付费端点/物理实机、历史 races 原因和 Windows 并发原生退出限制继续保留，未修改生产配置、读取真实 key 或提前开始票 06。
