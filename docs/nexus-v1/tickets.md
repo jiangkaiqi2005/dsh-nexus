@@ -1,8 +1,8 @@
 # Nexus 首版 tickets 拆分草案
 
-依据：已确认的 [Spec](spec.md)、[领域词汇](../CONTEXT.md)、[架构决定](adr/)及 [Harness 前置核查](research/harness-spike.md)。
+依据：已确认的 [Spec](spec.md)、[领域词汇](../../CONTEXT.md)、[架构决定](../adr/)及 [Harness 前置核查](../research/harness-spike.md)。
 
-状态：待用户确认粒度与阻塞关系。当前逐票草案保存在本项目的 `docs/tickets/`，每票含交付行为、阻塞项、范围约束、验收条件、完成证据与 Spec 对照；尚未发布到 Issue tracker，尚未标为 ready-for-agent，也没有执行实现。
+状态：待用户确认粒度与阻塞关系。当前逐票草案保存在本项目的 `docs/nexus-v1/tickets/`，每票含交付行为、阻塞项、范围约束、验收条件、完成证据与 Spec 对照；尚未发布到 Issue tracker，尚未标为 ready-for-agent，也没有执行实现。
 
 本项目尚无配置好的 tracker。沿用本地文档交付，确认后按技能约定将每票保存至 `.scratch/nexus-v1/issues/` 并标为 `ready-for-agent`。外部发布需要先通过 `/setup-matt-pocock-skills` 配置 tracker。本索引中的具体位置仅供导航，ticket 正文不限定代码文件布局。
 

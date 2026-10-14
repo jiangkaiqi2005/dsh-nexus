@@ -201,7 +201,7 @@ Harness 原生侧栏提供固定 Nexus 入口，进入独立主会话。Nexus �
 
 ### 依据与关联文档
 
-- [领域词汇](../CONTEXT.md)、[设计确认](design.md)、[架构决定](adr/)、[后续实现路径](implementation.md)。
-- [现有插件调研](research/existing-plugins.md)、[结果回流调研](research/agent-result-delivery.md)、[自动语音启动](research/automatic-voice-start.md)、[准确型号协议核查](research/realtime-protocol.md)、[Harness 前置核查](research/harness-spike.md)。
+- [领域词汇](../../CONTEXT.md)、[设计确认](../design.md)、[架构决定](../adr/)、[后续实现路径](../implementation.md)。
+- [现有插件调研](../research/existing-plugins.md)、[结果回流调研](../research/agent-result-delivery.md)、[自动语音启动](../research/automatic-voice-start.md)、[准确型号协议核查](../research/realtime-protocol.md)、[Harness 前置核查](../research/harness-spike.md)。
 - [固定基线的官方 Core](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/subsystems/core.md)、[Session](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/subsystems/session.md)、[持久化](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/docs/subsystems/persistence.md)。
 - [准确型号能力](https://help.aliyun.com/zh/model-studio/qwen3-8-omni-flash-realtime)、[实时客户端事件](https://help.aliyun.com/en/model-studio/client-events)。

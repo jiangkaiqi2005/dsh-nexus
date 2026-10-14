@@ -90,7 +90,7 @@ git diff --check
 
 ## 第 3 轮修复：文字镜像通知要求简短确认
 
-2026-10-10，依据票 13 交接继续处理两轴评审共同指出的 medium，实施基点为 `8a635af`。第 2 轮措辞在文字与语音共用的 `TAIL` 以及镜像通知中允许 `stay silent`，而文字连接的空回复会被视为 `EMPTY_RESPONSE` 并成为错误轮次（`src/realtime.ts` 文字指令上方注释及 `docs/verification/04-global-result-delivery.md` 首轮评审处置第 4 项）。
+2026-10-10，依据票 13 交接继续处理两轴评审共同指出的 medium，实施基点为 `8a635af`。第 2 轮措辞在文字与语音共用的 `TAIL` 以及镜像通知中允许 `stay silent`，而文字连接的空回复会被视为 `EMPTY_RESPONSE` 并成为错误轮次（`src/realtime.ts` 文字指令上方注释及 `docs/nexus-v1/verification/04-global-result-delivery.md` 首轮评审处置第 4 项）。
 
 - `src/realtime.ts` 共用指令与 `src/results.ts` 镜像通知均只保留 `otherwise acknowledge briefly.`。文字模式继续要求文字回复；语音模式保留 `VOICE_INSTRUCTIONS` 原有的 `you may say nothing when the user need not hear about it yet`。
 - 保留输入由工作 agent 执行、用户明确指令优先于此前派活、主管只调整受影响安排的语义，以及票 05 的忙闲唤醒与处理方式。没有修改票 12 的压缩代码、设置或 Desktop 配置。

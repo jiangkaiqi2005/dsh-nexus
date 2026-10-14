@@ -4,7 +4,7 @@
 
 ## 协议实测（准确型号，探针为研究证据，不是测试）
 
-实现之前，先用准确型号 `qwen3.8-omni-flash-realtime` 的真实端点（与票 06 相同的扁平配置，server_vad）做了探针，证据在 `.scratch/nexus-v1/protocol-07/probe-1.json` 和 `truncate-1.json`。结论如下，摘要也补进了 [协议研究](../research/realtime-protocol.md)：
+实现之前，先用准确型号 `qwen3.8-omni-flash-realtime` 的真实端点（与票 06 相同的扁平配置，server_vad）做了探针，证据在 `.scratch/nexus-v1/protocol-07/probe-1.json` 和 `truncate-1.json`。结论如下，摘要也补进了 [协议研究](../../research/realtime-protocol.md)：
 
 - **生成中被打断**：server_vad 默认会打断回复。用户开口时，正在生成的回复以 `response.done{status:'cancelled', status_details.reason:'turn_detected'}` 结束，输出 item 为 incomplete。这个事件与 `input_audio_buffer.speech_started` 在同一毫秒到达，而且排在它前面；之后没有迟到的增量。
 - **已生成完、仍在播放**：生成速度约为实时的 3.4 倍，回复常常已经全部生成，客户端还在播放。此时服务端没有可取消的回复，停止播放和记录听到多少只能由客户端和 Host 完成。真实的 `speech_started` 比开口晚约 0.8 秒。

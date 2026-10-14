@@ -18,6 +18,6 @@
 
 **完成证据：** 干净 profile 安装记录、可交付 bundle、完整场景结果与实际验收范围。
 
-实施、检查、交付文件与剩余实机边界见 [票 11 验证记录](../verification/11-clean-install-and-full-scenario.md)。用户的最短连续验收流程见 [安装与使用](../installation-and-use.md)；受控检查不替代该真实组合场景。
+实施、检查、交付文件与剩余实机边界见 [票 11 验证记录](../verification/11-clean-install-and-full-scenario.md)。用户的最短连续验收流程见 [安装与使用](../../installation-and-use.md)；受控检查不替代该真实组合场景。
 
 **Spec 对照：** 用户故事 1—45 的完整组合场景及全部必须验收行为。

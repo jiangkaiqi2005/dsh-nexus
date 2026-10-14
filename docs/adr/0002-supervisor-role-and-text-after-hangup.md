@@ -9,3 +9,5 @@ Nexus 默认负责理解、拆解、调度和检查结果，具体工作交给 D
 首版沿用 Qiyu 已有适配的型号 `qwen3.8-omni-flash-realtime`，传输为 DashScope Realtime WebSocket。已有适配源文件为 `E:\Agent\Qiyu\packages\qiyu_local_host\lib\src\qwen_omni_realtime_gateway.dart`。当前官方接入配置与旧适配存在差异，不能未经探针就直接复制端点和 schema。
 
 会话持久化、恢复和 Harness 重启后的行为沿用 Harness 原生机制，不另外实现重启后自动续跑策略。Nexus 提供一个默认关闭的“启动 Harness 后自动进入 Nexus 语音”设置，开启后每次 Harness 进程启动自动尝试接通一次。主动挂断后保持文字模式，刷新或切换会话不重新开麦，用户可以手动再次接通。该设置不涉及操作系统登录自启动 Harness，也不改变原生任务恢复语义；客户端就绪、系统许可和实际播放仍须验证。
+
+> 部分被 [ADR 0005](0005-cascade-voice-mode.md) 取代：主管模型不再限定为 Realtime 模型。
