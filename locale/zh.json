@@ -1,1 +1,1 @@
-{"meta":{"title":"Nexus","description":"在原生主会话中与级联或 Realtime 主管交流。"},"voice-mode":"语音模式","cascade":"级联","voice-mode-hint":"更改在下一次接通时生效。级联主管跟随 Harness 默认模型；级联语音暂不支持。","cascade-unavailable":"级联语音暂不支持，可以继续文字交流。"}
+{"meta":{"title":"Nexus","description":"在原生主会话中与级联或 Realtime 主管交流。"},"voice-mode":"语音模式","cascade":"级联","voice-mode-hint":"更改在下一次接通时生效。级联主管跟随 Harness 默认模型。","tts-endpoint":"语音合成端点","tts-model":"语音合成型号","tts-voice":"语音合成音色","activity-thinking":"思考中","activity-reading":"朗读中","activity-failed":"语音合成失败"}

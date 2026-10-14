@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
     const frame = value => {
       if (value?.type === 'audio' && isAudio(value.audio)) return value
       if (value?.type === 'flush' && Object.keys(value).length === 1) return value
+      if (value?.type === 'activity' && ['thinking', 'reading', 'idle', 'failed'].includes(value.state) && (value.code === undefined || typeof value.code === 'string')) return value
       if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
       if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
       throw new TypeError('nexusVoice/call frame is malformed')
@@ -60,7 +61,7 @@ window.__ModuleLoader__.load({
      * playing stops, and the client reports how much it actually played.
      */
     class Call {
-      constructor() { this.state = 'idle'; this.code = undefined; this.played = 0; this.flushes = 0; this.discarded = 0; this.listeners = new Set(); this.attempt = undefined; this.autoPending = false }
+      constructor() { this.state = 'idle'; this.activity = 'idle'; this.activityCode = undefined; this.mode = 'realtime'; this.code = undefined; this.played = 0; this.flushes = 0; this.discarded = 0; this.listeners = new Set(); this.attempt = undefined; this.autoPending = false }
       subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener) }
       set(state, code) { this.state = state; this.code = code; for (const listener of this.listeners) listener() }
       get active() { return ['requesting-mic', 'connecting', 'live'].includes(this.state) }
@@ -80,6 +81,8 @@ window.__ModuleLoader__.load({
         this.played = 0
         this.flushes = 0
         this.discarded = 0
+        this.activity = 'idle'
+        this.activityCode = undefined
         this.set('requesting-mic')
         const handle = remote.call()
         const frames = handle[Symbol.asyncIterator]()
@@ -113,7 +116,7 @@ window.__ModuleLoader__.load({
         const processor = capture.createScriptProcessor(2048, 1, 1)
         cleanups.push(() => { processor.disconnect(); source.disconnect() })
         processor.onaudioprocess = event => {
-          if (!current() || this.state !== 'live') return
+          if (!current() || this.state !== 'live' || this.mode === 'cascade') return
           const input = event.inputBuffer.getChannelData(0)
           const samples = new Int16Array(input.length)
           for (let i = 0; i < input.length; i++) samples[i] = Math.max(-1, Math.min(1, input[i])) * 0x7fff
@@ -125,6 +128,7 @@ window.__ModuleLoader__.load({
         // Scheduled playback since the last flush; finished nodes are counted as played and dropped.
         let nodes = []
         let finished = 0
+        let pendingActivity = 'idle'
         const retire = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
         const flush = () => {
           const now = playback.currentTime
@@ -149,8 +153,15 @@ window.__ModuleLoader__.load({
           for (let nextFrame = await frames.next(); !nextFrame.done; nextFrame = await frames.next()) {
             const frame = nextFrame.value
             if (!current()) continue // Let the Host consume the final report before disposing this stream.
-            if (frame.type === 'state' && ['connecting', 'live'].includes(frame.state)) this.set(frame.state)
+            if (frame.type === 'state' && ['connecting', 'live'].includes(frame.state)) { this.mode = frame.mode ?? 'realtime'; this.set(frame.state) }
             else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
+            else if (frame.type === 'activity') {
+              pendingActivity = frame.state
+              retire(playback.currentTime)
+              this.activity = nodes.length && frame.state !== 'failed' ? 'reading' : frame.state
+              this.activityCode = frame.code
+              this.set(this.state, this.code)
+            }
             else if (frame.type === 'flush') {
               const played = flush()
               this.flushes++
@@ -164,6 +175,7 @@ window.__ModuleLoader__.load({
               const node = playback.createBufferSource()
               node.buffer = buffer
               node.connect(playback.destination)
+              node.onended = () => { if (!current()) return; retire(playback.currentTime); if (!nodes.length && pendingActivity !== 'reading' && this.activity === 'reading') { this.activity = pendingActivity; this.set(this.state, this.code) } }
               retire(playback.currentTime)
               next = Math.max(next, playback.currentTime)
               node.start(next)
@@ -182,6 +194,8 @@ window.__ModuleLoader__.load({
         const attempt = this.attempt
         attempt?.hangup?.()
         this.attempt = undefined
+        this.activity = 'idle'
+        this.activityCode = undefined
         this.set('idle')
         attempt?.release()
       }
@@ -203,10 +217,10 @@ window.__ModuleLoader__.load({
       if (floating ? call.state === 'idle' : sessionId !== SUPERVISOR || call.state !== 'idle') return null
       const busy = call.active
       return h('div', {
-        'data-nexus-voice': '', 'data-state': call.state, 'data-played-samples': call.played, 'data-flushes': call.flushes, 'data-discarded-samples': call.discarded,
+        'data-nexus-voice': '', 'data-state': call.state, 'data-activity': call.activity, 'data-played-samples': call.played, 'data-flushes': call.flushes, 'data-discarded-samples': call.discarded,
         style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13, ...(floating ? { position: 'absolute', bottom: 20, right: 24, pointerEvents: 'auto', background: 'var(--color-background, Canvas)', border: '1px solid currentColor', borderRadius: 8 } : {}) },
       },
-      h('span', { role: 'status' }, call.code === 'CASCADE_VOICE_UNSUPPORTED' ? t('cascade-unavailable') : t(`state-${call.state}`) + (call.code && !busy ? ` (${call.code})` : '')),
+      h('span', { role: 'status' }, t(`state-${call.state}`) + (call.state === 'live' && call.activity !== 'idle' ? ` · ${t(`activity-${call.activity}`)}${call.activityCode ? ` (${call.activityCode})` : ''}` : '') + (call.code && !busy ? ` (${call.code})` : '')),
       h('button', {
         type: 'button', onClick: () => { call.autoPending = false; busy ? call.hangup() : call.start(remote) },
         style: { color: 'inherit', background: 'transparent', border: '1px solid currentColor', borderRadius: 6, cursor: 'pointer', padding: '2px 10px' },
@@ -227,6 +241,7 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = React.useState(false)
       const [budget, setBudget] = React.useState()
       const [models, setModels] = React.useState()
+      const [speech, setSpeech] = React.useState({})
       React.useEffect(() => {
         let live = true
         catalog().then(response => { if (live && response.ok) setModels(response.value) }, () => {})
@@ -267,6 +282,11 @@ window.__ModuleLoader__.load({
           onChange: event => save('voiceMode', event.target.value),
         }, h('option', { value: 'cascade' }, t('cascade')), h('option', { value: 'realtime' }, 'Realtime'))),
         h('p', null, t('voice-mode-hint')),
+        ...[['ttsEndpoint', 'tts-endpoint', 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'], ['ttsModel', 'tts-model', 'qwen-audio-3.1-tts-flash'], ['ttsVoice', 'tts-voice', 'longanhuan_v3.1']].map(([key, label, fallback]) => h('label', { key, style: { display: 'block', marginBottom: 12 } }, t(label), ' ', h('input', {
+          type: 'text', value: speech[key] ?? snapshot.value?.[key] ?? fallback, disabled,
+          onChange: event => setSpeech({ ...speech, [key]: event.target.value }),
+          onBlur: () => { if (speech[key] !== undefined) { const value = speech[key].trim(); setSpeech(current => { const next = { ...current }; delete next[key]; return next }); if (value && value !== snapshot.value?.[key]) save(key, value) } },
+        }))),
         h('label', null, h('input', {
           type: 'checkbox', checked: snapshot.value?.autoVoice ?? false, disabled,
           onChange: event => save('autoVoice', event.target.checked),
@@ -292,8 +312,8 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'uiWorkspace', 'locale'],
       apply(ctx) {
-        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', 'voice-mode': 'Voice mode', cascade: 'Cascade', 'voice-mode-hint': 'Changes apply on the next call. Cascade uses the Harness default model; cascade voice is not supported yet.', 'cascade-unavailable': 'Cascade voice is not supported yet. Text conversation is available.', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless you choose another model, at the lowest reasoning effort the model offers. Known limits: a reasoning model summarizes markedly slower, and its reasoning counts toward the output limit. Keep the budget well above the fixed part of each supervisor request (system prompt, tool definitions and similar): summarizing cannot bring a request below it, so automatic compaction is skipped when it would barely help. During automatic compaction the conversation shows the general running status, as native automatic compaction does.', ...states(STATES.en) })
-        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', 'voice-mode': '语音模式', cascade: '级联', 'voice-mode-hint': '更改在下一次接通时生效。级联主管跟随 Harness 默认模型；级联语音暂不支持。', 'cascade-unavailable': '级联语音暂不支持，可以继续文字交流。', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算应明显高于主管每次请求的固定开销（系统提示、工具定义等），摘要无法让请求低于这部分，压缩几乎无效时会跳过自动压缩；自动压缩期间会话显示通用的运行状态，与原生自动压缩一致。', ...states(STATES.zh) })
+        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', 'voice-mode': 'Voice mode', cascade: 'Cascade', 'voice-mode-hint': 'Changes apply on the next call. Cascade uses the Harness default model.', 'tts-endpoint': 'Speech synthesis endpoint', 'tts-model': 'Speech synthesis model', 'tts-voice': 'Speech voice', 'activity-thinking': 'Thinking…', 'activity-reading': 'Reading aloud…', 'activity-failed': 'Speech synthesis failed', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless you choose another model, at the lowest reasoning effort the model offers. Known limits: a reasoning model summarizes markedly slower, and its reasoning counts toward the output limit. Keep the budget well above the fixed part of each supervisor request (system prompt, tool definitions and similar): summarizing cannot bring a request below it, so automatic compaction is skipped when it would barely help. During automatic compaction the conversation shows the general running status, as native automatic compaction does.', ...states(STATES.en) })
+        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', 'voice-mode': '语音模式', cascade: '级联', 'voice-mode-hint': '更改在下一次接通时生效。级联主管跟随 Harness 默认模型。', 'tts-endpoint': '语音合成端点', 'tts-model': '语音合成型号', 'tts-voice': '语音合成音色', 'activity-thinking': '思考中', 'activity-reading': '朗读中', 'activity-failed': '语音合成失败', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算应明显高于主管每次请求的固定开销（系统提示、工具定义等），摘要无法让请求低于这部分，压缩几乎无效时会跳过自动压缩；自动压缩期间会话显示通用的运行状态，与原生自动压缩一致。', ...states(STATES.zh) })
         ctx.inject(['configForms', 'remote', 'remote.session'], settingsCtx => {
           const form = settingsCtx.configForms.get('nexus')
           const catalog = () => settingsCtx.remote.session.modelCatalog()

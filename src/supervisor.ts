@@ -7,7 +7,7 @@ import { canonicalHeader, type Session, type SessionEvent, type TurnEndReason } 
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
 import { requestCascade, requestRealtime, type ModelResponse } from './model-request.js'
-import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type ServerTurn } from './realtime.js'
+import { CASCADE_VOICE_INSTRUCTIONS, INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type ServerTurn } from './realtime.js'
 import { MANUAL_FAILURES, RETAIN_SHARE, USEFUL_SHARE, compactableRange, summaryTarget, withSummaryModel } from './compaction.js'
 import { registerWorkSessions } from './work-sessions.js'
 import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
@@ -18,6 +18,7 @@ import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import { CascadeCall, type SpeechActivity } from './speech.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -35,12 +36,12 @@ declare module '@deepseek-ai/dsh-llm' {
  * summaryModel: `provider/model` that writes compaction summaries; empty is DeepSeek Flash (`DEFAULT_SUMMARY_MODEL`).
  * summaryReasoningEffort: reasoning effort of summaries; empty takes the lowest the summary model offers, `model-default` sends none.
  */
-export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; voiceMode: Volatile<'cascade' | 'realtime'>; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
+export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; voiceMode: Volatile<'cascade' | 'realtime'>; ttsEndpoint: Volatile<string>; ttsModel: Volatile<string>; ttsVoice: Volatile<string>; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
-export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void }
+export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void; activity?(state: SpeechActivity, code?: string): void }
 /** A live call as its Remote stream holds it; played reports the samples played before the client stopped at a flush. */
-export interface LiveCall { append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
+export interface LiveCall { mode?: 'cascade' | 'realtime'; append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
 
 /** Settle with the promise, or reject as soon as the turn is cancelled. */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -99,6 +100,7 @@ export class Supervisor implements Agent {
   private prompt!: SystemPrompt
   private connection?: RealtimeConnection
   private call?: Call
+  private cascadeCall?: CascadeCall
   private readonly voiceTurns: ServerTurn[] = []
   /** Automatic compaction was skipped as useless and warned about; cleared once the request is within budget or compacts. */
   private uselessWarned = false
@@ -314,10 +316,18 @@ export class Supervisor implements Agent {
   async startCall(link: CallLink, signal: AbortSignal): Promise<LiveCall> {
     signal.throwIfAborted()
     if (this.disposed) throw new RealtimeFailure('UNAVAILABLE')
-    if (this.call) throw new RealtimeFailure('CALL_BUSY')
+    if (this.call || this.cascadeCall) throw new RealtimeFailure('CALL_BUSY')
     this.mode = this.config.voiceMode.get()
     this.model = undefined
-    if (this.mode === 'cascade') throw new RealtimeFailure('CASCADE_VOICE_UNSUPPORTED')
+    if (this.mode === 'cascade') {
+      const call = this.cascadeCall = new CascadeCall(() => ({
+        endpoint: this.config.ttsEndpoint.get(), model: this.config.ttsModel.get(), voice: this.config.ttsVoice.get(), timeoutMs: this.config.timeoutMs ?? 30000,
+        credential: async () => (await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef)))?.value,
+      }), link)
+      const end = () => { signal.removeEventListener('abort', end); call.end(); if (this.cascadeCall === call) this.cascadeCall = undefined }
+      signal.addEventListener('abort', end, { once: true })
+      return { mode: 'cascade', append() {}, played() {}, hangup: end, end }
+    }
     const call: Call = {
       abort: new AbortController(),
       since: 0,
@@ -415,7 +425,8 @@ export class Supervisor implements Agent {
     if (this.call?.recovering) await abortable(this.call.recovering, signal)
     if (voice) this.connection = voice.server.connection
     this.connection ??= this.call?.connection
-    if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS) }, { surfaceOp: 'append' })
+    const callInstructions = this.cascadeCall ? CASCADE_VOICE_INSTRUCTIONS : this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS
+    if (!this.session.surface.nodes.some(seq => this.session.eventAt(seq)?.type === 'system/message')) this.session.append('system/message', { turn, step, message: createSystemMessage(callInstructions) }, { surfaceOp: 'append' })
     for (const message of inputs) this.session.append('user/message', message, { surfaceOp: 'append' })
     await this.compose()
     signal.throwIfAborted()
@@ -431,7 +442,7 @@ export class Supervisor implements Agent {
     if (voice) this.connection?.markPresent(voice.said.id)
     const assembly = await this.prompt.assemble(assembleContextFor(this, signal))
     // A server-started voice reply answers the instructions its connection already holds.
-    const instructions = voice ? voice.server.connection.instructions : `${this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
+    const instructions = voice ? voice.server.connection.instructions : `${callInstructions}\n\n${renderPrompt(assembly)}`
     const previous = this.session.requestHeader()
     const header = prepared ? canonicalHeader({ config: selection, tools: assembly.tools, adapterDefaults: prepared.adapterDefaults }) : { config: selection, tools: assembly.tools }
     this.session.append('request/header', { header, reason: !previous ? 'initial' : JSON.stringify(previous) === JSON.stringify(header) ? 'series' : 'change' })
@@ -471,13 +482,15 @@ export class Supervisor implements Agent {
     // The text block starts with its first delta, so a replayed reply keeps its chunk times in order.
     let begun = false
     const begin = (time?: number) => { if (!begun) { begun = true; push({ type: 'block-start', index: 0, blockType: 'text' }, time) } }
+    const speech = cascade ? this.cascadeCall?.reply() : undefined
     try {
-      const onText = (delta: string, time?: number) => { text += delta; if (!cascade) { begin(time); push({ type: 'text-delta', index: 0, text: delta }, time) } }
+      const onText = (delta: string, time?: number) => { text += delta; speech?.append(delta); if (!cascade) { begin(time); push({ type: 'text-delta', index: 0, text: delta }, time) } }
       const request = { surface: this.surface(), onText, tools: assembly.tools, instructions, signal, onChunk: push }
       const response: ModelResponse = await abortable(prepared
         ? requestCascade(prepared, { ...selection, messages: this.session.deriveMessages(), toolHistory: this.session.toolHistory(), tools: assembly.tools, sessionId: this.id, signal }, request)
         : requestRealtime(connection!, request, voice?.server), signal)
       text = response.text
+      speech?.finish()
       /** A response that leaves no message: its reported usage stays as a content-free attempt, as native settlements do. */
       const settleEmpty = () => {
         if (!response.usage) return this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'abandoned' } } })
@@ -518,6 +531,7 @@ export class Supervisor implements Agent {
       const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.usage ? { usage: response.usage } : {}), ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {
+      speech?.cancel()
       if (!cascade) {
         begin()
         if (text) push({ type: 'block-end', index: 0, block: { type: 'text', text } })
@@ -560,6 +574,7 @@ export class Supervisor implements Agent {
     this.disposed = true
     this.wakeRequested = false
     this.call?.end('UNAVAILABLE')
+    this.cascadeCall?.end()
     this.cancel({ kind: 'disposed' })
     await this.whenIdle()
   }

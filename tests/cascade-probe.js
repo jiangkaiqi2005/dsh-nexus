@@ -1,8 +1,9 @@
 import { access, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 
-export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'sessionProjections', 'llm', 'loader', 'agentDefaultModel', 'tokenMeter']
+export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'sessionProjections', 'llm', 'loader', 'agentDefaultModel', 'tokenMeter', 'tools']
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const textOf = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
 const exists = path => access(path).then(() => true, () => false)
@@ -11,6 +12,12 @@ const exists = path => access(path).then(() => true, () => false)
 export function apply(ctx, config) {
   const report = { requests: [], streams: [], summaries: [] }
   const flag = name => resolve(config.dir, name)
+  if (config.scenario === 'spoken') ctx.tools.register(defineTool({ name: 'fixture_spoken_lookup', description: 'Controlled external lookup held while the user hangs up.', parameters: { hold: { type: 'boolean', required: true } }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async (args, exec) => {
+    if (!args.hold) return 'QUEUE-LOOKUP-COMPLETED'
+    await writeFile(flag('tool-started'), '')
+    for (const deadline = Date.now() + 20000; !(await exists(flag('release-tool'))); ) { exec.signal.throwIfAborted(); if (Date.now() > deadline) throw new Error('tool gate timeout'); await sleep(25) }
+    return 'LOOKUP-COMPLETED'
+  } }))
   const usage = { inputTokens: 100, outputTokens: 8, cacheReadTokens: 200, cacheWriteTokens: 25, totalTokens: 333, reasoningTokens: 2 }
   class SupervisorAdapter extends LlmAdapter {
     async listModels(provider) { return ['normal', 'other'].map(id => ({ provider, id, name: id })) }
@@ -25,6 +32,8 @@ export function apply(ctx, config) {
       const last = options.messages.findLast(message => message.role === 'tool' || message.role === 'user' && message.source?.kind !== 'nexus-runtime')
       const words = textOf(last)
       let tool
+      if (config.scenario === 'spoken' && ['SLOW-TOOL', 'QUEUE-SPEECH'].includes(words)) tool = { name: 'fixture_spoken_lookup', arguments: { hold: words === 'SLOW-TOOL' } }
+      if (config.scenario === 'spoken' && ['DISPATCH-SPEECH', 'HANGUP-WORK'].includes(words)) tool = { name: 'nexus_send_session', arguments: { sessionId: 'cascade-worker', text: words === 'HANGUP-WORK' ? 'HOLD-WORK' : 'CASCADE-WORK' } }
       if (config.scenario === 'tools' && (last.role === 'tool' || words === 'DISPATCH')) {
         const count = options.messages.filter(message => message.role === 'tool').length
         if (count === 0) tool = { name: 'nexus_list_sessions', arguments: {} }
@@ -32,6 +41,7 @@ export function apply(ctx, config) {
         if (count === 2) tool = { name: 'nexus_send_session', arguments: { sessionId: 'cascade-worker', text: 'CASCADE-WORK' } }
       }
       if (tool) {
+        if (tool.name === 'fixture_spoken_lookup') { yield { type: 'block-start', index: 1, blockType: 'text' }; yield { type: 'text-delta', index: 1, text: words === 'QUEUE-SPEECH' ? 'QUEUE-FIRST。' : '正在查询。' }; yield { type: 'block-end', index: 1, block: { type: 'text', text: words === 'QUEUE-SPEECH' ? 'QUEUE-FIRST。' : '正在查询。' } } }
         const block = { type: 'tool-call', id: `cascade-${crypto.randomUUID()}`, name: tool.name, arguments: JSON.stringify(tool.arguments) }
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'block-end', index: 0, block }
@@ -40,10 +50,37 @@ export function apply(ctx, config) {
         yield { type: 'finish', reason: { kind: 'tool-calls' }, replayState: { response: { fixture: 'native' }, blocks: [{ tool: tool.name }] } }
         return
       }
-      const answer = last.source?.kind === 'nexus-work-result' ? 'WORK-RESULT-RECEIVED' : words.includes('STEER-NEW') ? 'STEER-APPLIED' : 'CASCADE-REPLY'
+      const answer = words === 'SENTENCES' ? '第一句。Second sentence!Third?Fourth.\n第五行\n尾句' : words === 'FAIL-SPEECH' ? 'FAIL。文字仍然完整。' : last.source?.kind === 'nexus-work-result' ? 'WORK-RESULT-RECEIVED' : words.includes('STEER-NEW') ? 'STEER-APPLIED' : 'CASCADE-REPLY'
       yield { type: 'block-start', index: 0, blockType: 'reasoning' }
       yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'fixture reasoning' } }
       yield { type: 'block-start', index: 1, blockType: 'text' }
+      if (words === 'MIXED-BLOCKS') {
+        yield { type: 'block-end', index: 1, block: { type: 'text', text: 'BLOCK ONE.' } }
+        yield { type: 'block-start', index: 2, blockType: 'text' }
+        yield { type: 'text-delta', index: 2, text: 'BLOCK ' }; yield { type: 'text-delta', index: 2, text: 'TWO.' }
+        yield { type: 'block-end', index: 2, block: { type: 'text', text: 'BLOCK TWO.' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }; return
+      }
+      if (words === 'BLOCK-ONLY') { yield { type: 'block-end', index: 1, block: { type: 'text', text: 'TEXT ONLY.' } }; yield { type: 'finish', reason: { kind: 'stop' } }; return }
+      if (words === 'QUEUE-LOOKUP-COMPLETED') {
+        yield { type: 'text-delta', index: 1, text: 'QUEUED ' }
+        await writeFile(flag('queue-next-started'), '')
+        for (const deadline = Date.now() + 15000; !(await exists(flag('release-queue-model'))); ) { if (Date.now() > deadline) throw new Error('queued model gate timeout'); await sleep(25) }
+        yield { type: 'text-delta', index: 1, text: 'SECOND.' }
+        yield { type: 'block-end', index: 1, block: { type: 'text', text: 'QUEUED SECOND.' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (words === 'HOLD-SPEECH') {
+        await writeFile(flag('model-started'), '')
+        for (const deadline = Date.now() + 15000; !(await exists(flag('release-first-sentence'))); ) { if (Date.now() > deadline) throw new Error('first sentence gate timeout'); await sleep(25) }
+        yield { type: 'text-delta', index: 1, text: '第一句。' }
+        for (const deadline = Date.now() + 15000; !(await exists(flag('release-model'))); ) { if (Date.now() > deadline) throw new Error('remaining text gate timeout'); await sleep(25) }
+        yield { type: 'text-delta', index: 1, text: 'Second sentence!\n最后一句' }
+        yield { type: 'block-end', index: 1, block: { type: 'text', text: '第一句。Second sentence!\n最后一句' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       yield { type: 'text-delta', index: 1, text: answer.slice(0, 7) }
       if (words === 'HOLD') {
         await writeFile(flag('model-started'), '')
@@ -60,7 +97,11 @@ export function apply(ctx, config) {
     }
   }
   class WorkerAdapter extends LlmAdapter {
-    async *stream() {
+    async *stream(options) {
+      if (options.messages.some(message => message.role === 'user' && textOf(message) === 'HOLD-WORK')) {
+        await writeFile(flag('worker-held'), '')
+        for (const deadline = Date.now() + 20000; !(await exists(flag('release-worker'))); ) { if (Date.now() > deadline) throw new Error('worker gate timeout'); await sleep(25) }
+      }
       await sleep(200)
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: 'CASCADE-WORK-DONE' } }
@@ -89,7 +130,8 @@ export function apply(ctx, config) {
         const prompt = (words, mode = 'followup') => ctx.sessionController.prompt({ sessionId: agent.id, requestId: crypto.randomUUID(), mode, content: [{ type: 'text', text: words }] }, new AbortController().signal)
         await ctx.agentDefaultModel.saveSelection({ provider: 'cascade-primary', model: config.model ?? 'normal', reasoningEffort: 'high' })
         report.config = structuredClone([...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus').options.config)
-        if (config.scenario === 'ui') {
+        if (['ui', 'spoken'].includes(config.scenario)) {
+          if (config.scenario === 'spoken') await ctx.agents.create({ sessionId: 'cascade-worker', meta: { cwd: config.dir }, agentOptions: { provider: 'cascade-worker-model', model: 'worker' } })
           await writeFile(flag('ui-ready'), '')
           for (const deadline = Date.now() + 60000; !(await exists(flag('ui-finish'))); ) { if (stopped) return; if (Date.now() > deadline) throw new Error('UI scenario did not finish'); await sleep(50) }
           await settle()
@@ -126,9 +168,10 @@ export function apply(ctx, config) {
           if (config.scenario === 'basic') {
             await ctx.agentDefaultModel.saveSelection({ provider: 'cascade-secondary', model: 'other', reasoningEffort: 'low' })
             await prompt('SWITCHED'); await settle()
-            try { await agent.startCall({ audio() {}, flush() {}, state() {}, failed() {} }, new AbortController().signal) } catch (error) { report.callError = error.code }
+            try { const live = await agent.startCall({ audio() {}, flush() {}, state() {}, failed() {} }, new AbortController().signal); live.end() } catch (error) { report.callError = error.code }
           }
         }
+        if (config.scenario === 'spoken') report.worker = ctx.agents.get('cascade-worker').session.snapshotEvents()
         await ctx.parallel('session/flush', agent.session)
         report.events = agent.session.snapshotEvents()
         report.tokenUsage = ctx.sessionProjections.stateOf(agent.session, 'tokenUsage')

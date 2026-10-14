@@ -9,6 +9,7 @@ import { Supervisor, type Config as SupervisorConfig } from './supervisor.js'
 import { ResultRelay } from './results.js'
 import { VoiceController } from './voice.js'
 import { SUMMARY_MODEL } from './compaction.js'
+import { TTS_ENDPOINT, TTS_MODEL, TTS_VOICE } from './speech.js'
 
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'sessionTitle', 'llm', 'agentDefaultModel']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
@@ -20,6 +21,9 @@ export const Config = z.object({
   timeoutMs: z.number().step(1).min(1),
   autoVoice: z.boolean().default(false).volatile(),
   voiceMode: z.union(['cascade', 'realtime']).default('cascade').volatile(),
+  ttsEndpoint: z.string().pattern(/^wss?:\/\/[^\s@]+$/).default(TTS_ENDPOINT).volatile(),
+  ttsModel: z.string().min(1).default(TTS_MODEL).volatile(),
+  ttsVoice: z.string().min(1).default(TTS_VOICE).volatile(),
   compactionBudget: z.number().step(1).min(1).default(128000).volatile(),
   summaryModel: z.string().pattern(SUMMARY_MODEL).default('').volatile(),
   summaryReasoningEffort: z.string().default('').volatile(),

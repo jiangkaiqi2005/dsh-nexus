@@ -63,7 +63,7 @@ test('default cascade uses each current native default model and reasoning, stre
   assert.ok(replies.every(event => event.data.message.source.replayState.response.fixture === 'native'))
   assert.ok(of(report.persisted, 'request/header').every(event => event.data.header.config.reasoningEffort === (event.data.header.config.provider === 'cascade-primary' ? 'high' : 'low')))
   assert.ok(report.streams.some(frame => frame.type === 'chunk' && frame.chunk.type === 'text-delta' && frame.chunk.text === 'CASCADE'))
-  assert.equal(report.callError, 'CASCADE_VOICE_UNSUPPORTED')
+  assert.equal(report.callError, undefined)
 })
 
 test('cascade reads and dispatches native work sessions with structured tool history, then wakes on the real worker result', { timeout: 60000 }, async () => {
@@ -142,7 +142,7 @@ test('cascade restores the same native conversation and replay data before reque
   assert.equal(of(report.persisted, 'turn/end').at(-1).data.reason.kind, 'completed')
 })
 
-test('native Nexus settings default to cascade, reject its voice clearly and switch modes only on the next call', { timeout: 90000 }, async () => {
+test('native Nexus settings default to cascade and switch modes only on the next call', { timeout: 90000 }, async () => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await new Promise(accept => server.once('listening', accept))
   let modelRequests = 0
@@ -201,8 +201,9 @@ test('native Nexus settings default to cascade, reject its voice clearly and swi
         await open()
         await submit('UI-CASCADE', 'CASCADE-REPLY')
         await page.getByRole('button', { name: '接通语音', exact: true }).click()
-        await page.getByRole('status').filter({ hasText: '级联语音暂不支持，可以继续文字交流。' }).waitFor()
+        await page.getByRole('status').filter({ hasText: '已接通 Nexus' }).waitFor()
         assert.equal(modelRequests, 0)
+        await page.getByRole('button', { name: '挂断', exact: true }).click()
         await saveMode('realtime'); await open()
         await page.getByRole('button', { name: '接通语音', exact: true }).click()
         await page.getByRole('status').filter({ hasText: '已接通 Nexus' }).waitFor()
@@ -213,7 +214,7 @@ test('native Nexus settings default to cascade, reject its voice clearly and swi
         await page.getByRole('button', { name: '挂断', exact: true }).click()
         await submit('UI-REALTIME-C', 'REALTIME-REPLY-3')
         await page.getByRole('button', { name: '接通语音', exact: true }).click()
-        await page.getByRole('status').filter({ hasText: '级联语音暂不支持，可以继续文字交流。' }).waitFor()
+        await page.getByRole('status').filter({ hasText: '已接通 Nexus' }).waitFor()
         await submit('UI-CASCADE-AGAIN', 'CASCADE-REPLY')
         await page.screenshot({ path: resolve(dir, 'cascade-after-switch.png') })
         await writeFile(resolve(dir, 'ui.yml'), await page.locator('body').ariaSnapshot())

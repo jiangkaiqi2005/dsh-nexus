@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { RealtimeFailure } from './realtime.js'
 import type { Supervisor } from './supervisor.js'
+import type { SpeechActivity } from './speech.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { nexusVoice: VoiceController }
@@ -12,10 +13,11 @@ declare module '@deepseek-ai/cordis' {
  * flush: the user started speaking, so audio still queued or playing stops and is discarded.
  */
 export type VoiceFrame =
-  | { type: 'state'; state: 'ready' | 'connecting' | 'live' }
+  | { type: 'state'; state: 'ready' | 'connecting' | 'live'; mode?: 'cascade' | 'realtime' }
   | { type: 'state'; state: 'failed'; code: string }
   | { type: 'audio'; audio: string }
   | { type: 'flush' }
+  | { type: 'activity'; state: SpeechActivity; code?: string }
 /**
  * Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono), and the answer to
  * each flush or hangup: how many samples of the audio received since the previous flush were played.
@@ -96,8 +98,8 @@ export class VoiceController extends TypertRemoteService {
       const ready = await incoming.next()
       if (signal.aborted || ready.done || ready.value.type !== 'ready') return
       yield { type: 'state', state: 'connecting' }
-      live = await supervisor.startCall({ audio: audio => frames.push({ type: 'audio', audio }), flush: () => frames.push({ type: 'flush' }), state: state => frames.push({ type: 'state', state }), failed: code => { frames.push({ type: 'state', state: 'failed', code }); frames.end() } }, signal)
-      yield { type: 'state', state: 'live' }
+      live = await supervisor.startCall({ audio: audio => frames.push({ type: 'audio', audio }), flush: () => frames.push({ type: 'flush' }), activity: (state, code) => frames.push({ type: 'activity', state, ...(code ? { code } : {}) }), state: state => frames.push({ type: 'state', state }), failed: code => { frames.push({ type: 'state', state: 'failed', code }); frames.end() } }, signal)
+      yield { type: 'state', state: 'live', ...(live.mode ? { mode: live.mode } : {}) }
       const pump = (async () => {
         for (let next = await incoming.next(); !next.done; next = await incoming.next()) {
           const item = next.value

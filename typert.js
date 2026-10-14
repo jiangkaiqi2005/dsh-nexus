@@ -19,6 +19,7 @@ const frame = () => ({
   parse(value) {
     if (value?.type === 'audio' && isAudio(value.audio)) return value
     if (value?.type === 'flush' && Object.keys(value).length === 1) return value
+    if (value?.type === 'activity' && ['thinking', 'reading', 'idle', 'failed'].includes(value.state) && (value.code === undefined || typeof value.code === 'string')) return value
     if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
     if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
     throw new TypeError('nexusVoice/call frame is malformed')

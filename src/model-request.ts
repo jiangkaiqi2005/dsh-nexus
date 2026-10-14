@@ -24,11 +24,19 @@ export function requestRealtime(connection: RealtimeConnection, request: ModelRe
 /** The native service owns provider translation, reasoning, tool schemas and cache accounting. */
 export async function requestCascade(call: PreparedLlmCall, options: GenerateOptions, request: ModelRequest): Promise<ModelResponse> {
   const assembler = new BlockAssembler()
+  const spoken = new Map<number, string>()
   for await (const chunk of call.stream(options)) {
     request.signal.throwIfAborted()
     assembler.push(chunk)
     request.onChunk?.(chunk)
-    if (chunk.type === 'text-delta') request.onText(chunk.text)
+    if (chunk.type === 'text-delta') {
+      spoken.set(chunk.index, (spoken.get(chunk.index) ?? '') + chunk.text)
+      request.onText(chunk.text)
+    } else if (chunk.type === 'block-end' && chunk.block.type === 'text') {
+      const prefix = spoken.get(chunk.index) ?? ''
+      if (chunk.block.text.startsWith(prefix)) request.onText(chunk.block.text.slice(prefix.length))
+      spoken.delete(chunk.index)
+    }
   }
   const finish = assembler.finish
   if (finish.kind === 'error' || finish.kind === 'aborted') throw new LlmError(finish.failure.message, finish.failure.code)
