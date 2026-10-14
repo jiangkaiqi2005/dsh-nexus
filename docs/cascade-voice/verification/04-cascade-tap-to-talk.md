@@ -1,0 +1,56 @@
+# 票 04 验证记录
+
+本票基线：`c605c6791add524c5a4300a65a21b288ace5bd56`。范围是级联通话中的点按录音、整段千问识别、原生发言与状态；插话停止播放、录音期间缓存与完整安装验收留在票 05/06。
+
+## 实现
+
+接通级联通话后出现“开始录音 / 结束录音”按钮。客户端只在点按录音期间上传既有 PCM16、16 kHz、单声道音频，新增的开始/结束控制帧由 Host 和客户端两侧 Typert 描述严格接受，不能附加其他字段。Realtime 的自动上传、VAD、播放反馈和原有协议行为不变。
+
+Host 持有单次录音，开始时启动 60 秒墙钟定时器，到期按结束录音处理；另以 60 秒 PCM 容量保护录音内存。结束后封装标准 WAV，以 Spec 的原生多模态形状上传：`model`、`input.messages` 的 user/audio 数据 URL、`parameters.format=wav`、`sample_rate=16000`、中文及关闭 ITN。默认端点、型号与 Spec 一致；Nexus 设置支持保存识别端点和型号，凭据复用既有引用，Bearer 只由 Host 解析与使用。
+
+识别的非空文字直接用原生 `user` 来源进入同一个主会话。空闲主管收到 followup，运行中的主管收到原生 steer；回复继续沿票 03 的队列逐句朗读。接受已验证的多模态 choices/text 和千问 3.1 的 output.text、output.sentence.text、顶层 text，未引入兼容请求形状。HTTP 错误、无文字错误码、空文字及不可解析结果只显示“没听清”，不写用户消息、不发起回合、不转发错误正文。
+
+录音与识别状态优先于并行朗读/思考状态。识别期间按钮禁用，结束录音、挂断、断线及 Host 停止均释放录音数据；挂断或断线取消识别请求、丢弃晚结果，不干扰主管或工具工作。开始录音在本票中不取消或暂缓朗读。
+
+## 验收边界
+
+`tests/cascade-tap.test.mjs` 通过隔离的官方 Harness Host、原生主会话和真实 Edge 点按通话，外部依赖为受控 HTTP ASR、Harness 注册的默认 LLM 与受控 WS 合成端点。没有替换主管、录音或合成内部组件。
+
+- 一次点按：HTTP 实际收到默认型号、Host Bearer、标准 16 kHz 单声道 PCM16 WAV；原生 user 记录中出现识别文本，只有一个主管回合，浏览器收到回复 PCM。
+- 失败与空结果：空白 output.text、HTTP 400 无文字码、回显测试凭据的 HTTP 500、缺失文字结构均提示没听清，原生零 user/零 turn，主管与合成零请求。浏览器 WebSocket 下行不含测试凭据。
+- 运行中引导：主管默认 LLM 保持运行时点按说话，HTTP 闸门未放行时显示识别中且按钮禁用；放行的 output.sentence.text 作为 user/steer 被下一步消费，同一回合恰有两个步骤。
+- 60 秒：只采集约半秒后，通过浏览器公开 AudioContext.suspend 停止采集，始终不点击结束；Host 仍在约 60 秒墙钟后上传短 WAV 并完成一轮。音频少于五秒，故不能由采样容量上限替代墙钟触发。
+- 挂断与断线：挂断识别中的 HTTP、挂断尚未结束的录音、刷新客户端时中断识别都不提交识别文本或发起回合；HTTP 连接实际关闭，提供方晚结果无效。
+- 配置：真实 Nexus 设置展示默认识别型号，保存端点和型号后下一次点按的 HTTP 路径及请求型号使用保存值，顶层 text 正常进入会话。
+- 真实端点：`NEXUS_REAL_VOICE=1` 时，用 Windows SAPI 合成中文 WAV 作为浏览器麦克风样本，连接真实 ASR 与 TTS，验证识别 user、主管回复及实际 PCM 下行。默认跳过，未读真实 key、未调用付费端点或修改生产 profile。
+
+## 红绿与专项证据
+
+- `04-red.log`：初次用例失败于缺少“开始录音”按钮，为有效行为 red。
+- `04-green1.log`：实现后按钮仍显示原始 locale key。已检查失败 DOM 和截图，补齐客户端内置中英文 locale 与 locale 文件；没有改夹具绕过用户界面。
+- `04-green2.log`：真实界面及协议链已通过，最终夹具误把原生 runtime 提示计为用户输入。核对官方持久化事件形状后，将断言限定原生 user 来源。
+- `04-green3.log`：一次完整点按 1 项通过，6.467 秒。
+- `04-behaviors.log`：点按、失败/空结果、运行中 steer 3 项通过，19.966 秒。
+- `04-timer-lifecycle.log`：6 项，5 通过、1 默认跳过、0 失败，92.918 秒。其中实际 60 秒用例含 Host 启动耗时 65.728 秒。
+- `04-settings.log`：保存识别配置 1 项通过，7.893 秒。
+- `04-focused-final.log`：补强识别中的客户端断线和配置请求路径后，2 项通过、0 失败，14.163 秒。
+
+目视检查 `.scratch/cascade-voice/04-tap-1791985442775/tap-reply.png` 和 `04-tap-1791985462039/automatic-end.png`，确认主会话显示识别用户文字、主管回复、开始录音按钮与通话朗读状态。各隔离目录保留原生 report、截图、脱敏 Host 日志；本地证据和索引均不提交。
+
+## 最终冻结检查
+
+`npm run typecheck`、`npm run build`、`node --check client.js`、`node --check typert.js`、`git diff --check` 均通过。Graph 已在本票源码上更新为 1,272 节点、3,703 边；索引不覆盖测试文件时，按明确覆盖缺口读取测试源码。
+
+首次冻结完整 `npm test`：126 项，111 通过、14 默认跳过、1 失败，395.127 秒；日志 `.scratch/cascade-voice/04-full.log`。本票全部六项受控用例、票 03 朗读与播放隔离、Realtime 用例均通过。唯一失败为既有 `tests/titles.test.mjs` 四次重启中的 phase 2 Host 退出 `3221226505`（`0xC0000409`），只输出监听地址、未生成报告；phase 1 原生报告正常。尚不能确认该原生进程退出的原因，不能当成完整门槛通过。对原用例独立诊断，保留失败目录 `titles-1791985658136`。完整运行开始后只补验证记录，未再修改产品或测试。
+
+原用例独立诊断 `node --test tests/titles.test.mjs`：1 项通过，52.326 秒；日志 `.scratch/cascade-voice/04-titles-diagnosis.log`，原生与浏览器证据 `titles-1791986078664`。未改产品、夹具或超时绕过失败。依据此次独立通过，对同一冻结版本再次运行完整门槛，日志 `.scratch/cascade-voice/04-final-full.log`。
+
+第二次默认并发完整运行：126 项，110 通过、14 默认跳过、2 失败，432.543 秒。旧 titles 用例再次在 phase 2 Host 退出 `3221226505`，phase 1 报告正常，phase 2–4 无报告；旧 Realtime `several-flushes-pending` 用例在手动重接通观察上超时。前者在两次完整并发环境重复、原样独立通过，尚未得到秒级最小复现；不将其归因于产品或内存。已读 diagnosing-bugs 技能，保持脱敏、冻结源码，不靠修改夹具或延长超时获得通过。以仅改变测试文件并发的完整命令 `node --test --test-concurrency=1 tests/*.test.mjs` 隔离运行，日志 `.scratch/cascade-voice/04-serial-full.log`。串行结果不会改写上述默认并发失败结论。
+
+串行完整集合实际执行结果：126 项，112 通过、14 默认跳过、0 失败，957.943 秒。旧 titles 跨重启用例通过（34.220 秒），旧 `several-flushes-pending` 的手动重接通与播放反馈断言也通过。期间没有修改 runtime、测试夹具、断言或超时。
+
+上述全绿后，将 `package.json` 的 `scripts.test` 单字段改为完整日志所执行的精确命令 `node --test --test-concurrency=1 tests/*.test.mjs`，使 `npm test` 的默认入口与已实际验证的完整命令一致。采用 Node 标准的测试文件串行参数，不减少集合或改变文件内测试行为，代价是约 16 分钟的完整验证耗时。已解析 JSON 并核对命令等价；不为这一等价入口再次重复全套。两次旧默认并发失败仍保留为事实，Windows Host 原生退出根因未定位；此配置修复不是对根因已经修复的声明。
+
+完整行为集合通过，没有已确认的本票功能问题，等待标准与规格两轴评审。
+
+受控端点和真实浏览器的通过不代表真实付费模型或物理麦克风验收。没有推送、PR、发布或安装生产配置；票 05/06 尚未开始。

@@ -10,6 +10,7 @@ import { ResultRelay } from './results.js'
 import { VoiceController } from './voice.js'
 import { SUMMARY_MODEL } from './compaction.js'
 import { TTS_ENDPOINT, TTS_MODEL, TTS_VOICE } from './speech.js'
+import { ASR_ENDPOINT, ASR_MODEL } from './recognition.js'
 
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'sessionTitle', 'llm', 'agentDefaultModel']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
@@ -21,6 +22,8 @@ export const Config = z.object({
   timeoutMs: z.number().step(1).min(1),
   autoVoice: z.boolean().default(false).volatile(),
   voiceMode: z.union(['cascade', 'realtime']).default('cascade').volatile(),
+  asrEndpoint: z.string().pattern(/^https?:\/\/[^\s@]+$/).default(ASR_ENDPOINT).volatile(),
+  asrModel: z.string().min(1).default(ASR_MODEL).volatile(),
   ttsEndpoint: z.string().pattern(/^wss?:\/\/[^\s@]+$/).default(TTS_ENDPOINT).volatile(),
   ttsModel: z.string().min(1).default(TTS_MODEL).volatile(),
   ttsVoice: z.string().min(1).default(TTS_VOICE).volatile(),

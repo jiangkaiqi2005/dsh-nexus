@@ -22,7 +22,7 @@ export type VoiceFrame =
  * Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono), and the answer to
  * each flush or hangup: how many samples of the audio received since the previous flush were played.
  */
-export type VoiceUplink = { type: 'ready' } | { type: 'audio'; audio: string } | { type: 'played' | 'hangup'; samples: number }
+export type VoiceUplink = { type: 'ready' | 'start-recording' | 'end-recording' } | { type: 'audio'; audio: string } | { type: 'played' | 'hangup'; samples: number }
 
 /** Unbounded single-consumer frame queue ended by the call. */
 class Frames implements AsyncIterable<VoiceFrame> {
@@ -104,6 +104,8 @@ export class VoiceController extends TypertRemoteService {
         for (let next = await incoming.next(); !next.done; next = await incoming.next()) {
           const item = next.value
           if (item.type === 'audio' && typeof item.audio === 'string') live.append(item.audio)
+          else if (item.type === 'start-recording') live.startRecording?.()
+          else if (item.type === 'end-recording') live.endRecording?.()
           else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples)
           else if (item.type === 'hangup') { live.hangup(item.samples); frames.end(true); return }
         }

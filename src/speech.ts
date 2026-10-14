@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 export const TTS_ENDPOINT = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
 export const TTS_MODEL = 'qwen-audio-3.1-tts-flash'
 export const TTS_VOICE = 'longanhuan_v3.1'
-export type SpeechActivity = 'thinking' | 'reading' | 'idle' | 'failed'
+export type SpeechActivity = 'thinking' | 'reading' | 'idle' | 'failed' | 'recording' | 'recognizing' | 'unheard'
 export interface SpeechLink { audio(audio: string, replyId?: string): void; flush(replyId?: string): void; activity?(state: SpeechActivity, code?: string): void }
 interface SpeechOptions { endpoint: string; model: string; voice: string; timeoutMs: number; credential(): Promise<string | undefined> }
 

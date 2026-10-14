@@ -19,6 +19,7 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { CascadeCall, type SpeechActivity } from './speech.js'
+import { Recording } from './recognition.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -36,12 +37,12 @@ declare module '@deepseek-ai/dsh-llm' {
  * summaryModel: `provider/model` that writes compaction summaries; empty is DeepSeek Flash (`DEFAULT_SUMMARY_MODEL`).
  * summaryReasoningEffort: reasoning effort of summaries; empty takes the lowest the summary model offers, `model-default` sends none.
  */
-export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; voiceMode: Volatile<'cascade' | 'realtime'>; ttsEndpoint: Volatile<string>; ttsModel: Volatile<string>; ttsVoice: Volatile<string>; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
+export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; voiceMode: Volatile<'cascade' | 'realtime'>; asrEndpoint: Volatile<string>; asrModel: Volatile<string>; ttsEndpoint: Volatile<string>; ttsModel: Volatile<string>; ttsVoice: Volatile<string>; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
 export interface CallLink { audio(delta: string, replyId?: string): void; flush(replyId?: string): void; state(state: 'connecting' | 'live'): void; failed(code: string): void; activity?(state: SpeechActivity, code?: string): void }
 /** A live call as its Remote stream holds it; played reports the samples played before the client stopped at a flush. */
-export interface LiveCall { mode?: 'cascade' | 'realtime'; append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
+export interface LiveCall { mode?: 'cascade' | 'realtime'; startRecording?(): void; endRecording?(): void; append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
 
 /** Settle with the promise, or reject as soon as the turn is cancelled. */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -101,6 +102,7 @@ export class Supervisor implements Agent {
   private connection?: RealtimeConnection
   private call?: Call
   private cascadeCall?: CascadeCall
+  private cascadeRecording?: Recording
   private readonly voiceTurns: ServerTurn[] = []
   /** Automatic compaction was skipped as useless and warned about; cleared once the request is within budget or compacts. */
   private uselessWarned = false
@@ -320,13 +322,23 @@ export class Supervisor implements Agent {
     this.mode = this.config.voiceMode.get()
     this.model = undefined
     if (this.mode === 'cascade') {
+      let speech: SpeechActivity = 'idle', speechCode: string | undefined
+      const activity = () => link.activity?.(recording.phase ?? speech, recording.phase ? undefined : speechCode)
+      const recording = this.cascadeRecording = new Recording(() => ({
+        endpoint: this.config.asrEndpoint.get(), model: this.config.asrModel.get(), timeoutMs: this.config.timeoutMs ?? 30000,
+        credential: async () => (await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef)))?.value,
+      }), activity, text => {
+        const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+        if (this.status === 'running') this.steer(message)
+        else this.followup(message)
+      })
       const call = this.cascadeCall = new CascadeCall(() => ({
         endpoint: this.config.ttsEndpoint.get(), model: this.config.ttsModel.get(), voice: this.config.ttsVoice.get(), timeoutMs: this.config.timeoutMs ?? 30000,
         credential: async () => (await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef)))?.value,
-      }), link)
-      const end = () => { signal.removeEventListener('abort', end); call.end(); if (this.cascadeCall === call) this.cascadeCall = undefined }
+      }), { ...link, activity: (state, code) => { if (state === 'thinking' && recording.phase === 'unheard') recording.phase = undefined; speech = state; speechCode = code; activity() } })
+      const end = () => { signal.removeEventListener('abort', end); recording.end(); call.end(); if (this.cascadeCall === call) { this.cascadeCall = undefined; this.cascadeRecording = undefined } }
       signal.addEventListener('abort', end, { once: true })
-      return { mode: 'cascade', append() {}, played() {}, hangup: end, end }
+      return { mode: 'cascade', startRecording: () => recording.start(), endRecording: () => recording.finish(), append: audio => recording.append(audio), played() {}, hangup: end, end }
     }
     const call: Call = {
       abort: new AbortController(),
@@ -574,6 +586,7 @@ export class Supervisor implements Agent {
     this.disposed = true
     this.wakeRequested = false
     this.call?.end('UNAVAILABLE')
+    this.cascadeRecording?.end()
     this.cascadeCall?.end()
     this.cancel({ kind: 'disposed' })
     await this.whenIdle()

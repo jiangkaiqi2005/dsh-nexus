@@ -8,9 +8,9 @@ const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 &&
 /** Client-to-Host item: captured microphone audio, base64 PCM16 16 kHz mono; or the samples played before a flush or hangup. */
 const uplink = () => ({
   parse(value) {
-    if (value?.type === 'ready' && Object.keys(value).length === 1) return value
+      if (['ready', 'start-recording', 'end-recording'].includes(value?.type) && Object.keys(value).length === 1) return value
     if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (['played', 'hangup'].includes(value.type) && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
-    throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played" | "hangup", samples }')
+      throw new TypeError('nexusVoice/call uplink must be ready/start-recording/end-recording, audio with base64, or played/hangup with samples')
   },
 })
 
@@ -19,7 +19,7 @@ const frame = () => ({
   parse(value) {
     if (value?.type === 'audio' && isAudio(value.audio) && (value.replyId === undefined || typeof value.replyId === 'string')) return value
     if (value?.type === 'flush' && (value.replyId === undefined ? Object.keys(value).length === 1 : typeof value.replyId === 'string' && Object.keys(value).length === 2)) return value
-    if (value?.type === 'activity' && ['thinking', 'reading', 'idle', 'failed'].includes(value.state) && (value.code === undefined || typeof value.code === 'string')) return value
+      if (value?.type === 'activity' && ['thinking', 'reading', 'idle', 'failed', 'recording', 'recognizing', 'unheard'].includes(value.state) && (value.code === undefined || typeof value.code === 'string')) return value
     if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
     if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
     throw new TypeError('nexusVoice/call frame is malformed')

@@ -130,10 +130,10 @@ export function apply(ctx, config) {
         const prompt = (words, mode = 'followup') => ctx.sessionController.prompt({ sessionId: agent.id, requestId: crypto.randomUUID(), mode, content: [{ type: 'text', text: words }] }, new AbortController().signal)
         await ctx.agentDefaultModel.saveSelection({ provider: 'cascade-primary', model: config.model ?? 'normal', reasoningEffort: 'high' })
         report.config = structuredClone([...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus').options.config)
-        if (['ui', 'spoken'].includes(config.scenario)) {
+      if (['ui', 'spoken', 'tap'].includes(config.scenario)) {
           if (config.scenario === 'spoken') await ctx.agents.create({ sessionId: 'cascade-worker', meta: { cwd: config.dir }, agentOptions: { provider: 'cascade-worker-model', model: 'worker' } })
           await writeFile(flag('ui-ready'), '')
-          for (const deadline = Date.now() + 60000; !(await exists(flag('ui-finish'))); ) { if (stopped) return; if (Date.now() > deadline) throw new Error('UI scenario did not finish'); await sleep(50) }
+        for (const deadline = Date.now() + (config.scenario === 'tap' ? 150000 : 60000); !(await exists(flag('ui-finish'))); ) { if (stopped) return; if (Date.now() > deadline) throw new Error('UI scenario did not finish'); await sleep(50) }
           await settle()
         } else if (config.scenario === 'restore') {
           await prompt('BEFORE-RESTORE'); await settle()
