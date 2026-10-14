@@ -73,7 +73,7 @@ Graph 在本轮已经两次返回 `Transport closed`，按已确认工具故障 
 | 初评轴 | 结果 | 处置 |
 | --- | --- | --- |
 | 仓库标准 | approve，issues: [] | 确认协议有效/无效帧边界、测试窗口修复没有削弱原验收，并保留历史 races 未知原因限制。 |
-| 票据与 Spec | changes_requested，1 项 P1 | 官方 sentence-end 的 original_text 字段位置错误，影响实际已听整句；第 1 轮修复，尚待同两轴复审。 |
+| 票据与 Spec | changes_requested，1 项 P1 | 官方 sentence-end 的 original_text 字段位置错误，影响实际已听整句；已在第 1 轮修复并由原两轴复审放行，初评事实保留。 |
 
 ### 第 1 轮：官方 sentence-end 字段位置
 
@@ -87,4 +87,13 @@ Graph 在本轮已经两次返回 `Transport closed`，按已确认工具故障 
 
 typecheck/build、两份 fixture 语法和 diff-check 通过；修复后重新冻结并实际运行完整 `npm test`，`05-r1-full.log`：**135 项、121 通过、14 默认跳过、0 失败，1036.068 秒，exit 0**。所有原断言保留，races 为 11.132 秒，several-flushes-pending 为 6.675 秒。最终全集开始后没有再改 runtime/fixture、断言或超时，结束后只补真实统计与源提交记录。
 
-第 1 轮修复代码 SHA：`0798595f01e8c1dea957201885796ea4751d63cc`（基于初评 `811ea3430b158c7091e7c2e81ec2ed5c44fd92fe`，仅 source 字段与两份相关 TTS fixture）。这个 P1 的 fixed 判断依据是官方字段核查、未改 parser 的有效红及最小修复后的官方形状 green/完整集合，尚待原 standards_05 / spec_05 对修复后的固定 reviewHead 复审；实施代理自验不是复审批准。真实付费端点/物理实机、历史 races 原因和 Windows 并发原生退出限制继续保留，未修改生产配置、读取真实 key 或提前开始票 06。
+第 1 轮修复代码 SHA：`0798595f01e8c1dea957201885796ea4751d63cc`（基于初评 `811ea3430b158c7091e7c2e81ec2ed5c44fd92fe`，仅 source 字段与两份相关 TTS fixture）；最终已审 reviewHead：`6ccd9556cfcaefd7e834e26b31506c62d97a17f2`，包含准确验证记录。原 standards_05 / spec_05 对固定 unitBase 至该 head 的累计差异完成第 1 轮复审：
+
+| 第 1 轮复审轴 | 结果 | 依据与处置 |
+| --- | --- | --- |
+| 仓库标准 | approve，issues: [] | 正式字段修复与官方元信息夹具范围准确，真实红绿和完整检查记录成立，原测试断言/超时保留，历史未知限制如实记载。 |
+| 票据与 Spec | approve，issues: [] | 只读正式帧复核得到 heard=[First sentence!]；官方字段 P1 确认 fixed，撤回该问题，原插话/缓存/主管与工具语义及完整验收仍成立。 |
+
+正式修复轮数：**1**。原 P1 处置 **fixed**；两轴均明确放行，**无未决评审问题**。依据是官方字段核查、未改 parser 的有效红、最小修复后的官方形状 green/完整集合，以及两个独立评审的累计复审，实施代理自验不替代独立评审。票 05 的三项受控清单已完成，下一 frontier 是依赖 01、05 已满足的票 06；此文档收束不改变 Spec 要求或依赖，不新增 runtime/测试检查。
+
+真实付费端点和物理实机没有执行验收，不能由受控服务/真实浏览器代替。历史 races 原因、Windows 默认并发原生退出原因、早期 loader URL 公告迟滞原因仍未确认，均为已保留的非阻塞验证限制；不能把官方字段修复或本轮 approve 称为这些根因修复。本轮没有修改生产配置、读取真实 key、推送、创建 PR、发布或提前实施票 06。此次收束只有验证记录和进度文档增量，执行 diff-check，不重复已通过 runtime 全集；由原两轴继续复核文档增量后，协调者再启动票 06。
