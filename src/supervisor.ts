@@ -1,13 +1,13 @@
 import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { agentEvents, assembleContextFor, type Agent, type AgentCancelCause, type AgentStatus, type CancelOptions, type InboxTarget } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { createAssistantMessage, createSystemMessage, createUserMessage, createToolResultMessage, LlmAttemptId, type StreamChunk, type UserMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createSystemMessage, createUserMessage, createToolResultMessage, isHarnessError, LlmAttemptId, type LlmCallConfig, type StreamChunk, type UserMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-stream'
-import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
+import { canonicalHeader, type Session, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
-import { requestRealtime } from './model-request.js'
-import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type Response, type ServerTurn } from './realtime.js'
+import { requestCascade, requestRealtime, type ModelResponse } from './model-request.js'
+import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type ServerTurn } from './realtime.js'
 import { MANUAL_FAILURES, RETAIN_SHARE, USEFUL_SHARE, compactableRange, summaryTarget, withSummaryModel } from './compaction.js'
 import { registerWorkSessions } from './work-sessions.js'
 import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
@@ -17,6 +17,7 @@ import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-token-meter'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -34,7 +35,7 @@ declare module '@deepseek-ai/dsh-llm' {
  * summaryModel: `provider/model` that writes compaction summaries; empty is DeepSeek Flash (`DEFAULT_SUMMARY_MODEL`).
  * summaryReasoningEffort: reasoning effort of summaries; empty takes the lowest the summary model offers, `model-default` sends none.
  */
-export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
+export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; voiceMode: Volatile<'cascade' | 'realtime'>; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
 export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void }
@@ -79,7 +80,9 @@ interface Call {
 
 export class Supervisor implements Agent {
   readonly id
-  readonly options = { provider: 'dashscope-realtime', model: MODEL }
+  private mode: 'cascade' | 'realtime'
+  private model?: LlmCallConfig
+  get options(): LlmCallConfig { return this.mode === 'realtime' ? { provider: 'dashscope-realtime', model: MODEL } : this.model ?? this.ctx.agentDefaultModel.currentSelection() }
   readonly scope
   readonly ctx
   readonly inbox
@@ -106,6 +109,7 @@ export class Supervisor implements Agent {
   status: AgentStatus = 'idle'
 
   constructor(ctx: Context, readonly session: Session, private config: Config) {
+    this.mode = config.voiceMode.get()
     this.id = session.id
     this.scope = createScope(ctx, this)
     this.ctx = this.scope.ctx
@@ -197,7 +201,7 @@ export class Supervisor implements Agent {
       } catch (error) {
         if (signal.aborted) reason = { kind: 'aborted', reason: signal.reason }
         else {
-          const failure = { code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN', message: error instanceof RealtimeFailure ? error.message : 'Nexus request failed' }
+          const failure = { code: error instanceof RealtimeFailure || isHarnessError(error) ? error.code : 'UNKNOWN', message: error instanceof RealtimeFailure || isHarnessError(error) ? error.message : 'Nexus request failed' }
           reason = { kind: 'error', error: failure }
           this.events.emit('agent/error', { turn, step, error: new Error(failure.message) })
         }
@@ -311,6 +315,9 @@ export class Supervisor implements Agent {
     signal.throwIfAborted()
     if (this.disposed) throw new RealtimeFailure('UNAVAILABLE')
     if (this.call) throw new RealtimeFailure('CALL_BUSY')
+    this.mode = this.config.voiceMode.get()
+    this.model = undefined
+    if (this.mode === 'cascade') throw new RealtimeFailure('CASCADE_VOICE_UNSUPPORTED')
     const call: Call = {
       abort: new AbortController(),
       since: 0,
@@ -412,18 +419,26 @@ export class Supervisor implements Agent {
     for (const message of inputs) this.session.append('user/message', message, { surfaceOp: 'append' })
     await this.compose()
     signal.throwIfAborted()
+    const cascade = this.mode === 'cascade'
+    const prepared = cascade ? await this.ctx.llm.prepareCall(this.ctx.agentDefaultModel.currentSelection(), signal) : undefined
+    const selection = prepared?.config ?? this.options
+    if (cascade) {
+      this.model = selection
+      const selected = this.session.snapshotEvents().findLast(event => event.type === 'model/selection')
+      if (!selected || JSON.stringify(selected.data) !== JSON.stringify(selection)) this.session.append('model/selection', selection)
+    }
     // The utterance itself is already in the server conversation.
     if (voice) this.connection?.markPresent(voice.said.id)
     const assembly = await this.prompt.assemble(assembleContextFor(this, signal))
     // A server-started voice reply answers the instructions its connection already holds.
     const instructions = voice ? voice.server.connection.instructions : `${this.connection?.voice ? VOICE_INSTRUCTIONS : INSTRUCTIONS}\n\n${renderPrompt(assembly)}`
     const previous = this.session.requestHeader()
-    const header = { config: this.options, tools: assembly.tools }
+    const header = prepared ? canonicalHeader({ config: selection, tools: assembly.tools, adapterDefaults: prepared.adapterDefaults }) : { config: selection, tools: assembly.tools }
     this.session.append('request/header', { header, reason: !previous ? 'initial' : JSON.stringify(previous) === JSON.stringify(header) ? 'series' : 'change' })
     // The Nexus budget is the capacity the main conversation is kept within.
     const contextWindow = this.config.compactionBudget.get()
     const routed = this.session.requestContext()
-    if (routed?.provider !== this.options.provider || routed.model !== this.options.model || routed.contextWindow !== contextWindow) this.session.append('request/context', { ...this.options, contextWindow })
+    if (routed?.provider !== selection.provider || routed.model !== selection.model || routed.contextWindow !== contextWindow) this.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow })
     const system = this.session.surface.nodes.map(seq => this.session.eventAt(seq)).find(event => event?.type === 'system/message')
     if (!system || JSON.stringify(system.data.message.content) !== JSON.stringify([{ type: 'text', text: instructions }])) {
       this.session.append('system/message', { turn, step, message: createSystemMessage(instructions) }, system ? { surfaceOp: { op: 'replace', startSeq: system.seq, endSeq: system.seq }, sourceEventSeqs: [system.seq] } : { surfaceOp: 'append' })
@@ -431,7 +446,7 @@ export class Supervisor implements Agent {
     const context = renderContextSnapshot(assembly)
     const retained = this.surface().findLast(event => event.type === 'user/message' && event.data.source.kind === 'nexus-runtime')
     if (context && (!retained || retained.type !== 'user/message' || JSON.stringify(retained.data.content) !== JSON.stringify([{ type: 'text', text: context }]))) this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'nexus-runtime', form: 'snapshot' } }), { surfaceOp: 'append' })
-    if (!this.connection) {
+    if (!cascade && !this.connection) {
       const credential = await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef))
       if (!credential) throw new RealtimeFailure('CREDENTIAL_MISSING')
       signal.throwIfAborted()
@@ -445,8 +460,10 @@ export class Supervisor implements Agent {
     let text = ''
     let calls: ToolCallBlock[] = []
     let requestedTools = false
+    let finished = false
     // Chunk times are when the model produced them, also for a reply received before its turn recorded it.
     const push = (chunk: StreamChunk, time = Date.now()) => {
+      if (chunk.type === 'finish') finished = true
       stream.push({ time, chunk })
       this.events.emit('agent/assistant-stream', { frame: { type: 'chunk', attemptId, revision, index: index++, time, chunk } })
     }
@@ -455,8 +472,11 @@ export class Supervisor implements Agent {
     let begun = false
     const begin = (time?: number) => { if (!begun) { begun = true; push({ type: 'block-start', index: 0, blockType: 'text' }, time) } }
     try {
-      const onText = (delta: string, time?: number) => { begin(time); text += delta; push({ type: 'text-delta', index: 0, text: delta }, time) }
-      const response: Response = await abortable(requestRealtime(connection, { surface: this.surface(), onText, tools: assembly.tools, instructions, signal }, voice?.server), signal)
+      const onText = (delta: string, time?: number) => { text += delta; if (!cascade) { begin(time); push({ type: 'text-delta', index: 0, text: delta }, time) } }
+      const request = { surface: this.surface(), onText, tools: assembly.tools, instructions, signal, onChunk: push }
+      const response: ModelResponse = await abortable(prepared
+        ? requestCascade(prepared, { ...selection, messages: this.session.deriveMessages(), toolHistory: this.session.toolHistory(), tools: assembly.tools, sessionId: this.id, signal }, request)
+        : requestRealtime(connection!, request, voice?.server), signal)
       text = response.text
       /** A response that leaves no message: its reported usage stays as a content-free attempt, as native settlements do. */
       const settleEmpty = () => {
@@ -464,7 +484,7 @@ export class Supervisor implements Agent {
         const event = this.session.append('assistant/attempt', { turn, step, stream: [...stream.snapshot()] })
         this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: event.seq } } })
       }
-      if (connection.voice && !text && !response.calls.length) {
+      if (connection?.voice && !text && !response.calls.length) {
         // The model chose not to answer aloud; nothing is recorded as said.
         if (response.usage) {
           push({ type: 'usage', usage: response.usage }, response.settledAt)
@@ -474,36 +494,40 @@ export class Supervisor implements Agent {
         return false
       }
       const completed = new Set(this.session.snapshotEvents().flatMap(event => event.type === 'tool/result' ? [event.data.message.toolCallId] : []))
-      calls = response.calls.filter(call => !completed.has(call.id))
+      calls = cascade ? response.calls : response.calls.filter(call => !completed.has(call.id))
       requestedTools = response.calls.length > 0
       if (calls.length !== response.calls.length) this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: `[The model repeated completed tool calls; reuse their native results without executing them again: ${response.calls.filter(call => completed.has(call.id)).map(call => call.id).join(', ')}.]` }], source: { kind: 'nexus-connection', form: 'notice', summary: 'reused completed tool results' } }), { surfaceOp: 'append' })
-      begin(response.settledAt)
-      push({ type: 'block-end', index: 0, block: { type: 'text', text } }, response.settledAt)
-      for (const [offset, call] of calls.entries()) {
-        push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' }, response.settledAt)
-        push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.settledAt)
-        push({ type: 'block-end', index: offset + 1, block: call }, response.settledAt)
+      if (!cascade) {
+        begin(response.settledAt)
+        push({ type: 'block-end', index: 0, block: { type: 'text', text } }, response.settledAt)
+        for (const [offset, call] of calls.entries()) {
+          push({ type: 'block-start', index: offset + 1, blockType: 'tool-call' }, response.settledAt)
+          push({ type: 'tool-call-delta', index: offset + 1, id: call.id, name: call.name, argumentsDelta: call.arguments }, response.settledAt)
+          push({ type: 'block-end', index: offset + 1, block: call }, response.settledAt)
+        }
+        if (response.usage) push({ type: 'usage', usage: response.usage }, response.settledAt)
+        push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.settledAt)
       }
-      if (response.usage) push({ type: 'usage', usage: response.usage }, response.settledAt)
-      push({ type: 'finish', reason: response.interrupted ? { kind: 'aborted', failure: { code: 'INTERRUPTED', message: 'The user started speaking; the reply stopped' } } : { kind: response.calls.length ? 'tool-calls' : 'stop' } }, response.settledAt)
-      if (!text && !calls.length) {
+      if (!text && !calls.length && !response.message?.content.length) {
         settleEmpty()
         return response.calls.length > 0
       }
-      const message = createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...calls], source: this.options })
-      connection.markPresent(message.id)
+      const message = response.message ?? createAssistantMessage({ content: [...(text ? [{ type: 'text' as const, text }] : []), ...calls], source: selection })
+      connection?.markPresent(message.id)
       // Cancelled streams retain the delivered prefix; a commit folded into later speech may be empty.
       const event = this.session.append('assistant/message', { turn, step, message, stream: [...stream.snapshot()], ...(response.usage ? { usage: response.usage } : {}), ...(response.interrupted ? { interrupted: true as const } : {}) }, { surfaceOp: 'append' })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } } })
     } catch (error) {
-      begin()
-      if (text) push({ type: 'block-end', index: 0, block: { type: 'text', text } })
-      push({ type: 'finish', reason: { kind: signal.aborted ? 'aborted' : 'error', failure: { code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN', message: 'Nexus request did not complete' } } })
+      if (!cascade) {
+        begin()
+        if (text) push({ type: 'block-end', index: 0, block: { type: 'text', text } })
+        push({ type: 'finish', reason: { kind: signal.aborted ? 'aborted' : 'error', failure: { code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN', message: 'Nexus request did not complete' } } })
+      } else if (!finished) push({ type: 'finish', reason: { kind: signal.aborted ? 'aborted' : 'error', failure: { code: isHarnessError(error) ? error.code : 'UNKNOWN', message: isHarnessError(error) ? error.message : 'Nexus request did not complete' } } })
       const event = this.session.append('assistant/attempt', { turn, step, stream: [...stream.snapshot()] })
       this.events.emit('agent/assistant-stream', { frame: { type: 'end', attemptId, revision, index, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq: event.seq } } })
       // Hanging up does not drop what the call was answering: the step continues in text.
-      if (!signal.aborted && this.hungUp.has(connection)) { this.connection = undefined; return this.request(turn, step, signal, this.notices.splice(0)) }
-      if (!signal.aborted && error instanceof RealtimeFailure && ['CONNECTION_CLOSED', 'CONNECTION_FAILED', 'TIMEOUT'].includes(error.code)) {
+      if (!signal.aborted && connection && this.hungUp.has(connection)) { this.connection = undefined; return this.request(turn, step, signal, this.notices.splice(0)) }
+      if (!signal.aborted && connection && error instanceof RealtimeFailure && ['CONNECTION_CLOSED', 'CONNECTION_FAILED', 'TIMEOUT'].includes(error.code)) {
         const pending = connection.unfinishedCalls.map(call => `${call.id}: ${call.name} ${call.arguments}`).join('\n')
         const notice = createUserMessage({ content: [{ type: 'text', text: `[Model connection interrupted (${error.code}); the previous response did not complete.${pending ? ` These tool calls were not executed because their response never completed:\n${pending}` : ''} Continue from the native input and completed tool results; do not claim the interrupted response completed.]` }], source: { kind: 'nexus-connection', form: 'notice', summary: 'interrupted model response' } })
         this.session.append('user/message', notice, { surfaceOp: 'append' })

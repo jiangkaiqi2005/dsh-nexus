@@ -62,7 +62,7 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-titles-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-titles-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_TITLES_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n    timeoutMs: 30000\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_TITLES_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n    timeoutMs: 30000\n`)
   const reports = []
   const ui = {}
   // Every Host runs under the repository launcher so its whole process tree is gone before the next one reuses this home.

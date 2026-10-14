@@ -63,7 +63,7 @@ test('official Host discovers registered projects across cwd and dispatches to t
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-workspace-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-workspace-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_WORKSPACE_FIXTURE_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_WORKSPACE_FIXTURE_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n`)
   const env = { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_WORKSPACE_FIXTURE_KEY: 'fixture-not-a-secret', DSH_TELEMETRY: '0' }
   let output = ''
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-workspace', '--port', '0', '--no-open'], { cwd: supervisorCwd, env }, async child => {

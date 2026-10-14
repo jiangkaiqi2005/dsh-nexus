@@ -1,1 +1,1 @@
-{"meta":{"title":"Nexus","description":"Talk with the single Realtime supervisor in a native session."}}
+{"meta":{"title":"Nexus","description":"Talk with a cascade or Realtime supervisor in a native session."},"voice-mode":"Voice mode","cascade":"Cascade","voice-mode-hint":"Changes apply on the next call. Cascade uses the Harness default model; cascade voice is not supported yet.","cascade-unavailable":"Cascade voice is not supported yet. Text conversation is available."}

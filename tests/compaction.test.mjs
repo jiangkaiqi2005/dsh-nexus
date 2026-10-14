@@ -100,7 +100,7 @@ async function scenario(name, { steps, nexus = '', defaultModel, model: endpoint
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-compaction-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-compaction-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n${nexus}`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n${nexus}`)
   let output = ''
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-compaction', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_COMPACTION_KEY: 'fixture-not-a-secret', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => {
     child.stdout.on('data', data => { output += data })
@@ -311,7 +311,7 @@ test('the Nexus conversation lists /compact on first open; budget, summary model
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-compaction-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-compaction-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
   const cycle = async (report, steps) => {
     await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-compaction-probe\n      name: nexus-compaction-probe\n      config:\n        dir: ${JSON.stringify(home)}\n        report: ${report}\n        live: true\n        steps: ${JSON.stringify(steps)}\n`)
     let output = ''

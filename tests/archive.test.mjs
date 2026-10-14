@@ -48,7 +48,7 @@ test('Nexus archives running work with native stops, protects the main conversat
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-archive-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-archive-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_ARCHIVE_FIXTURE_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_ARCHIVE_FIXTURE_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n`)
   let output = ''
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'nexus-archive', '--port', '0', '--no-open'], { cwd: root, env: { ...process.env, DSH_HOME: home, DSH_AGENTS_HOME: resolve(home, 'agents'), NEXUS_ARCHIVE_FIXTURE_KEY: 'fixture-not-a-secret', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => {
     child.stdout.on('data', bytes => { output += bytes }); child.stderr.on('data', bytes => { output += bytes })

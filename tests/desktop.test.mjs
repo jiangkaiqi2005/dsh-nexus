@@ -87,7 +87,7 @@ test('Desktop bundled CLI activates the packed Nexus, queries registered project
   for (const phase of [1, 2]) {
     const report = resolve(dir, `phase-${phase}.json`)
     const ready = resolve(dir, 'ready.json')
-    await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_DESKTOP_FIXTURE_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- insert:\n    - id: nexus-desktop-probe\n      name: nexus-desktop-probe\n      config:\n        phase: ${phase}\n        report: ${JSON.stringify(report)}\n        ready: ${JSON.stringify(ready)}\n`)
+    await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_DESKTOP_FIXTURE_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- insert:\n    - id: nexus-desktop-probe\n      name: nexus-desktop-probe\n      config:\n        phase: ${phase}\n        report: ${JSON.stringify(report)}\n        ready: ${JSON.stringify(ready)}\n`)
     let output = ''
     let host
     try {

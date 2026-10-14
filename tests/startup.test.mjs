@@ -20,7 +20,7 @@ async function profile(endpoint, autoVoice = false) {
   await symlink(resolve('.'), resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(probe, resolve(profile, 'node_modules/nexus-startup-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-startup-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_STARTUP_KEY\n    endpoint: ${endpoint}\n    timeoutMs: 2000\n${autoVoice ? '    autoVoice: true\n' : ''}- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_STARTUP_KEY\n    endpoint: ${endpoint}\n    timeoutMs: 2000\n${autoVoice ? '    autoVoice: true\n' : ''}- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
   let cycle = 0
   return {
     home,
