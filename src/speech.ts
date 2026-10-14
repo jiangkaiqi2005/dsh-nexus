@@ -131,7 +131,7 @@ class SpokenReply {
       else if (event.header.event === 'result-generated' && event.payload?.output?.type === 'sentence-end') {
         // The provider may split our sentence again at commas and send multiple PCM frames.
         // Only a matching, complete submitted sentence gets a heard boundary; never estimate it.
-        const text = event.payload.output.sentence?.original_text
+        const text = event.payload.output.original_text
         if (typeof text === 'string') {
           this.recognized += text.replace(/\s/g, '')
           while (this.submitted.length && this.recognized.startsWith(this.submitted[0].replace(/\s/g, ''))) {

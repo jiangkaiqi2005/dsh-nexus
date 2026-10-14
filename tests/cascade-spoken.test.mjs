@@ -61,13 +61,13 @@ test('cascade call receives its first PCM sentence while the native supervisor i
   const tasks = []; const auth = []
   server.on('connection', (socket, request) => {
     auth.push(request.headers.authorization)
-    let task; const send = (event, payload = {}) => socket.send(JSON.stringify({ header: { event, task_id: task.id }, payload }))
+    let task; const send = (event, payload = {}) => socket.send(JSON.stringify({ header: { event, task_id: task.id, attributes: {} }, payload }))
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString())
       if (event.header.action === 'run-task') { task = { id: event.header.task_id, run: event.payload, sentences: [], finished: false, cancelled: false }; tasks.push(task); send('task-started') }
       if (event.header.action === 'continue-task') {
         task.sentences.push(event.payload.input.text)
-        send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: task.sentences.length - 1 } } }); socket.send(tone)
+        send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: task.sentences.length - 1, words: [] } } }); socket.send(tone)
       }
       if (event.header.action === 'finish-task') { task.cancelled = event.payload.input.directive === 'cancel'; task.finished = !task.cancelled; send('task-finished') }
     })
@@ -114,8 +114,9 @@ test('cascade speaks complete Chinese and English sentences in order, preserves 
           return
         }
         // More than one audio binary per sentence: server boundaries differ from continue-task boundaries.
-        for (let i = 0; i < 2; i++) { send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: task.sentences.length - 1 } } }); socket.send(tone.subarray(0, 4800)) }
-        send('result-generated', { output: { type: 'sentence-end', sentence: { index: task.sentences.length - 1, original_text: event.payload.input.text, words: [] } } })
+        send('result-generated', { output: { type: 'sentence-begin', sentence: { index: task.sentences.length - 1, words: [] }, original_text: event.payload.input.text } })
+        for (let i = 0; i < 2; i++) { send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: task.sentences.length - 1, words: [] } } }); socket.send(tone.subarray(0, 4800)) }
+        send('result-generated', { output: { type: 'sentence-end', sentence: { index: task.sentences.length - 1, words: [] }, original_text: event.payload.input.text }, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } })
       }
       if (event.header.action === 'finish-task') { task.finished = true; send('task-finished') }
     })
@@ -204,7 +205,7 @@ test('queued spoken replies preserve order while native tool and next model step
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString())
       if (event.header.action === 'run-task') { task = { id: event.header.task_id, sentences: [] }; tasks.push(task); send('task-started') }
-      if (event.header.action === 'continue-task') { task.sentences.push(event.payload.input.text); send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: 0 } } }); socket.send(tone) }
+      if (event.header.action === 'continue-task') { task.sentences.push(event.payload.input.text); send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: 0, words: [] } } }); socket.send(tone) }
       if (event.header.action === 'finish-task') {
         if (task.sentences.includes('QUEUE-FIRST。') && !event.payload.input.directive) releaseFirst = () => send('task-finished')
         else send('task-finished')
@@ -243,7 +244,7 @@ test('a later TTS failure stops only its own PCM while an earlier successful rep
       if (event.header.action === 'run-task') { task = { id: event.header.task_id, order: tasks.length, failed: false }; tasks.push(task); send('task-started') }
       if (event.header.action === 'continue-task') {
         if (task.failed) return
-        send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: 0 } } })
+        send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: 0, words: [] } } })
         socket.send(labelledTone(task.order === 0 ? 6 : task.order === 1 ? 2 : 1, task.order === 0 ? 1000 : task.order === 1 ? 5000 : 9000))
         if (task.order === 1) { task.failed = true; send('task-failed', { error_code: 'fixture', message: 'second reply failed' }) }
       }

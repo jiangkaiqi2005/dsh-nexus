@@ -62,13 +62,15 @@ async function endpoints(run, { holdFinish = false } = {}) {
   const ws = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await new Promise(accept => ws.once('listening', accept))
   ws.on('connection', socket => {
     const task = { socket, sentences: [], canceled: false, finished: false, index: 0 }; tasks.push(task)
-    const send = (event, payload = {}) => { if (socket.readyState === 1) socket.send(JSON.stringify({ header: { event, task_id: task.id }, payload })) }
+    const send = (event, payload = {}) => { if (socket.readyState === 1) socket.send(JSON.stringify({ header: { event, task_id: task.id, attributes: {} }, payload })) }
     task.segment = (text, seconds, marker) => {
-      send('result-generated', { output: { type: 'sentence-begin', sentence: { index: task.index } } })
-      send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: task.index } } })
+      send('result-generated', { output: { type: 'sentence-begin', sentence: { index: task.index, words: [] }, original_text: text } })
       const pcm = Buffer.alloc(seconds * 48000); for (let offset = 0; offset < pcm.length; offset += 2) pcm.writeInt16LE(marker, offset)
-      for (let offset = 0; offset < pcm.length; offset += 12000) if (socket.readyState === 1) socket.send(pcm.subarray(offset, offset + 12000))
-      send('result-generated', { output: { type: 'sentence-end', sentence: { index: task.index++, original_text: text } } })
+      for (let offset = 0; offset < pcm.length; offset += 12000) if (socket.readyState === 1) {
+        send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: task.index, words: [] } } })
+        socket.send(pcm.subarray(offset, offset + 12000))
+      }
+      send('result-generated', { output: { type: 'sentence-end', sentence: { index: task.index++, words: [] }, original_text: text }, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } })
     }
     socket.on('message', bytes => {
       const event = JSON.parse(bytes.toString()); task.id = event.header.task_id
