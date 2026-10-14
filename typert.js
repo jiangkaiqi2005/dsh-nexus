@@ -4,11 +4,15 @@
 // client.js mounts the matching Client descriptor; keep both in step.
 
 const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
+const isPlayback = value => Array.isArray(value) && value.every(item => item && Object.keys(item).length === 2 && typeof item.replyId === 'string' && Number.isSafeInteger(item.samples) && item.samples >= 0)
 
-/** Client-to-Host item: captured microphone audio, base64 PCM16 16 kHz mono; or the samples played before a flush or hangup. */
+/** Client-to-Host item: PCM16 16 kHz mono, recording controls, or playback reports (cumulative per Cascade reply). */
 const uplink = () => ({
   parse(value) {
       if (['ready', 'start-recording', 'end-recording'].includes(value?.type) && Object.keys(value).length === 1) return value
+    if (value?.type === 'start-recording' && Object.keys(value).length === 2 && isPlayback(value.playback)) return value
+    if (value?.type === 'played' && Object.keys(value).length === 3 && typeof value.replyId === 'string' && Number.isSafeInteger(value.samples) && value.samples >= 0) return value
+    if (value?.type === 'hangup' && Object.keys(value).length === 3 && isPlayback(value.playback) && Number.isSafeInteger(value.samples) && value.samples >= 0) return value
     if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (['played', 'hangup'].includes(value.type) && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
       throw new TypeError('nexusVoice/call uplink must be ready/start-recording/end-recording, audio with base64, or played/hangup with samples')
   },

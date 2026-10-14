@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { RealtimeFailure } from './realtime.js'
 import type { Supervisor } from './supervisor.js'
-import type { SpeechActivity } from './speech.js'
+import type { SpeechActivity, Playback } from './speech.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { nexusVoice: VoiceController }
@@ -20,9 +20,10 @@ export type VoiceFrame =
   | { type: 'activity'; state: SpeechActivity; code?: string }
 /**
  * Client-to-Host items: captured microphone audio (base64 PCM16, 16 kHz mono), and the answer to
- * each flush or hangup: how many samples of the audio received since the previous flush were played.
+ * Realtime flush/hangup reports samples since the previous flush. Cascade reports cumulative
+ * samples per reply, including the locally stopped playback when recording starts.
  */
-export type VoiceUplink = { type: 'ready' | 'start-recording' | 'end-recording' } | { type: 'audio'; audio: string } | { type: 'played' | 'hangup'; samples: number }
+export type VoiceUplink = { type: 'ready' | 'end-recording' } | { type: 'start-recording'; playback?: Playback[] } | { type: 'audio'; audio: string } | { type: 'played'; samples: number; replyId?: string } | { type: 'hangup'; samples: number; playback?: Playback[] }
 
 /** Unbounded single-consumer frame queue ended by the call. */
 class Frames implements AsyncIterable<VoiceFrame> {
@@ -104,10 +105,10 @@ export class VoiceController extends TypertRemoteService {
         for (let next = await incoming.next(); !next.done; next = await incoming.next()) {
           const item = next.value
           if (item.type === 'audio' && typeof item.audio === 'string') live.append(item.audio)
-          else if (item.type === 'start-recording') live.startRecording?.()
+          else if (item.type === 'start-recording') live.startRecording?.(item.playback)
           else if (item.type === 'end-recording') live.endRecording?.()
-          else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples)
-          else if (item.type === 'hangup') { live.hangup(item.samples); frames.end(true); return }
+          else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples, item.replyId)
+          else if (item.type === 'hangup') { live.hangup(item.samples, item.playback); frames.end(true); return }
         }
       })()
       pump.catch(() => frames.end())

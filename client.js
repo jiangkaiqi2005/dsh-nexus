@@ -8,8 +8,12 @@ window.__ModuleLoader__.load({
     // Client face of the Host call endpoint; typert.js holds the matching Host
     // descriptor with the same validation, so both ends accept exactly the same items.
     const isAudio = value => typeof value === 'string' && value.length <= 1 << 20 && /^[A-Za-z0-9+/]*={0,2}$/.test(value)
+    const isPlayback = value => Array.isArray(value) && value.every(item => item && Object.keys(item).length === 2 && typeof item.replyId === 'string' && Number.isSafeInteger(item.samples) && item.samples >= 0)
     const uplink = value => {
       if (['ready', 'start-recording', 'end-recording'].includes(value?.type) && Object.keys(value).length === 1) return value
+      if (value?.type === 'start-recording' && Object.keys(value).length === 2 && isPlayback(value.playback)) return value
+      if (value?.type === 'played' && Object.keys(value).length === 3 && typeof value.replyId === 'string' && Number.isSafeInteger(value.samples) && value.samples >= 0) return value
+      if (value?.type === 'hangup' && Object.keys(value).length === 3 && isPlayback(value.playback) && Number.isSafeInteger(value.samples) && value.samples >= 0) return value
       if (value && typeof value === 'object' && Object.keys(value).length === 2 && ((value.type === 'audio' && isAudio(value.audio)) || (['played', 'hangup'].includes(value.type) && Number.isSafeInteger(value.samples) && value.samples >= 0))) return value
       throw new TypeError('nexusVoice/call uplink must be ready/start-recording/end-recording, audio with base64, or played/hangup with samples')
     }
@@ -129,9 +133,18 @@ window.__ModuleLoader__.load({
         // Scheduled playback since the last flush; finished nodes are counted as played and dropped.
         let nodes = []
         let finished = 0
+        const progress = new Map(), blocked = new Set()
+        let deferred = [], deferring = false
+        const playedReply = (replyId, samples) => {
+          if (replyId === undefined) return
+          progress.set(replyId, (progress.get(replyId) ?? 0) + samples)
+          handle.send({ type: 'played', replyId, samples: progress.get(replyId) })
+        }
+        const playbackReport = () => [...progress].map(([replyId, samples]) => ({ replyId, samples }))
         let pendingActivity = 'idle'
-        const retire = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
+        const retire = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) { const item = nodes.shift(); finished += item.samples; playedReply(item.replyId, item.samples) } }
         const flush = replyId => {
+          deferred = replyId === undefined ? [] : deferred.filter(frame => frame.replyId !== replyId)
           const now = playback.currentTime
           retire(now)
           let played = finished
@@ -141,6 +154,7 @@ window.__ModuleLoader__.load({
             if (replyId !== undefined && item.replyId !== replyId) { retained.push(item); continue }
             const heard = Math.min(samples, Math.max(0, Math.round((now - start) * 24000)))
             played += heard
+            playedReply(item.replyId, heard)
             this.discarded += samples - heard
             node.stop()
           }
@@ -149,11 +163,38 @@ window.__ModuleLoader__.load({
           next = nodes.length ? nodes.at(-1).start + nodes.at(-1).samples / 24000 : now
           return played
         }
-        attempt.hangup = () => { const samples = flush(); if (this.state === 'live') handle.send({ type: 'hangup', samples }); else handle.dispose() }
+        const playAudio = frame => {
+          if (frame.replyId !== undefined) {
+            if (blocked.has(frame.replyId)) return
+            if (!progress.has(frame.replyId)) progress.set(frame.replyId, 0)
+          }
+          const samples = pcm(frame.audio)
+          const buffer = playback.createBuffer(1, samples.length, 24000)
+          const channel = buffer.getChannelData(0)
+          for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 0x8000
+          const node = playback.createBufferSource()
+          node.buffer = buffer
+          node.connect(playback.destination)
+          node.onended = () => { if (!current()) return; retire(playback.currentTime); if (!nodes.length && pendingActivity !== 'reading' && this.activity === 'reading') { this.activity = pendingActivity; this.set(this.state, this.code) } }
+          retire(playback.currentTime)
+          next = Math.max(next, playback.currentTime)
+          node.start(next)
+          nodes.push({ node, start: next, samples: samples.length, replyId: frame.replyId })
+          next += buffer.duration
+          this.played += samples.length
+          this.set(this.state, this.code)
+        }
+        attempt.hangup = () => { const samples = flush(); if (this.state === 'live') handle.send({ type: 'hangup', samples, ...(this.mode === 'cascade' ? { playback: playbackReport() } : {}) }); else handle.dispose() }
         attempt.record = () => {
           if (!current() || this.state !== 'live' || this.mode !== 'cascade' || this.activity === 'recognizing') return
           this.recording = !this.recording
-          handle.send({ type: this.recording ? 'start-recording' : 'end-recording' })
+          if (this.recording) {
+            deferring = true
+            flush() // Stop locally, before a control frame can make a round trip to Host.
+            for (const replyId of progress.keys()) blocked.add(replyId)
+            handle.send({ type: 'start-recording', playback: playbackReport() })
+            progress.clear()
+          } else handle.send({ type: 'end-recording' })
           this.activity = this.recording ? 'recording' : 'recognizing'
           this.set(this.state, this.code)
         }
@@ -168,33 +209,23 @@ window.__ModuleLoader__.load({
             else if (frame.type === 'state' && frame.state === 'failed') return end('failed', frame.code)
             else if (frame.type === 'activity') {
               pendingActivity = frame.state
-              this.recording = frame.state === 'recording'
+              if (frame.state === 'recording' && this.activity !== 'recognizing') this.recording = true
+              else if (['recognizing', 'unheard'].includes(frame.state)) { this.recording = false; deferring = false }
               retire(playback.currentTime)
-              this.activity = nodes.length && !['failed', 'recording', 'recognizing', 'unheard'].includes(frame.state) ? 'reading' : frame.state
+              this.activity = deferring ? this.recording ? 'recording' : 'recognizing' : nodes.length && !['failed', 'recording', 'recognizing', 'unheard'].includes(frame.state) ? 'reading' : frame.state
               this.activityCode = frame.code
               this.set(this.state, this.code)
+              if (!this.recording && ['recognizing', 'unheard'].includes(frame.state)) for (const audio of deferred.splice(0)) playAudio(audio)
             }
             else if (frame.type === 'flush') {
+              if (frame.replyId !== undefined) blocked.add(frame.replyId)
               const played = flush(frame.replyId)
               this.flushes++
               if (frame.replyId === undefined) handle.send({ type: 'played', samples: played })
               this.set(this.state, this.code)
             } else if (frame.type === 'audio') {
-              const samples = pcm(frame.audio)
-              const buffer = playback.createBuffer(1, samples.length, 24000)
-              const channel = buffer.getChannelData(0)
-              for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 0x8000
-              const node = playback.createBufferSource()
-              node.buffer = buffer
-              node.connect(playback.destination)
-              node.onended = () => { if (!current()) return; retire(playback.currentTime); if (!nodes.length && pendingActivity !== 'reading' && this.activity === 'reading') { this.activity = pendingActivity; this.set(this.state, this.code) } }
-              retire(playback.currentTime)
-              next = Math.max(next, playback.currentTime)
-              node.start(next)
-              nodes.push({ node, start: next, samples: samples.length, replyId: frame.replyId })
-              next += buffer.duration
-              this.played += samples.length
-              this.set(this.state, this.code)
+              if (deferring && this.mode === 'cascade') { if (!blocked.has(frame.replyId)) deferred.push(frame) }
+              else playAudio(frame)
             }
           }
           end('failed', 'CALL_CLOSED')

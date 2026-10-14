@@ -839,9 +839,12 @@ test('voice call races: hanging up during the microphone request or rapidly rest
   t.after(() => host.close())
   const browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${capture.path}%noloop`] })
   t.after(() => browser.close())
+  let page
   try {
     // Controlled in page: the first real capture stream arrives 1.5 s late, like a pending permission prompt; every call-bar state is recorded.
-    const { page, bar } = await openNexus(browser, host.url, [instrument, [1500]])
+    const opened = await openNexus(browser, host.url, [instrument, [1500]])
+    page = opened.page
+    const bar = opened.bar
     const start = () => bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
     const hangup = () => bar.getByRole('button', { name: /挂断|Hang up/ }).click()
     const tracks = () => trackStates(page)
@@ -873,6 +876,14 @@ test('voice call races: hanging up during the microphone request or rapidly rest
     await until(() => model.log.closed === 2, 'second call closed')
     assert.deepEqual(await tracks(), ['ended', 'ended', 'ended'])
   } catch (error) {
+    if (page) {
+      await page.screenshot({ path: resolve(host.home, 'output/failure.png') }).catch(() => {})
+      await writeFile(resolve(host.home, 'output/failure-ui.json'), JSON.stringify({
+        client: await page.evaluate(() => ({ state: document.querySelector('[data-nexus-voice]')?.getAttribute('data-state'), states: window.__states, failures: window.__failures, tracks: window.__streams.flatMap(stream => stream.getTracks().map(track => track.readyState)) })),
+        model: { connections: model.log.connections, closed: model.log.closed }, wire: model.wire.map(({ type, connection, at }) => ({ type, connection, at })),
+      }, null, 2)).catch(() => {})
+      await writeFile(resolve(host.home, 'output/failure.yml'), await page.locator('body').ariaSnapshot()).catch(() => {})
+    }
     console.log(host.output().slice(-4000))
     throw error
   } finally {
@@ -1721,9 +1732,20 @@ for (const scenario of ['flush-pending', 'several-flushes-pending', 'played-in-t
     const release = queue => { for (const [socket, data] of queue.splice(0)) socket.send(data) }
     await controlledCall(t, 'hangup-' + scenario, model, capture, async ({ host, page, bar }) => {
       reply(1)
-      await until(async () => (await supervisorOf(host))?.status === 'idle' && await audible(page) > 0, 'first batch playing')
-      // Freeze the playback clock at a known sample boundary, without replacing the playback implementation.
-      await page.evaluate(() => { const first = window.__nodes[0]; Object.defineProperty(first.node.context, 'currentTime', { get: () => first.when + 0.2, configurable: true }) })
+      await until(() => audible(page).then(count => count > 0), 'first batch playing')
+      // Preserve real pending playback while native turn-stopping listeners finish; a one-second
+      // node can otherwise end before the supervisor becomes idle. Then fix the accounting clock.
+      const playback = await page.evaluate(async () => {
+        const first = window.__nodes[0], context = first.node.context
+        first.ended = false; first.node.addEventListener('ended', () => { first.ended = true })
+        await context.suspend()
+        const pending = { state: context.state, time: context.currentTime, end: first.when + first.duration }
+        Object.defineProperty(context, 'currentTime', { get: () => first.when + 0.2, configurable: true })
+        return pending
+      })
+      assert.equal(playback.state, 'suspended'); assert.ok(playback.time < playback.end, 'native PCM is paused before its end')
+      await until(async () => { const agent = await supervisorOf(host); return agent?.status === 'idle' && agent.ends >= 1 }, 'first batch completed with pending playback')
+      assert.equal(await page.evaluate(() => window.__nodes[0].ended), false, 'the native node did not naturally finish while waiting for idle')
       emit({ type: 'input_audio_buffer.speech_started' })
       if (pending) await until(() => down.length > 0, 'flush held before client consumption')
       else await until(async () => Number(await bar.getAttribute('data-flushes')) === 1, 'client consumed flush')

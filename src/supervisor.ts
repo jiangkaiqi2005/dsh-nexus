@@ -18,7 +18,7 @@ import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import { CascadeCall, type SpeechActivity } from './speech.js'
+import { CascadeCall, type SpeechActivity, type Playback } from './speech.js'
 import { Recording } from './recognition.js'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -42,7 +42,7 @@ export interface Config { credentialRef: string; endpoint: string; timeoutMs?: n
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
 export interface CallLink { audio(delta: string, replyId?: string): void; flush(replyId?: string): void; state(state: 'connecting' | 'live'): void; failed(code: string): void; activity?(state: SpeechActivity, code?: string): void }
 /** A live call as its Remote stream holds it; played reports the samples played before the client stopped at a flush. */
-export interface LiveCall { mode?: 'cascade' | 'realtime'; startRecording?(): void; endRecording?(): void; append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
+export interface LiveCall { mode?: 'cascade' | 'realtime'; startRecording?(playback?: Playback[]): void; endRecording?(): void; append(audio: string): void; played(samples: number, replyId?: string): void; hangup(samples: number, playback?: Playback[]): void; end(): void }
 
 /** Settle with the promise, or reject as soon as the turn is cancelled. */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -323,7 +323,7 @@ export class Supervisor implements Agent {
     this.model = undefined
     if (this.mode === 'cascade') {
       let speech: SpeechActivity = 'idle', speechCode: string | undefined
-      const activity = () => link.activity?.(recording.phase ?? speech, recording.phase ? undefined : speechCode)
+      const activity = () => { link.activity?.(recording.phase ?? speech, recording.phase ? undefined : speechCode); call.setRecording(recording.phase === 'recording') }
       const recording = this.cascadeRecording = new Recording(() => ({
         endpoint: this.config.asrEndpoint.get(), model: this.config.asrModel.get(), timeoutMs: this.config.timeoutMs ?? 30000,
         credential: async () => (await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef)))?.value,
@@ -335,10 +335,13 @@ export class Supervisor implements Agent {
       const call = this.cascadeCall = new CascadeCall(() => ({
         endpoint: this.config.ttsEndpoint.get(), model: this.config.ttsModel.get(), voice: this.config.ttsVoice.get(), timeoutMs: this.config.timeoutMs ?? 30000,
         credential: async () => (await this.ctx.credentials.resolve(credentialRef(this.config.credentialRef)))?.value,
-      }), { ...link, activity: (state, code) => { if (state === 'thinking' && recording.phase === 'unheard') recording.phase = undefined; speech = state; speechCode = code; activity() } })
+      }), { ...link, activity: (state, code) => { if (state === 'thinking' && recording.phase === 'unheard') recording.phase = undefined; speech = state; speechCode = code; activity() } }, (heard, ended, confirmed) => {
+        const text = confirmed ? `Complete sentences heard: ${heard.length ? heard.map(sentence => JSON.stringify(sentence)).join(' ') : '(none)'}. Any remaining speech was not heard.` : 'The final client playback acknowledgement is unavailable; do not assume any complete sentence was heard.'
+        this.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: `[The user ${ended ? 'ended the call during' : 'started speaking over'} your spoken reply, which stopped it. ${text}]` }], source: { kind: 'nexus-voice', form: 'notice', summary: confirmed ? 'interrupted playback' : 'unconfirmed playback after disconnect' } }), { surfaceOp: 'append' })
+      })
       const end = () => { signal.removeEventListener('abort', end); recording.end(); call.end(); if (this.cascadeCall === call) { this.cascadeCall = undefined; this.cascadeRecording = undefined } }
       signal.addEventListener('abort', end, { once: true })
-      return { mode: 'cascade', startRecording: () => recording.start(), endRecording: () => recording.finish(), append: audio => recording.append(audio), played() {}, hangup: end, end }
+      return { mode: 'cascade', startRecording: playback => { if (recording.start()) call.interrupt(playback ?? []) }, endRecording: () => recording.finish(), append: audio => recording.append(audio), played: (samples, replyId) => { if (replyId) call.played([{ replyId, samples }]) }, hangup: (_samples, playback) => { call.interrupt(playback ?? [], true); end() }, end }
     }
     const call: Call = {
       abort: new AbortController(),

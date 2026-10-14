@@ -14,9 +14,10 @@ export class Recording {
   phase?: InputActivity
   constructor(private options: () => RecognitionOptions, private activity: () => void, private deliver: (text: string) => void) {}
   start() {
-    if (this.ended || this.chunks || this.request) return
+    if (this.ended || this.chunks || this.request) return false
     this.chunks = []; this.bytes = 0; this.phase = 'recording'; this.activity()
     this.timer = setTimeout(() => this.finish(), 60000)
+    return true
   }
   append(audio: string) {
     if (!this.chunks) return

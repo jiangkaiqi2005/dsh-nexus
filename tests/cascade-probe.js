@@ -12,7 +12,7 @@ const exists = path => access(path).then(() => true, () => false)
 export function apply(ctx, config) {
   const report = { requests: [], streams: [], summaries: [] }
   const flag = name => resolve(config.dir, name)
-  if (config.scenario === 'spoken') ctx.tools.register(defineTool({ name: 'fixture_spoken_lookup', description: 'Controlled external lookup held while the user hangs up.', parameters: { hold: { type: 'boolean', required: true } }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async (args, exec) => {
+  if (['spoken', 'tap'].includes(config.scenario)) ctx.tools.register(defineTool({ name: 'fixture_spoken_lookup', description: 'Controlled external lookup held while the user speaks or hangs up.', parameters: { hold: { type: 'boolean', required: true } }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async (args, exec) => {
     if (!args.hold) return 'QUEUE-LOOKUP-COMPLETED'
     await writeFile(flag('tool-started'), '')
     for (const deadline = Date.now() + 20000; !(await exists(flag('release-tool'))); ) { exec.signal.throwIfAborted(); if (Date.now() > deadline) throw new Error('tool gate timeout'); await sleep(25) }
@@ -32,7 +32,7 @@ export function apply(ctx, config) {
       const last = options.messages.findLast(message => message.role === 'tool' || message.role === 'user' && message.source?.kind !== 'nexus-runtime')
       const words = textOf(last)
       let tool
-      if (config.scenario === 'spoken' && ['SLOW-TOOL', 'QUEUE-SPEECH'].includes(words)) tool = { name: 'fixture_spoken_lookup', arguments: { hold: words === 'SLOW-TOOL' } }
+      if (['spoken', 'tap'].includes(config.scenario) && ['SLOW-TOOL', 'QUEUE-SPEECH', 'BARGE-TOOL'].includes(words)) tool = { name: 'fixture_spoken_lookup', arguments: { hold: words !== 'QUEUE-SPEECH' } }
       if (config.scenario === 'spoken' && ['DISPATCH-SPEECH', 'HANGUP-WORK'].includes(words)) tool = { name: 'nexus_send_session', arguments: { sessionId: 'cascade-worker', text: words === 'HANGUP-WORK' ? 'HOLD-WORK' : 'CASCADE-WORK' } }
       if (config.scenario === 'tools' && (last.role === 'tool' || words === 'DISPATCH')) {
         const count = options.messages.filter(message => message.role === 'tool').length
@@ -41,7 +41,7 @@ export function apply(ctx, config) {
         if (count === 2) tool = { name: 'nexus_send_session', arguments: { sessionId: 'cascade-worker', text: 'CASCADE-WORK' } }
       }
       if (tool) {
-        if (tool.name === 'fixture_spoken_lookup') { yield { type: 'block-start', index: 1, blockType: 'text' }; yield { type: 'text-delta', index: 1, text: words === 'QUEUE-SPEECH' ? 'QUEUE-FIRST。' : '正在查询。' }; yield { type: 'block-end', index: 1, block: { type: 'text', text: words === 'QUEUE-SPEECH' ? 'QUEUE-FIRST。' : '正在查询。' } } }
+        if (tool.name === 'fixture_spoken_lookup') { const text = words === 'BARGE-TOOL' ? '第一句。Second sentence!' : words === 'QUEUE-SPEECH' ? 'QUEUE-FIRST。' : '正在查询。'; yield { type: 'block-start', index: 1, blockType: 'text' }; yield { type: 'text-delta', index: 1, text }; yield { type: 'block-end', index: 1, block: { type: 'text', text } } }
         const block = { type: 'tool-call', id: `cascade-${crypto.randomUUID()}`, name: tool.name, arguments: JSON.stringify(tool.arguments) }
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'block-end', index: 0, block }
@@ -50,7 +50,7 @@ export function apply(ctx, config) {
         yield { type: 'finish', reason: { kind: 'tool-calls' }, replayState: { response: { fixture: 'native' }, blocks: [{ tool: tool.name }] } }
         return
       }
-      const answer = words === 'SENTENCES' ? '第一句。Second sentence!Third?Fourth.\n第五行\n尾句' : words === 'FAIL-SPEECH' ? 'FAIL。文字仍然完整。' : last.source?.kind === 'nexus-work-result' ? 'WORK-RESULT-RECEIVED' : words.includes('STEER-NEW') ? 'STEER-APPLIED' : 'CASCADE-REPLY'
+      const answer = config.scenario === 'tap' && words === 'LOOKUP-COMPLETED' ? '迟到第一句。迟到第二句。' : words === 'SENTENCES' ? '第一句。Second sentence!Third?Fourth.\n第五行\n尾句' : words === 'FAIL-SPEECH' ? 'FAIL。文字仍然完整。' : last.source?.kind === 'nexus-work-result' ? 'WORK-RESULT-RECEIVED' : words.includes('STEER-NEW') ? 'STEER-APPLIED' : 'CASCADE-REPLY'
       yield { type: 'block-start', index: 0, blockType: 'reasoning' }
       yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'fixture reasoning' } }
       yield { type: 'block-start', index: 1, blockType: 'text' }
