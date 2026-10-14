@@ -2,7 +2,7 @@
   "name": "dsh-nexus",
   "version": "0.2.0",
   "private": true,
-  "description": "Nexus Realtime supervisor for DeepSeek Harness",
+  "description": "Nexus voice supervisor with cascade and Realtime modes for DeepSeek Harness",
   "type": "module",
   "exports": { ".": "./dist/index.js", "./client": "./client.js", "./typert": "./typert.js", "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg" },
   "files": ["dist", "client.js", "typert.js", "cordis.patch.yml", "locale", "icon.svg"],
