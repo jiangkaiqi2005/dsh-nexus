@@ -1,6 +1,6 @@
 # Nexus 级联语音模式 Spec
 
-状态：设计已经由用户在 2026-10-14 的拷问中确认，尚未实现。依据：[领域词汇](../../CONTEXT.md)、[ADR 0005](../adr/0005-cascade-voice-mode.md)，以及仍然有效的 ADR 0001–0004。发布状态：本地文档。本项目尚未配置 Issue tracker，配置后再按 `to-spec` 发布并打上 `ready-for-agent`。
+状态：设计已经由用户在 2026-10-14 的拷问中确认；票 01–04 已完成实施及标准、规格双轴评审，票 05/06 按用户指令延后、尚未开始。本轮停在票 04，整体 Spec 尚有后续范围。依据：[领域词汇](../../CONTEXT.md)、[ADR 0005](../adr/0005-cascade-voice-mode.md)，以及仍然有效的 ADR 0001–0004。发布状态：本地文档，未推送或发布。本项目尚未配置 Issue tracker；当前进度与证据见 [tickets](tickets.md) 和 [01–04 实施报告](verification/implementation-report-01-04.md)。
 
 ## 问题陈述
 
