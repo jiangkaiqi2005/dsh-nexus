@@ -6,6 +6,7 @@ import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-strea
 import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { NativeInbox } from './inbox.js'
+import { requestRealtime } from './model-request.js'
 import { INSTRUCTIONS, MODEL, RealtimeConnection, RealtimeFailure, VOICE_INSTRUCTIONS, type Cut, type Response, type ServerTurn } from './realtime.js'
 import { MANUAL_FAILURES, RETAIN_SHARE, USEFUL_SHARE, compactableRange, summaryTarget, withSummaryModel } from './compaction.js'
 import { registerWorkSessions } from './work-sessions.js'
@@ -455,9 +456,7 @@ export class Supervisor implements Agent {
     const begin = (time?: number) => { if (!begun) { begun = true; push({ type: 'block-start', index: 0, blockType: 'text' }, time) } }
     try {
       const onText = (delta: string, time?: number) => { begin(time); text += delta; push({ type: 'text-delta', index: 0, text: delta }, time) }
-      let response: Response
-      if (voice) { voice.server.listen(onText); response = await abortable(voice.server.response, signal) }
-      else response = await abortable(connection.request(this.surface(), onText, assembly.tools, instructions), signal)
+      const response: Response = await abortable(requestRealtime(connection, { surface: this.surface(), onText, tools: assembly.tools, instructions, signal }, voice?.server), signal)
       text = response.text
       /** A response that leaves no message: its reported usage stays as a content-free attempt, as native settlements do. */
       const settleEmpty = () => {
