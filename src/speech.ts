@@ -5,7 +5,7 @@ export const TTS_ENDPOINT = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
 export const TTS_MODEL = 'qwen-audio-3.1-tts-flash'
 export const TTS_VOICE = 'longanhuan_v3.1'
 export type SpeechActivity = 'thinking' | 'reading' | 'idle' | 'failed'
-export interface SpeechLink { audio(audio: string): void; flush(): void; activity?(state: SpeechActivity, code?: string): void }
+export interface SpeechLink { audio(audio: string, replyId?: string): void; flush(replyId?: string): void; activity?(state: SpeechActivity, code?: string): void }
 interface SpeechOptions { endpoint: string; model: string; voice: string; timeoutMs: number; credential(): Promise<string | undefined> }
 
 /** One reply's incremental text and short-lived DashScope inference task. Model work never waits for it. */
@@ -52,7 +52,7 @@ class SpokenReply {
     if (this.stopped) return
     if (this.socket?.readyState === WebSocket.OPEN) this.send('finish-task', { input: { directive: 'cancel' } })
     this.stop()
-    this.link.flush()
+    this.link.flush(this.taskId)
     this.link.activity?.('idle')
   }
   private stop() {
@@ -68,7 +68,7 @@ class SpokenReply {
     if (this.stopped) return
     if (this.socket?.readyState === WebSocket.OPEN) this.send('finish-task', { input: { directive: 'cancel' } })
     this.stop()
-    this.link.flush()
+    this.link.flush(this.taskId)
     this.link.activity?.('failed', code)
   }
   private timeout() {
@@ -112,7 +112,7 @@ class SpokenReply {
         const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)
         if (bytes.length % 2) return this.fail('TTS_PROTOCOL_ERROR')
         this.link.activity?.('reading')
-        for (let offset = 0; offset < bytes.length; offset += 32768) this.link.audio(bytes.subarray(offset, offset + 32768).toString('base64'))
+        for (let offset = 0; offset < bytes.length; offset += 32768) this.link.audio(bytes.subarray(offset, offset + 32768).toString('base64'), this.taskId)
         return
       }
       let event
@@ -139,7 +139,7 @@ export class CascadeCall {
     let generating = true
     const complete = () => { if (generating) { generating = false; this.generating-- } }
     const reply = new SpokenReply(this.tail, this.options(), {
-      audio: audio => this.link.audio(audio), flush: () => this.link.flush(),
+      audio: (audio, replyId) => this.link.audio(audio, replyId), flush: replyId => this.link.flush(replyId),
       activity: (state, code) => this.link.activity?.(state === 'idle' && this.generating ? 'thinking' : state, code),
     })
     this.replies.add(reply)

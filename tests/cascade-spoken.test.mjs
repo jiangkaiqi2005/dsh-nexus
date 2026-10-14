@@ -10,7 +10,7 @@ const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const until = async (predicate, label, ms = 15000) => { for (const deadline = Date.now() + ms; !(await predicate()); ) { if (Date.now() > deadline) throw new Error(`waiting for ${label}`); await sleep(50) } }
 const textOf = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('')
 const tone = Buffer.alloc(48000); for (let i = 0; i < 24000; i++) tone.writeInt16LE(Math.round(Math.sin(i / 10) * 8000), i * 2)
-async function spokenHost(endpoint, run, { real = false } = {}) {
+async function spokenHost(endpoint, run, { real = false, observePlayback = false } = {}) {
   const dir = resolve('.scratch/cascade-voice', `03-spoken-${Date.now()}`)
   const profile = resolve(dir, 'profiles/spoken'), probe = resolve(dir, 'probe')
   for (const path of [probe, resolve(profile, 'node_modules')]) await mkdir(path, { recursive: true })
@@ -28,6 +28,17 @@ async function spokenHost(endpoint, run, { real = false } = {}) {
     await until(() => readFile(resolve(dir, 'ui-ready')).then(() => true, () => false), 'registered default model')
     browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
     page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1360, height: 900 } }); page.setDefaultTimeout(15000)
+    if (observePlayback) await page.addInitScript(() => {
+      window.__spokenPlayback = []
+      const start = AudioBufferSourceNode.prototype.start, stop = AudioBufferSourceNode.prototype.stop
+      AudioBufferSourceNode.prototype.start = function (when = 0, ...rest) {
+        const marker = Math.round(this.buffer.getChannelData(0)[0] * 32768)
+        const entry = { node: this, marker, when: Math.max(when, this.context.currentTime), duration: this.buffer.duration, ended: false, stopped: false }
+        window.__spokenPlayback.push(entry); this.addEventListener('ended', () => { entry.ended = true })
+        return start.call(this, when, ...rest)
+      }
+      AudioBufferSourceNode.prototype.stop = function (...args) { const entry = window.__spokenPlayback.find(item => item.node === this); if (entry) entry.stopped = true; return stop.apply(this, args) }
+    })
     const downlink = []; page.on('websocket', socket => socket.on('framereceived', frame => downlink.push(String(frame.payload))))
     await page.goto(url)
     await until(async () => { for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() } return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible() }, 'native UI')
@@ -218,5 +229,53 @@ test('queued spoken replies preserve order while native tool and next model step
     })
     assert.ok(report.persisted.some(event => event.type === 'tool/result' && textOf(event.data.message) === 'QUEUE-LOOKUP-COMPLETED'))
     assert.deepEqual(report.persisted.filter(event => event.type === 'assistant/message').map(event => textOf(event.data.message)), ['QUEUE-FIRST。', 'QUEUED SECOND.'])
+  } finally { for (const socket of server.clients) socket.terminate(); await new Promise(accept => server.close(accept)) }
+})
+
+test('a later TTS failure stops only its own PCM while an earlier successful reply finishes playback and the next reply recovers', { timeout: 90000 }, async () => {
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await new Promise(accept => server.once('listening', accept))
+  const tasks = []
+  const labelledTone = (seconds, marker) => { const bytes = Buffer.alloc(seconds * 48000); for (let i = 0; i < bytes.length / 2; i++) bytes.writeInt16LE(marker + Math.round(Math.sin(i / 10) * 100), i * 2); return bytes }
+  server.on('connection', socket => {
+    let task; const send = (event, payload = {}) => socket.send(JSON.stringify({ header: { event, task_id: task.id }, payload }))
+    socket.on('message', bytes => {
+      const event = JSON.parse(bytes.toString())
+      if (event.header.action === 'run-task') { task = { id: event.header.task_id, order: tasks.length, failed: false }; tasks.push(task); send('task-started') }
+      if (event.header.action === 'continue-task') {
+        if (task.failed) return
+        send('result-generated', { output: { type: 'sentence-synthesis', sentence: { index: 0 } } })
+        socket.send(labelledTone(task.order === 0 ? 6 : task.order === 1 ? 2 : 1, task.order === 0 ? 1000 : task.order === 1 ? 5000 : 9000))
+        if (task.order === 1) { task.failed = true; send('task-failed', { error_code: 'fixture', message: 'second reply failed' }) }
+      }
+      if (event.header.action === 'finish-task') send('task-finished')
+    })
+  })
+  const playback = page => page.evaluate(() => window.__spokenPlayback.map(item => ({ marker: item.marker, ended: item.ended, stopped: item.stopped, audible: !item.stopped && item.node.context.currentTime >= item.when && item.node.context.currentTime < item.when + item.duration })))
+  const first = nodes => nodes.filter(node => node.marker < 2000)
+  const failed = nodes => nodes.filter(node => node.marker > 4000 && node.marker < 6000)
+  const recovery = nodes => nodes.filter(node => node.marker > 8000)
+  try {
+    const report = await spokenHost(`ws://127.0.0.1:${server.address().port}`, async (page, dir) => {
+      await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
+      await submit(page, 'BLOCK-ONLY'); await page.getByText('TEXT ONLY.', { exact: true }).waitFor()
+      await until(async () => first(await playback(page)).some(node => node.audible), 'first reply actually playing')
+      await submit(page, 'FAIL-SPEECH'); await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor()
+      await page.getByRole('status').filter({ hasText: 'TTS_SYNTHESIS_FAILED' }).waitFor(); await connected(page)
+      const afterFailure = await playback(page)
+      assert.ok(first(afterFailure).some(node => node.audible), 'the previous successful reply remains audible')
+      assert.ok(first(afterFailure).every(node => !node.stopped), 'none of the prior reply nodes were stopped')
+      assert.ok(failed(afterFailure).length > 0 && failed(afterFailure).every(node => node.stopped), 'already delivered failed PCM alone was stopped')
+      await page.screenshot({ path: resolve(dir, 'isolated-tts-failure.png') })
+      await submit(page, 'BLOCK-ONLY')
+      await until(async () => recovery(await playback(page)).length > 0, 'fresh reply received after failure')
+      await until(async () => first(await playback(page)).every(node => node.ended), 'complete natural playback of the previous reply')
+      assert.ok(first(await playback(page)).every(node => !node.stopped), 'previous reply finished without truncation')
+      await until(async () => recovery(await playback(page)).some(node => node.audible), 'next reply plays after the retained audio')
+      assert.equal(await page.locator('[data-nexus-voice]').getAttribute('data-state'), 'live')
+      await page.getByRole('button', { name: '挂断', exact: true }).click()
+      assert.ok(recovery(await playback(page)).filter(node => !node.ended).every(node => node.stopped), 'hangup still stops all remaining playback')
+    }, { observePlayback: true })
+    assert.equal(tasks.length, 3)
+    assert.ok(report.persisted.filter(event => event.type === 'turn/end').every(event => event.data.reason.kind === 'completed'))
   } finally { for (const socket of server.clients) socket.terminate(); await new Promise(accept => server.close(accept)) }
 })

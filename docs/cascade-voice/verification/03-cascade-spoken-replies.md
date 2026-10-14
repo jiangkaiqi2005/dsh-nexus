@@ -38,7 +38,7 @@ Host 在每条有文字的回复中按中文和英文句末及换行切句，第
 
 首次全套日志 `03-full.log`：117 项，103 通过、13 跳过、1 失败，415.046 秒。此运行期间产品仍有修改，不能作为冻结版本门槛。失败项为既有 Realtime“新建工作会话”用例，发生在 `openNexus`：DOM 停留在原生空白新会话、没有 Nexus 入口或通话条；Host 主管 idle、零轮。原因未定位，不能据此判定夹具或产品问题。原用例单独重跑 `03-realtime-create-diagnosis.log` 通过，13.254 秒；没有产品改动规避该失败。最终冻结版本另行运行完整套件。
 
-## 最终检查
+## 初评版本冻结检查
 
 - `npm run typecheck`：通过，日志 `.scratch/cascade-voice/03-typecheck.log`。
 - `npm run build`：通过，日志 `.scratch/cascade-voice/03-build.log`。
@@ -49,3 +49,24 @@ Host 在每条有文字的回复中按中文和英文句末及换行切句，第
 最终完整运行从类型检查、构建、专项通过后的冻结版本开始，期间只补验证文档，没有修改产品源码或测试。没有推送、发布或修改生产配置。
 
 上述受控 Host、端点及真实浏览器证据不等同真实模型、真实音色或物理设备的语音验收。首句验证使用模型输出闸门，不把三秒作为自动化硬阈值。
+
+## 第 1 轮评审修复
+
+初评提交：`b5ff4dfe2966c1ed1dfdb0430459149a3c132e9c`；单元基线不变。标准轴 `approve`、无问题；规格轴 `changes_requested`，1 项 P2。本轮只处理该问题，没有扩展录音、插话或录音期间缓存。
+
+| 原问题 | 处置 | 核实与理由 | 代码证据 |
+| --- | --- | --- | --- |
+| 后条合成失败发送全通话 flush，会截断前条成功回复尚未播放完的 PCM，不满足只停止该条朗读。 | fixed | TTS 的 `task-finished` 只表示服务端完成，浏览器还可能积压前条 PCM。通过真实浏览器回归复现：前条六秒 PCM 正在播放，后条已经下发两秒 PCM 后失败，原实现停止了前条。 | `src/speech.ts` 的 `SpokenReply` 以自身任务 UUID 为 `replyId` 标记 audio 和定向 flush；`src/voice.ts`、`src/supervisor.ts` 及两侧 Typert 描述透传标识；`client.js` 的 flush 只停止匹配回复的播放节点并保留其他节点及播放次序。无标识的 Realtime flush 和挂断仍停止全部节点。 |
+
+回归仍在受控官方 Host、原生默认 LLM、真实 Edge 的通话流与主会话边界运行。外部 WS 分别下发三种可区分的 PCM；浏览器通过真实 `AudioBufferSourceNode` 的播放/停止/自然结束观察验收，不检查主管或合成模块的内部回调顺序。
+
+- Red：`node --test --test-name-pattern 'later TTS failure' tests/cascade-spoken.test.mjs`，日志 `.scratch/cascade-voice/03-r1-isolation-red.log`；1 项失败，6.339 秒，明确失败于“前条成功回复仍然可听”的断言。
+- Green：同一命令，日志 `.scratch/cascade-voice/03-r1-isolation-green.log`；1 项通过，12.202 秒。失败时前条仍在播放、所有前条节点没有 stop，随后全部自然 ended；失败回复已下发的 PCM 节点全部 stop；下一条正常播放；最终挂断仍停止全部剩余节点。原生三轮均 completed。
+- 目视证据：`.scratch/cascade-voice/03-spoken-1791984174048/isolated-tts-failure.png`。截图显示通话保持接通及合成失败状态；实际声音的继续/停止由上述浏览器播放节点断言提供证据。
+- `npm run typecheck`、`npm run build`：通过，日志 `.scratch/cascade-voice/03-r1-typecheck.log`、`03-r1-build.log`。
+
+- 相关文件：`node --test tests/cascade.test.mjs tests/cascade-spoken.test.mjs`，15 项，14 通过、1 默认跳过、0 失败，53.925 秒；日志 `.scratch/cascade-voice/03-r1-related.log`。
+- 最后产品与测试冻结后 `npm test`：119 项，106 通过、13 默认跳过、0 失败，371.094 秒；日志 `.scratch/cascade-voice/03-r1-final-full.log`。原有 Realtime 全量 flush、挂断和播放样本反馈用例通过。
+- `git diff --check`、客户端及 Typert JavaScript 语法检查：通过。Graph 在本轮最终源码上更新为 1,226 节点、3,562 边，忽略的测试文件继续按覆盖缺口读取，索引未提交。
+
+本轮完整门槛期间没有修改产品源码或测试，只补充本记录。所有初次日志、失败调查及先前通过记录保留。真实付费语音端点仍默认跳过，未修改生产配置、推送或发布。该 P2 已修复，没有本轮未决功能问题，等待原标准与规格两轴复审。

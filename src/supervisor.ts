@@ -39,7 +39,7 @@ declare module '@deepseek-ai/dsh-llm' {
 export interface Config { credentialRef: string; endpoint: string; timeoutMs?: number; voiceMode: Volatile<'cascade' | 'realtime'>; ttsEndpoint: Volatile<string>; ttsModel: Volatile<string>; ttsVoice: Volatile<string>; compactionBudget: Volatile<number>; summaryModel: Volatile<string>; summaryReasoningEffort: Volatile<string> }
 
 /** The client end of a call: where model audio goes, when its playback must stop, and how a failed model connection is reported. */
-export interface CallLink { audio(delta: string): void; flush(): void; state(state: 'connecting' | 'live'): void; failed(code: string): void; activity?(state: SpeechActivity, code?: string): void }
+export interface CallLink { audio(delta: string, replyId?: string): void; flush(replyId?: string): void; state(state: 'connecting' | 'live'): void; failed(code: string): void; activity?(state: SpeechActivity, code?: string): void }
 /** A live call as its Remote stream holds it; played reports the samples played before the client stopped at a flush. */
 export interface LiveCall { mode?: 'cascade' | 'realtime'; append(audio: string): void; played(samples: number): void; hangup(samples: number): void; end(): void }
 

@@ -14,8 +14,8 @@ window.__ModuleLoader__.load({
       throw new TypeError('nexusVoice/call uplink must be { type: "audio", audio: base64 } or { type: "played" | "hangup", samples }')
     }
     const frame = value => {
-      if (value?.type === 'audio' && isAudio(value.audio)) return value
-      if (value?.type === 'flush' && Object.keys(value).length === 1) return value
+      if (value?.type === 'audio' && isAudio(value.audio) && (value.replyId === undefined || typeof value.replyId === 'string')) return value
+      if (value?.type === 'flush' && (value.replyId === undefined ? Object.keys(value).length === 1 : typeof value.replyId === 'string' && Object.keys(value).length === 2)) return value
       if (value?.type === 'activity' && ['thinking', 'reading', 'idle', 'failed'].includes(value.state) && (value.code === undefined || typeof value.code === 'string')) return value
       if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
       if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
@@ -130,19 +130,22 @@ window.__ModuleLoader__.load({
         let finished = 0
         let pendingActivity = 'idle'
         const retire = now => { while (nodes.length && nodes[0].start + nodes[0].samples / 24000 <= now) finished += nodes.shift().samples }
-        const flush = () => {
+        const flush = replyId => {
           const now = playback.currentTime
           retire(now)
           let played = finished
-          for (const { node, start, samples } of nodes) {
+          const retained = []
+          for (const item of nodes) {
+            const { node, start, samples } = item
+            if (replyId !== undefined && item.replyId !== replyId) { retained.push(item); continue }
             const heard = Math.min(samples, Math.max(0, Math.round((now - start) * 24000)))
             played += heard
             this.discarded += samples - heard
             node.stop()
           }
-          nodes = []
-          finished = 0
-          next = now
+          nodes = retained
+          finished = replyId === undefined ? 0 : played
+          next = nodes.length ? nodes.at(-1).start + nodes.at(-1).samples / 24000 : now
           return played
         }
         attempt.hangup = () => { const samples = flush(); if (this.state === 'live') handle.send({ type: 'hangup', samples }); else handle.dispose() }
@@ -163,9 +166,9 @@ window.__ModuleLoader__.load({
               this.set(this.state, this.code)
             }
             else if (frame.type === 'flush') {
-              const played = flush()
+              const played = flush(frame.replyId)
               this.flushes++
-              handle.send({ type: 'played', samples: played })
+              if (frame.replyId === undefined) handle.send({ type: 'played', samples: played })
               this.set(this.state, this.code)
             } else if (frame.type === 'audio') {
               const samples = pcm(frame.audio)
@@ -179,7 +182,7 @@ window.__ModuleLoader__.load({
               retire(playback.currentTime)
               next = Math.max(next, playback.currentTime)
               node.start(next)
-              nodes.push({ node, start: next, samples: samples.length })
+              nodes.push({ node, start: next, samples: samples.length, replyId: frame.replyId })
               next += buffer.duration
               this.played += samples.length
               this.set(this.state, this.code)

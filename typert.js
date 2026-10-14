@@ -17,8 +17,8 @@ const uplink = () => ({
 /** Host-to-client item: actual call state, model audio base64 PCM16 24 kHz mono, or a flush of queued playback. */
 const frame = () => ({
   parse(value) {
-    if (value?.type === 'audio' && isAudio(value.audio)) return value
-    if (value?.type === 'flush' && Object.keys(value).length === 1) return value
+    if (value?.type === 'audio' && isAudio(value.audio) && (value.replyId === undefined || typeof value.replyId === 'string')) return value
+    if (value?.type === 'flush' && (value.replyId === undefined ? Object.keys(value).length === 1 : typeof value.replyId === 'string' && Object.keys(value).length === 2)) return value
     if (value?.type === 'activity' && ['thinking', 'reading', 'idle', 'failed'].includes(value.state) && (value.code === undefined || typeof value.code === 'string')) return value
     if (value?.type === 'state' && ['ready', 'connecting', 'live'].includes(value.state)) return value
     if (value?.type === 'state' && value.state === 'failed' && typeof value.code === 'string') return value
