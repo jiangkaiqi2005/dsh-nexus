@@ -2,6 +2,8 @@
 
 状态：设计已经由用户在 2026-10-14 的拷问中确认；用户已授权继续实施全部剩余票据，此前停在票 04 的安排已撤销。票 01–05 已完成实施及标准、规格双轴闭环；票 06 的生命周期、独立打包安装与受控完整场景已完成实施、自动自验及双轴初评，无未决评审问题，仅待用户本人实机反馈，整票及整体工作流尚未全部完成。本次收束文档继续交原两轴复核。依据：[领域词汇](../../CONTEXT.md)、[ADR 0005](../adr/0005-cascade-voice-mode.md)，以及仍然有效的 ADR 0001–0004。发布状态：本地文档与独立包，未推送或发布。本项目尚未配置 Issue tracker；当前进度与证据见 [tickets](tickets.md)、[01–06 实施报告](verification/implementation-report-01-06.md) 和 [票 06 验证记录](verification/06-cascade-lifecycle-and-install.md)；[此前 01–04 阶段报告](verification/implementation-report-01-04.md) 保留历史阶段结论。
 
+后续的前端打磨（只改前端，不改 Host 和协议）另见 [前端打磨 Spec](../ui-polish/spec.md)。
+
 ## 问题陈述
 
 用户用 Nexus 语音管理工作会话时，现在只能用 Realtime 模式（`qwen3.8-omni-flash-realtime`）。从实际账单看，主会话约 98% 的花费来自上下文：模型每次回复都会把整段上下文重新计一次输入费。Realtime 模型从未命中过缓存。挂断以后的文字轮更贵，因为每一轮都要新建连接、重放全部上下文。音频的输入和输出加起来只占约 1%。
