@@ -1,3 +1,4 @@
+import { failureTooltip } from './voice-ui.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, copyFile, symlink, writeFile, readFile } from 'node:fs/promises'
@@ -12,7 +13,7 @@ const until = async (predicate, label, ms = 20000) => { for (const deadline = Da
 const textOf = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('')
 const submit = async (page, words) => { const editor = page.getByRole('textbox').last(); await editor.fill(words); await editor.press('Enter') }
 const state = page => page.locator('[data-nexus-voice]').getAttribute('data-state')
-const start = page => page.getByRole('button', { name: '接通语音', exact: true }).click()
+const start = page => page.getByRole('button', { name: /^(接通语音|重试)$/ }).click()
 const hangup = page => page.getByRole('button', { name: '挂断', exact: true }).click()
 const tracks = page => page.evaluate(() => window.__streams.flatMap(stream => stream.getTracks().map(track => track.readyState)))
 
@@ -120,7 +121,7 @@ for (const ending of ['close', 'disconnect']) test(`cascade sole media owner rej
     await start(page); await until(async () => await state(page) === 'live', 'cascade live')
     await submit(page, 'HANGUP-WORK'); await until(() => readFile(resolve(dir, 'worker-held')).then(() => true, () => false), 'native worker running')
     const second = await open(browser, url); await start(second); await until(async () => await state(second) === 'failed', 'second page rejected')
-    assert.match(await second.locator('[data-nexus-voice]').getByRole('status').textContent(), /CALL_BUSY/); assert.deepEqual(await tracks(second), []); assert.equal(await second.evaluate(() => window.__nodes.length), 0)
+    assert.equal(await second.locator('[data-nexus-voice]').getByRole('status').textContent(), '另一个窗口正在通话'); await failureTooltip(second, 'CALL_BUSY'); assert.deepEqual(await tracks(second), []); assert.equal(await second.evaluate(() => window.__nodes.length), 0)
     if (ending === 'close') await page.context().close()
     else { await page.context().setOffline(true); disconnect(); await until(async () => (await tracks(page)).every(state => state === 'ended'), 'disconnected capture released') }
     await sleep(200); const before = tasks.length
@@ -165,9 +166,9 @@ test('cascade unavailable speech services expose unheard or reply synthesis fail
   const report = await lifecycle(async ({ page, tasks, responses }) => {
     await start(page); await until(async () => await state(page) === 'live', 'media prepared')
     responses.push({ status: 503, message: 'unavailable' })
-    await page.getByRole('button', { name: '开始录音', exact: true }).click(); await sleep(350); await page.getByRole('button', { name: '结束录音', exact: true }).click()
+    await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await sleep(350); await page.getByRole('button', { name: '结束录音', exact: true }).click()
     await page.getByRole('status').filter({ hasText: '没听清' }).waitFor(); assert.equal(await state(page), 'live')
-    await submit(page, 'FAIL-SPEECH'); await page.getByRole('status').filter({ hasText: '语音合成失败' }).waitFor()
+    await submit(page, 'FAIL-SPEECH'); await page.getByRole('status').filter({ hasText: '朗读失败，文字已保留' }).waitFor()
     await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor(); assert.equal(await state(page), 'live')
     await submit(page, 'RECOVER-SPEECH'); await until(() => tasks.length === 2, 'next reply synthesis recovers'); await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) > 0, 'next reply PCM')
     await hangup(page)

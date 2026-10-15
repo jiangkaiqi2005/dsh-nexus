@@ -22,12 +22,15 @@ async function tapHost(endpoint, asrEndpoint, run, { observeCapture = false, pre
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-spoken-probe'] } } }))
   await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_SPOKEN_KEY\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ${endpoint}\n    asrEndpoint: ${asrEndpoint}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
   let output = '', browser, page
+  const clientErrors = []
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'spoken', '--port', '0', '--no-open'], { cwd: resolve('.'), env: { ...process.env, DSH_HOME: dir, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_SPOKEN_KEY: 'host-only-fixture-key', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => { child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data }); return {} })
   try {
     let url; await until(() => { url = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]; return url }, 'Host URL')
     await until(() => readFile(resolve(dir, 'ui-ready')).then(() => true, () => false), 'registered default model')
     browser = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
     page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1360, height: 900 } }); page.setDefaultTimeout(15000)
+    page.on('pageerror', error => clientErrors.push(String(error)))
+    page.on('console', message => { if (message.type() === 'error') clientErrors.push(message.text()) })
     await page.addInitScript(() => { window.__pcmMarkers = []; const start = AudioBufferSourceNode.prototype.start; AudioBufferSourceNode.prototype.start = function(...args) { window.__pcmMarkers.push(Math.round(this.buffer.getChannelData(0)[0] * 32768)); return start.apply(this, args) } })
     if (observeCapture) await page.addInitScript(() => {
       const NativeContext = window.AudioContext
@@ -45,11 +48,11 @@ async function tapHost(endpoint, asrEndpoint, run, { observeCapture = false, pre
     assert.equal(report.error, undefined, report.stack)
     console.log('tap evidence:', dir)
     return report
-  } catch (error) { if (page) { await page.screenshot({ path: resolve(dir, 'failure.png') }); await writeFile(resolve(dir, 'failure.yml'), await page.locator('body').ariaSnapshot()) } throw error }
+  } catch (error) { if (page) { await page.screenshot({ path: resolve(dir, 'failure.png') }); await writeFile(resolve(dir, 'failure.yml'), await page.locator('body').ariaSnapshot()); await writeFile(resolve(dir, 'client-errors.json'), JSON.stringify(clientErrors, null, 2)) } throw error }
   finally { await browser?.close(); await host.close(); await writeFile(resolve(dir, 'host.log'), output.replace(/\?token=\S+/g, '?token=[redacted]')) }
 }
 const submit = async (page, words) => { const editor = page.getByRole('textbox').last(); await editor.fill(words); await editor.press('Enter') }
-const connected = page => page.getByRole('status').filter({ hasText: '已接通 Nexus' }).waitFor()
+const connected = page => page.getByRole('status').filter({ hasText: /已接通 · 点按说话|通话中 · 自动听写/ }).waitFor()
 
 async function endpoints(run, { holdFinish = false } = {}) {
   const requests = [], tasks = [], responses = []
@@ -95,7 +98,7 @@ test('tap stops locally before Host acknowledgement and records only complete he
     await submit(page, 'SENTENCES'); await until(() => tasks[0]?.finished, 'finished provider task')
     await until(async () => page.evaluate(() => window.__playback.length >= 4), 'queued multi-frame PCM')
     await sleep(700); blocked = true
-    await page.getByRole('button', { name: '开始录音', exact: true }).click()
+    await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click()
     assert.ok(await page.evaluate(() => window.__playback.every(item => item.stopped || item.node.context.currentTime >= item.when + item.node.buffer.duration)), 'all pending playback stops without Host roundtrip')
     await until(() => held.length, 'held start recording uplink')
     blocked = false; for (const release of held.splice(0)) release()
@@ -124,7 +127,7 @@ test('barge-in cancels only synthesis, keeps an executing native tool and delive
     await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
     await submit(page, 'BARGE-TOOL'); await until(() => readFile(resolve(dir, 'tool-started')).then(() => true, () => false), 'native tool running')
     await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) >= 84000, 'long reply queued')
-    await sleep(700); await page.getByRole('button', { name: '开始录音', exact: true }).click()
+    await sleep(700); await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click()
     await until(() => tasks[0].canceled, 'provider received media cancellation')
     await sleep(350); await page.getByRole('button', { name: '结束录音', exact: true }).click()
     await page.getByText('STEER-NEW', { exact: true }).waitFor()
@@ -147,7 +150,7 @@ test('one tap over several completed replies still queued creates one notice in 
     await submit(page, 'SENTENCES'); await until(() => tasks[0]?.finished, 'first synthesis done')
     await submit(page, 'BLOCK-ONLY'); await until(() => tasks[1]?.finished, 'second synthesis done')
     await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) >= 114000, 'both replies queued at client')
-    await sleep(600); await page.getByRole('button', { name: '开始录音', exact: true }).click(); await sleep(300); await page.getByRole('button', { name: '结束录音', exact: true }).click()
+    await sleep(600); await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await sleep(300); await page.getByRole('button', { name: '结束录音', exact: true }).click()
     await page.getByRole('status').filter({ hasText: '没听清' }).waitFor(); await page.getByRole('button', { name: '挂断', exact: true }).click()
   })
   const cuts = report.persisted.filter(event => event.type === 'user/message' && event.data.source.kind === 'nexus-voice')
@@ -162,7 +165,7 @@ test('barge-in during streamed model text stops the spoken tail but preserves th
     await submit(page, 'HOLD-SPEECH'); await until(() => readFile(resolve(dir, 'model-started')).then(() => true, () => false), 'streaming model held')
     await writeFile(resolve(dir, 'release-first-sentence'), '')
     await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) > 0, 'first streamed sentence arrived')
-    await page.getByRole('button', { name: '开始录音', exact: true }).click(); await until(() => tasks[0].canceled, 'streamed reply speech canceled')
+    await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await until(() => tasks[0].canceled, 'streamed reply speech canceled')
     const count = Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples'))
     await writeFile(resolve(dir, 'release-model'), '')
     await page.getByText('第一句。Second sentence!\n最后一句', { exact: true }).waitFor()
@@ -181,8 +184,8 @@ for (const ending of ['empty', 'auto', 'hangup', 'disconnect']) test(`recording 
     await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
     await submit(page, 'BARGE-TOOL'); await until(() => readFile(resolve(dir, 'tool-started')).then(() => true, () => false), 'running lookup')
     await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) >= 84000, 'queued first reply')
-    const started = Date.now(); await page.getByRole('button', { name: '开始录音', exact: true }).click()
-    await page.getByRole('status').filter({ hasText: '录音中' }).waitFor(); await until(() => tasks[0].canceled, 'canceled old speech')
+    const started = Date.now(); await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click()
+    await page.getByRole('status').filter({ hasText: '正在听' }).waitFor(); await until(() => tasks[0].canceled, 'canceled old speech')
     const audioFrames = () => (downlink.join('').match(/"type":"audio"/g) ?? []).length
     await sleep(100); const before = audioFrames(), scheduled = Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples'))
     await writeFile(resolve(dir, 'release-tool'), '')
@@ -201,7 +204,7 @@ for (const ending of ['empty', 'auto', 'hangup', 'disconnect']) test(`recording 
       assert.equal(Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) - scheduled, 12000, 'only new reply PCM is released')
       assert.deepEqual(await page.evaluate(offset => window.__pcmMarkers.slice(offset), markers), [2001, 2002], 'buffered sentences keep their original playback order')
       // A second empty recording must not release the same buffered reply again.
-      await sleep(350); await page.getByRole('button', { name: '开始录音', exact: true }).click(); await sleep(250); await page.getByRole('button', { name: '结束录音', exact: true }).click(); await page.getByRole('status').filter({ hasText: '没听清' }).waitFor()
+      await sleep(350); await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await sleep(250); await page.getByRole('button', { name: '结束录音', exact: true }).click(); await page.getByRole('status').filter({ hasText: '没听清' }).waitFor()
       assert.equal(Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) - scheduled, 12000)
       await page.getByRole('button', { name: '挂断', exact: true }).click()
     } else { await sleep(350); assert.equal(audioFrames(), before, 'ending call discards all buffered PCM') }
@@ -218,7 +221,7 @@ test('a new reply whose PCM is already in transport when local recording starts 
     await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
     await submit(page, 'BARGE-TOOL'); await until(() => readFile(resolve(dir, 'tool-started')).then(() => true, () => false), 'native tool held')
     await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) >= 84000, 'old reply queued')
-    hold = true; await page.getByRole('button', { name: '开始录音', exact: true }).click(); await until(() => release, 'Host recording control held')
+    hold = true; await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await until(() => release, 'Host recording control held')
     const before = Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples'))
     const markers = await page.evaluate(() => window.__pcmMarkers.length)
     await writeFile(resolve(dir, 'release-tool'), '')

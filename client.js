@@ -2,6 +2,8 @@ window.__ModuleLoader__.load({
   id: 'dsh-nexus',
   factory(require) {
     const React = require('react')
+    const { createPortal } = require('react-dom')
+    const P = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
     const SUPERVISOR = 'nexus-supervisor'
 
@@ -118,6 +120,16 @@ window.__ModuleLoader__.load({
         const capture = new AudioContext({ sampleRate: 16000 })
         cleanups.push(() => capture.close().catch(() => {}))
         const source = capture.createMediaStreamSource(stream)
+        const captureAnalyser = capture.createAnalyser(), playbackAnalyser = playback.createAnalyser()
+        captureAnalyser.fftSize = playbackAnalyser.fftSize = 256
+        const samples = new Float32Array(256)
+        attempt.level = kind => {
+          const analyser = kind === 'rec' ? captureAnalyser : playbackAnalyser
+          analyser.getFloatTimeDomainData(samples)
+          return Math.min(1, Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length) * 4)
+        }
+        source.connect(captureAnalyser)
+        cleanups.push(() => { captureAnalyser.disconnect(); playbackAnalyser.disconnect() })
         const processor = capture.createScriptProcessor(2048, 1, 1)
         cleanups.push(() => { processor.disconnect(); source.disconnect() })
         processor.onaudioprocess = event => {
@@ -175,6 +187,7 @@ window.__ModuleLoader__.load({
           const node = playback.createBufferSource()
           node.buffer = buffer
           node.connect(playback.destination)
+          node.connect(playbackAnalyser)
           node.onended = () => { if (!current()) return; retire(playback.currentTime); if (!nodes.length && pendingActivity !== 'reading' && this.activity === 'reading') { this.activity = pendingActivity; this.set(this.state, this.code) } }
           retire(playback.currentTime)
           next = Math.max(next, playback.currentTime)
@@ -233,6 +246,7 @@ window.__ModuleLoader__.load({
           end('failed', error?.code ?? 'CALL_CLOSED')
         } finally { handle.dispose() }
       }
+      readLevel(kind) { return this.attempt?.level?.(kind) ?? 0 }
       hangup() {
         const attempt = this.attempt
         attempt?.hangup?.()
@@ -245,32 +259,275 @@ window.__ModuleLoader__.load({
       }
     }
 
-    // Flat keys: the locale service does not resolve nested ones.
-    const states = table => Object.fromEntries(Object.entries(table).map(([state, text]) => [`state-${state}`, text]))
-    const STATES = {
-      en: { idle: 'Voice off', 'requesting-mic': 'Requesting microphone…', connecting: 'Connecting…', live: 'Live with Nexus', 'mic-denied': 'Microphone permission denied', 'no-device': 'No microphone available', 'mic-failed': 'Microphone failed', 'playback-blocked': 'Audio playback not ready', failed: 'Call failed' },
-      zh: { idle: '语音未接通', 'requesting-mic': '正在请求麦克风…', connecting: '正在接通…', live: '已接通 Nexus', 'mic-denied': '麦克风权限被拒绝', 'no-device': '没有可用的麦克风', 'mic-failed': '麦克风不可用', 'playback-blocked': '音频播放未就绪', failed: '通话失败' },
+    const VOICE_TEXT = {
+      "语音未接通": "Voice off",
+      "正在接通…": "Connecting…",
+      "已接通 · 点按说话": "Connected · Tap to talk",
+      "通话中 · 自动听写": "In call · Automatic transcription",
+      "正在听": "Listening",
+      "识别中…": "Recognizing…",
+      "思考中…": "Thinking…",
+      "正在朗读": "Reading aloud",
+      "没听清，请再说一次": "Could not hear you, please try again",
+      "朗读失败，文字已保留": "Read aloud failed; text is preserved",
+      "麦克风权限被拒绝": "Microphone permission denied",
+      "在浏览器地址栏或系统设置中允许麦克风后重试": "Allow the microphone in browser or system settings, then retry",
+      "通话已中断": "Call interrupted",
+      "与 Host 的连接断开": "Disconnected from Host",
+      "未配置 DashScope 凭据": "DashScope credential is missing",
+      "在 Host 配置 DASHSCOPE_API_KEY": "Configure DASHSCOPE_API_KEY on Host",
+      "没有可用的麦克风": "No microphone available",
+      "检查输入设备": "Check the input device",
+      "麦克风无法使用": "Microphone unavailable",
+      "浏览器暂不允许播放声音": "Browser audio playback is blocked",
+      "点「重试」即可": "Click Retry",
+      "另一个窗口正在通话": "Another window is in a call",
+      "先在那个窗口挂断": "Hang up in that window first",
+      "连不上语音服务": "Cannot connect to the voice service",
+      "检查网络或端点设置": "Check the network or endpoint settings",
+      "通话失败": "Call failed",
+      "结束录音": "End recording",
+      "点按插话": "Tap to interrupt",
+      "点按说话": "Tap to talk",
+      "挂断": "Hang up",
+      "重试": "Retry",
+      "接通语音": "Start voice",
+      "级联": "Cascade",
+      "回到 Nexus": "Back to Nexus",
     }
 
-    function CallBar({ sessionId, call, remote, t, floating = false }) {
-      const [, render] = React.useReducer(count => count + 1, 0)
-      React.useEffect(() => call.subscribe(render), [call])
-      React.useEffect(() => {
-        if (sessionId === SUPERVISOR && call.autoPending) { call.autoPending = false; call.start(remote) }
-      }, [sessionId, call, remote, call.autoPending])
-      if (floating ? call.state === 'idle' : sessionId !== SUPERVISOR || call.state !== 'idle') return null
-      const busy = call.active
-      return h('div', {
-        'data-nexus-voice': '', 'data-state': call.state, 'data-activity': call.activity, 'data-played-samples': call.played, 'data-flushes': call.flushes, 'data-discarded-samples': call.discarded,
-        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 13, ...(floating ? { position: 'absolute', bottom: 20, right: 24, pointerEvents: 'auto', background: 'var(--color-background, Canvas)', border: '1px solid currentColor', borderRadius: 8 } : {}) },
-      },
-      h('span', { role: 'status' }, t(`state-${call.state}`) + (call.state === 'live' && call.activity !== 'idle' ? ` · ${t(`activity-${call.activity}`)}${call.activityCode ? ` (${call.activityCode})` : ''}` : '') + (call.code && !busy ? ` (${call.code})` : '')),
-      call.state === 'live' && call.mode === 'cascade' ? h('button', { type: 'button', disabled: call.activity === 'recognizing', onClick: () => call.attempt?.record?.() }, t(call.recording ? 'end-recording' : 'start-recording')) : null,
-      h('button', {
-        type: 'button', onClick: () => { call.autoPending = false; busy ? call.hangup() : call.start(remote) },
-        style: { color: 'inherit', background: 'transparent', border: '1px solid currentColor', borderRadius: 6, cursor: 'pointer', padding: '2px 10px' },
-      }, busy ? t('hangup') : t('start')))
+    const VoiceUI = React.createContext(null)
+    const useUI = () => React.useContext(VoiceUI)
+    function useCall(call) {
+      React.useSyncExternalStore(listener => call.subscribe(listener), () => call.ui.version)
+      return call
     }
+    // Presentation timestamps do not alter Call activities or the media lifecycle.
+    function presentation(call) {
+      const ui = { version: 0, nexusShown: 0, since: undefined, notice: undefined, expired: false }
+      let recording = false, signature, timer
+      const unsubscribe = call.subscribe(() => {
+        if (call.recording && !recording) ui.since = Date.now()
+        recording = call.recording
+        if (call.state === 'idle' || call.state === 'requesting-mic') ui.failure = undefined
+        else if (call.activityCode?.endsWith('CREDENTIAL_MISSING')) ui.failure = call.activityCode
+        const next = [call.state, call.activity, call.activityCode].join(':')
+        if (signature !== next) {
+          signature = next
+          clearTimeout(timer)
+          ui.expired = false
+          const code = call.activityCode ?? ''
+          ui.notice = call.state === 'live' && (call.activity === 'unheard' || call.activity === 'failed' && /^(ASR_|TTS_)/.test(code) && !code.endsWith('CREDENTIAL_MISSING'))
+          if (ui.notice) timer = setTimeout(() => { ui.expired = true; call.set(call.state, call.code) }, 4000)
+        }
+        ui.version++
+      })
+      ui.dispose = () => { clearTimeout(timer); unsubscribe() }
+      return ui
+    }
+    function useLevels(active, count, tone) {
+      const { call } = useUI()
+      const [levels, setLevels] = React.useState(() => Array(count).fill(0.08))
+      React.useEffect(() => {
+        if (!active) { setLevels(Array(count).fill(0.08)); return }
+        const id = setInterval(() => setLevels(levels => [...levels.slice(1), Math.max(0.08, call.readLevel(tone))]), 70)
+        return () => clearInterval(id)
+      }, [call, active, count, tone])
+      return levels
+    }
+    function useElapsed(running) {
+      const { call } = useUI()
+      const [now, setNow] = React.useState(Date.now())
+      React.useEffect(() => { if (!running) return; setNow(Date.now()); const id = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(id) }, [running, call.ui.since])
+      return Math.min(60, Math.max(0, Math.floor((now - (call.ui.since ?? now)) / 1000)))
+    }
+    const clock = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+    function describe(call) {
+      const mode = call.mode
+      let state = call.state === 'idle' ? 'off' : call.active && call.state !== 'live' ? 'connecting' : call.state === 'live' ? call.ui.expired && call.ui.notice ? 'ready' : call.activity === 'idle' ? 'ready' : call.activity : call.state
+      const code = call.ui.failure ?? (call.state === 'live' ? call.activityCode : call.code)
+      const failure = (text, hint = '') => ({ live: false, state, dot: 'error', text, tone: 'error', code: code ?? state, hint })
+      if (!['off', 'connecting'].includes(state)) {
+        if (code?.endsWith('CREDENTIAL_MISSING')) return failure('未配置 DashScope 凭据', '在 Host 配置 DASHSCOPE_API_KEY')
+        if (state === 'mic-denied') return failure('麦克风权限被拒绝', '在浏览器地址栏或系统设置中允许麦克风后重试')
+        if (state === 'no-device') return failure('没有可用的麦克风', '检查输入设备')
+        if (state === 'mic-failed') return failure('麦克风无法使用', '检查输入设备')
+        if (state === 'playback-blocked') return failure('浏览器暂不允许播放声音', '点「重试」即可')
+        if (state === 'failed') {
+          if (code === 'CALL_BUSY') return failure('另一个窗口正在通话', '先在那个窗口挂断')
+          if (['CALL_CLOSED', 'CONNECTION_CLOSED'].includes(code)) return failure('通话已中断', '与 Host 的连接断开')
+          if (['CONNECTION_FAILED', 'TIMEOUT'].includes(code)) return failure('连不上语音服务', '检查网络或端点设置')
+          if (code?.startsWith('ASR_') && call.state === 'live') state = 'unheard'
+          else if (code?.startsWith('TTS_') && call.state === 'live') state = 'tts-failed'
+          else return failure('通话失败')
+        }
+      }
+      if (mode === 'realtime' && ['recording', 'recording-late', 'recognizing'].includes(state)) state = 'ready'
+      const base = { live: !['off', 'connecting', 'mic-denied', 'call-failed'].includes(state), state }
+      switch (state) {
+        case 'off': return { ...base, dot: 'idle', text: '语音未接通', tone: 'muted' }
+        case 'connecting': return { ...base, dot: 'ongoing', text: '正在接通…', shimmer: true }
+        case 'ready': return { ...base, dot: 'done', text: mode === 'cascade' ? '已接通 · 点按说话' : '通话中 · 自动听写' }
+        case 'recording': case 'recording-late': return { ...base, dot: 'error', text: '正在听', recording: true }
+        case 'recognizing': return { ...base, dot: 'ongoing', text: '识别中…', shimmer: true }
+        case 'thinking': return { ...base, dot: 'ongoing', text: '思考中…', shimmer: true }
+        case 'reading': return { ...base, dot: 'done', text: '正在朗读', speaking: true }
+        case 'unheard': return { ...base, dot: 'warning', text: '没听清，请再说一次', tone: 'warn' }
+        case 'tts-failed': return { ...base, dot: 'warning', text: '朗读失败，文字已保留', tone: 'warn' }
+      }
+    }
+    const canRecord = d => d.live && !['recognizing'].includes(d.state)
+    const recordLabel = d => d.recording ? '结束录音' : d.state === 'reading' ? '点按插话' : '点按说话'
+    const connect = (call, remote) => { call.autoPending = false; call.ui.retry = undefined; call.ui.running = call.start(remote) }
+    const hangup = call => { call.autoPending = false; call.ui.retry = undefined; call.hangup() }
+    const retry = async (call, remote) => {
+      const previous = call.ui.running, pending = {}
+      call.ui.retry = pending
+      call.hangup()
+      // The Host releases its media owner when the previous stream finishes.
+      await previous
+      if (call.ui.retry === pending) connect(call, remote)
+    }
+
+    // ---------- shared bits ----------
+    const NexusMark = ({ size = 18 }) => h('svg', { viewBox: '0 0 64 64', width: size, height: size, 'aria-hidden': true, className: 'nx-mark' },
+      h('rect', { width: 64, height: 64, rx: 16, fill: '#176b69' }),
+      h('path', { d: 'M18 46V18l28 28V18', fill: 'none', stroke: '#fff', strokeWidth: 6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+      h('circle', { cx: 46, cy: 18, r: 5, fill: '#aaf0d1' }))
+    const HangupIcon = ({ size = 16 }) => h('svg', { viewBox: '0 0 24 24', width: size, height: size, 'aria-hidden': true },
+      h('path', { d: 'M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.270 11.270 0 0 0-2.67-1.85.996.996 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z', fill: 'currentColor' }))
+    function Bars({ active, count = 24, tone = 'accent', className = '' }) {
+      const levels = useLevels(active, count, tone)
+      return h('span', { className: `nx-bars nx-bars-${tone} ${className}`, 'aria-hidden': true }, levels.map((level, i) => h('i', { key: i, style: { transform: `scaleY(${level})` } })))
+    }
+    function Status({ d, compact }) {
+      const { t } = useUI()
+      const elapsed = useElapsed(!!d.recording)
+      const text = d.shimmer ? h(P.TextShimmer, { active: true }, t(d.text)) : t(d.text)
+      return h('span', { className: `nx-status nx-tone-${d.tone ?? 'normal'}`, role: 'status' },
+        h(P.StateDot, { state: d.dot, size: d.dot === 'ongoing' ? 12 : 8 }),
+        h('span', { className: 'nx-status-text' }, text),
+        d.recording ? h('span', { className: `nx-timer ${elapsed >= 50 ? 'nx-timer-late' : ''}` }, compact ? clock(elapsed) : `${clock(elapsed)} / 1:00`) : null,
+        d.code ? h(P.Tooltip, { label: d.hint ? `${t(d.hint)} · ${d.code}` : d.code, side: 'top' }, h('span', { className: 'nx-info', tabIndex: 0 }, h(P.IconInfoOutlineRegular, { size: 14 }))) : null)
+    }
+    function RecordButton({ d, round, size }) {
+      const { call, t } = useUI()
+      const props = { type: 'button', disabled: !canRecord(d), onClick: () => call.attempt?.record?.(), 'aria-label': t(recordLabel(d)), 'aria-pressed': !!d.recording }
+      if (round) return h('button', { ...props, className: `nx-round nx-round-${size ?? 'lg'} ${d.recording ? 'nx-round-rec' : 'nx-round-accent'}` },
+        d.recording ? h(P.IconStopFillRegular, { size: size === 'sm' ? 12 : 18 }) : h(P.IconMicrophoneOutlineMedium, { size: size === 'sm' ? 16 : 24 }))
+      return h(P.Button, { ...props, size: 'sm', variant: d.recording ? 'outline' : 'primary', className: d.recording ? 'nx-btn-rec' : 'nx-btn-accent', icon: d.recording ? h(P.IconStopFillRegular, { size: 12 }) : h(P.IconMicrophoneOutlineMedium, { size: 16 }) }, t(recordLabel(d)))
+    }
+    const HangupButton = ({ size = 'md' }) => { const { call, t } = useUI(); return h(P.Tooltip, { label: t('挂断'), side: 'top' },
+      h('button', { type: 'button', className: `nx-round nx-round-${size} nx-round-hangup`, onClick: () => hangup(call), 'aria-label': t('挂断') }, h(HangupIcon, { size: size === 'sm' ? 17 : 20 }))) }
+    const RetryButton = () => { const { call, remote, t } = useUI(); return h(P.Button, { type: 'button', size: 'sm', variant: 'outline', icon: h(P.IconRefreshOutlineRegular, { size: 14 }), onClick: () => retry(call, remote) }, t('重试')) }
+    const ConnectButton = ({ variant = 'primary' }) => { const { call, remote, t } = useUI(); return h(P.Button, { type: 'button', size: 'sm', variant, className: 'nx-btn-accent', onClick: () => connect(call, remote) }, t('接通语音')) }
+    const ModeTag = ({ mode }) => { const { t } = useUI(); return h('span', { className: 'nx-tag' }, mode === 'cascade' ? t('级联') : 'Realtime') }
+    const voiceAttributes = call => ({
+      'data-nexus-voice': '', 'data-state': call.state, 'data-activity': call.activity, 'data-played-samples': call.played, 'data-flushes': call.flushes, 'data-discarded-samples': call.discarded,
+    })
+    function BarA({ d, mode }) {
+      return h('div', { className: 'nx-a-bar', ...voiceAttributes(useUI().call) },
+        h(NexusMark, { size: 18 }),
+        h(Status, { d }),
+        d.recording ? h(Bars, { active: true, tone: 'rec', count: 28, className: 'nx-a-wave' }) : d.speaking ? h(Bars, { active: true, count: 12, className: 'nx-a-wave nx-a-wave-short' }) : null,
+        h('span', { className: 'nx-spacer' }),
+        d.live ? h(ModeTag, { mode }) : null,
+        d.state === 'off' ? h(ConnectButton, null) : d.tone === 'error' ? h(RetryButton) : null,
+        d.live && mode === 'cascade' ? h(RecordButton, { d }) : null,
+        d.state !== 'off' ? h(HangupButton, { size: 'sm' }) : null)
+    }
+    function PillA({ d, mode }) {
+      return h('div', { className: 'nx-a-pill', ...voiceAttributes(useUI().call) },
+        h('button', { type: 'button', className: 'nx-a-pill-main', onClick: useUI().open, title: useUI().t('回到 Nexus') }, h(NexusMark, { size: 16 }), h(Status, { d, compact: true })),
+        d.recording ? h(Bars, { active: true, tone: 'rec', count: 10 }) : d.speaking ? h(Bars, { active: true, count: 8 }) : null,
+        d.tone === 'error' ? h(RetryButton) : null,
+        d.live && mode === 'cascade' ? h(RecordButton, { d, round: true, size: 'sm' }) : null,
+        h(HangupButton, { size: 'sm' }))
+    }
+
+    function CallBar({ sessionId, call, remote, t, open, floating = false }) {
+      useCall(call)
+      const shown = sessionId === SUPERVISOR
+      React.useLayoutEffect(() => {
+        if (!shown) return
+        call.ui.nexusShown++
+        call.set(call.state, call.code)
+        return () => { call.ui.nexusShown--; call.set(call.state, call.code) }
+      }, [shown, call])
+      React.useEffect(() => {
+        if (shown && call.autoPending) connect(call, remote)
+      }, [shown, call, remote, call.autoPending])
+      if (floating ? call.state === 'idle' || call.ui.nexusShown > 0 && !call.ui.modalTarget : !shown || !call.ui.nexusShown || call.ui.modalTarget) return null
+      const d = describe(call)
+      const control = h(VoiceUI.Provider, { value: { call, remote, t, open } }, h(floating ? PillA : BarA, { d, mode: call.mode }))
+      return floating && call.ui.modalTarget ? createPortal(control, call.ui.modalTarget) : control
+    }
+    // Settings covers the still-mounted conversation. Keep the same pill above its
+    // mask, in the viewport-sized modal layer, without changing the settings page.
+    function SettingsCallSurface({ call }) {
+      const anchor = React.useRef(null)
+      React.useLayoutEffect(() => {
+        call.ui.modalTarget = anchor.current.closest('[role="dialog"]').parentElement
+        call.set(call.state, call.code)
+        return () => { call.ui.modalTarget = undefined; call.set(call.state, call.code) }
+      }, [call])
+      return h('span', { hidden: true, ref: anchor })
+    }
+    function SidebarEntry({ open, wide, call, t }) {
+      useCall(call)
+      const d = describe(call)
+      const dot = d.recording ? 'rec' : d.tone === 'error' ? 'error' : d.live ? 'live' : null
+      return h(P.Tooltip, { label: wide ? t('open') : `${t('open')}${d.state !== 'off' ? ' · ' + t(d.text) : ''}`, side: 'right' },
+        h('button', { type: 'button', className: `nx-side ${wide ? 'nx-side-wide' : ''}`, 'aria-label': t('open'), onClick: open },
+          h('span', { className: 'nx-side-icon' }, h(NexusMark, { size: 20 }), dot ? h('i', { className: `nx-side-dot nx-side-dot-${dot}` }) : null),
+          wide ? h('span', null, 'Nexus') : null))
+    }
+
+    const CSS = `
+:root, body { --nx-accent: color-mix(in srgb, #176b69 62%, var(--dsw-alias-label-primary, #000)); --nx-accent-soft: color-mix(in srgb, #176b69 18%, transparent); --nx-accent-fill: #176b69; --nx-rec: var(--dsw-alias-state-error-primary, #f25a5a); }
+.nx-mark { flex: none; border-radius: 25%; }
+.nx-spacer { flex: 1 1 auto; }
+.nx-status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font: var(--dsw-font-xs-13); color: var(--dsw-alias-label-primary); white-space: nowrap; }
+.nx-status-text { overflow: hidden; text-overflow: ellipsis; }
+.nx-tone-muted { color: var(--dsw-alias-label-tertiary); }
+.nx-tone-warn { color: var(--dsw-alias-state-warn-secondary); }
+.nx-tone-error { color: var(--dsw-alias-state-error-primary); }
+.nx-timer { font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary); }
+.nx-timer-late { color: var(--dsw-alias-state-warn-secondary); font-weight: 600; }
+.nx-info { display: inline-flex; color: var(--dsw-alias-label-tertiary); cursor: help; }
+.nx-tag { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; padding: 0 8px; line-height: 20px; }
+.nx-bars { display: inline-flex; align-items: center; gap: 2px; height: 20px; flex: none; }
+.nx-bars i { display: block; width: 3px; height: 100%; border-radius: 2px; background: var(--nx-accent); transform-origin: center; transition: transform 70ms linear; }
+.nx-bars-rec i { background: var(--nx-rec); }
+.nx-btn-accent:not(:disabled) { background: var(--nx-accent-fill) !important; color: #fff !important; border-color: transparent !important; }
+.nx-btn-rec { color: var(--nx-rec) !important; border-color: color-mix(in srgb, var(--nx-rec) 50%, transparent) !important; }
+.nx-round { display: inline-flex; align-items: center; justify-content: center; flex: none; border: 0; border-radius: 999px; cursor: pointer; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-3); transition: background 120ms, transform 120ms; }
+.nx-round:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-solid, var(--dsw-alias-bg-layer-3)); }
+.nx-round:active:not(:disabled) { transform: scale(0.94); }
+.nx-round:disabled { opacity: 0.4; cursor: default; }
+.nx-round-sm { width: 28px; height: 28px; } .nx-round-md { width: 36px; height: 36px; } .nx-round-lg { width: 52px; height: 52px; }
+.nx-round-accent { background: var(--nx-accent-fill); color: #fff; } .nx-round-accent:hover:not(:disabled) { background: color-mix(in srgb, var(--nx-accent-fill) 85%, #fff); }
+.nx-round-rec { background: var(--nx-rec); color: #fff; box-shadow: 0 0 0 4px color-mix(in srgb, var(--nx-rec) 22%, transparent); animation: nx-pulse 1.4s ease-in-out infinite; } .nx-round-rec:hover:not(:disabled) { background: color-mix(in srgb, var(--nx-rec) 85%, #000); }
+.nx-round-hangup { background: transparent; color: var(--dsw-alias-label-tertiary); } .nx-round-hangup:hover { background: color-mix(in srgb, var(--nx-rec) 16%, transparent) !important; color: var(--nx-rec); }
+@keyframes nx-pulse { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--nx-rec) 10%, transparent); } }
+
+/* A */
+.nx-a-bar { display: flex; align-items: center; gap: 10px; margin: 0 16px 8px; padding: 6px 6px 6px 12px; min-height: 44px; box-sizing: border-box; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-bg-layer-1); }
+/* The populated conversation has a full-width dock, unlike the prototype's empty hero. */
+.nx-a-bar { width: calc(100% - 32px); max-width: 724px; margin-inline: auto; }
+.nx-a-wave { margin-left: 4px; } .nx-a-wave-short i { width: 2px; }
+.nx-a-pill { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); pointer-events: auto; display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 6px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); box-shadow: var(--dsw-shadow-lv3); z-index: 20; }
+.nx-a-pill-main { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 6px 2px 2px; border-radius: 999px; } .nx-a-pill-main:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* sidebar */
+.nx-side { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 6px; border-radius: var(--dsw-radius-md); font: var(--dsw-font-s-14); } .nx-side:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.nx-side-wide { padding: 6px 10px 6px 6px; }
+.nx-side-icon { position: relative; display: inline-flex; }
+.nx-side-dot { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 999px; border: 2px solid var(--dsw-alias-bg-base); }
+.nx-side-dot-live { background: var(--dsw-alias-state-success-primary); } .nx-side-dot-rec { background: var(--nx-rec); animation: nx-blink 1s steps(2) infinite; } .nx-side-dot-error { background: var(--dsw-alias-state-warn-primary); }
+@keyframes nx-blink { 50% { opacity: 0.35; } }
+
+`
 
     // As DEFAULT_SUMMARY_MODEL in src/compaction.ts: the summary model while the setting is empty.
     const DEFAULT_SUMMARY_MODEL = 'deepseek-account/deepseek-flash'
@@ -357,8 +614,13 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'uiWorkspace', 'locale'],
       apply(ctx) {
-        ctx.locale.register('nexus', 'en', { 'asr-endpoint': 'Speech recognition endpoint', 'asr-model': 'Speech recognition model', 'start-recording': 'Start recording', 'end-recording': 'End recording', 'activity-recording': 'Recording', 'activity-recognizing': 'Recognizing', 'activity-unheard': 'Could not hear you', open: 'Open Nexus', 'voice-mode': 'Voice mode', cascade: 'Cascade', 'voice-mode-hint': 'Changes apply on the next call. Cascade uses the Harness default model.', 'tts-endpoint': 'Speech synthesis endpoint', 'tts-model': 'Speech synthesis model', 'tts-voice': 'Speech voice', 'activity-thinking': 'Thinking…', 'activity-reading': 'Reading aloud…', 'activity-failed': 'Speech synthesis failed', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless you choose another model, at the lowest reasoning effort the model offers. Known limits: a reasoning model summarizes markedly slower, and its reasoning counts toward the output limit. Keep the budget well above the fixed part of each supervisor request (system prompt, tool definitions and similar): summarizing cannot bring a request below it, so automatic compaction is skipped when it would barely help. During automatic compaction the conversation shows the general running status, as native automatic compaction does.', ...states(STATES.en) })
-        ctx.locale.register('nexus', 'zh', { 'asr-endpoint': '语音识别端点', 'asr-model': '语音识别型号', 'start-recording': '开始录音', 'end-recording': '结束录音', 'activity-recording': '录音中', 'activity-recognizing': '识别中', 'activity-unheard': '没听清', open: '打开 Nexus', 'voice-mode': '语音模式', cascade: '级联', 'voice-mode-hint': '更改在下一次接通时生效。级联主管跟随 Harness 默认模型。', 'tts-endpoint': '语音合成端点', 'tts-model': '语音合成型号', 'tts-voice': '语音合成音色', 'activity-thinking': '思考中', 'activity-reading': '朗读中', 'activity-failed': '语音合成失败', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算应明显高于主管每次请求的固定开销（系统提示、工具定义等），摘要无法让请求低于这部分，压缩几乎无效时会跳过自动压缩；自动压缩期间会话显示通用的运行状态，与原生自动压缩一致。', ...states(STATES.zh) })
+        const style = document.createElement('style'); style.textContent = CSS; document.head.append(style)
+        ctx.effect(() => () => style.remove())
+        const call = new Call()
+        call.ui = presentation(call)
+        ctx.effect(() => () => call.ui.dispose())
+        ctx.locale.register('nexus', 'en', { 'asr-endpoint': 'Speech recognition endpoint', 'asr-model': 'Speech recognition model', 'start-recording': 'Start recording', 'end-recording': 'End recording', 'activity-recording': 'Recording', 'activity-recognizing': 'Recognizing', 'activity-unheard': 'Could not hear you', open: 'Open Nexus', 'voice-mode': 'Voice mode', cascade: 'Cascade', 'voice-mode-hint': 'Changes apply on the next call. Cascade uses the Harness default model.', 'tts-endpoint': 'Speech synthesis endpoint', 'tts-model': 'Speech synthesis model', 'tts-voice': 'Speech voice', 'activity-thinking': 'Thinking…', 'activity-reading': 'Reading aloud…', 'activity-failed': 'Speech synthesis failed', start: 'Start voice', hangup: 'Hang up', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless you choose another model, at the lowest reasoning effort the model offers. Known limits: a reasoning model summarizes markedly slower, and its reasoning counts toward the output limit. Keep the budget well above the fixed part of each supervisor request (system prompt, tool definitions and similar): summarizing cannot bring a request below it, so automatic compaction is skipped when it would barely help. During automatic compaction the conversation shows the general running status, as native automatic compaction does.', ...VOICE_TEXT })
+        ctx.locale.register('nexus', 'zh', { 'asr-endpoint': '语音识别端点', 'asr-model': '语音识别型号', 'start-recording': '开始录音', 'end-recording': '结束录音', 'activity-recording': '录音中', 'activity-recognizing': '识别中', 'activity-unheard': '没听清', open: '打开 Nexus', 'voice-mode': '语音模式', cascade: '级联', 'voice-mode-hint': '更改在下一次接通时生效。级联主管跟随 Harness 默认模型。', 'tts-endpoint': '语音合成端点', 'tts-model': '语音合成型号', 'tts-voice': '语音合成音色', 'activity-thinking': '思考中', 'activity-reading': '朗读中', 'activity-failed': '语音合成失败', start: '接通语音', hangup: '挂断', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算应明显高于主管每次请求的固定开销（系统提示、工具定义等），摘要无法让请求低于这部分，压缩几乎无效时会跳过自动压缩；自动压缩期间会话显示通用的运行状态，与原生自动压缩一致。', ...Object.fromEntries(Object.keys(VOICE_TEXT).map(text => [text, text])) })
         ctx.inject(['configForms', 'remote', 'remote.session'], settingsCtx => {
           const form = settingsCtx.configForms.get('nexus')
           const catalog = () => settingsCtx.remote.session.modelCatalog()
@@ -369,13 +631,12 @@ window.__ModuleLoader__.load({
         })
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
           name: 'sidebar.footer.action', id: 'nexus', order: -10, locale: 'nexus',
-          inject: () => ({ open: () => ctx.uiWorkspace.openSession(SUPERVISOR) }),
-        }, ({ open, t, wide }) => h('button', {
-          type: 'button', title: t('open'), 'aria-label': t('open'), onClick: open,
-          style: { color: 'inherit', background: 'transparent', border: 0, cursor: 'pointer', padding: 8 },
-        }, wide ? 'Nexus' : 'N')))
-        const call = new Call()
-        ctx.effect(() => () => { call.autoPending = false; call.hangup() })
+          inject: () => ({ call, open: () => ctx.uiWorkspace.openSession(SUPERVISOR) }),
+        }, SidebarEntry))
+        ctx.slots.inject('settings.action', () => ctx.slots.register({
+          name: 'settings.action', id: 'nexus-call-surface', inject: () => ({ call }),
+        }, SettingsCallSurface))
+        ctx.effect(() => () => hangup(call))
         ctx.inject(['remote'], async remoteCtx => {
           await remoteCtx.remote.$mount(CONTRIBUTION)
           remoteCtx.inject(['remote.nexusVoice', 'slots'], uiCtx => {
@@ -383,11 +644,11 @@ window.__ModuleLoader__.load({
             uiCtx.effect(() => () => { disposed = true })
             uiCtx.slots.inject('conversation.input.dock', () => uiCtx.slots.register({
               name: 'conversation.input.dock', id: 'nexus-voice', locale: 'nexus',
-              inject: sessionId => ({ sessionId, call, remote: uiCtx.remote.nexusVoice }),
+              inject: sessionId => ({ sessionId, call, remote: uiCtx.remote.nexusVoice, open: () => { P.closeTopModal(document); ctx.uiWorkspace.openSession(SUPERVISOR) } }),
             }, CallBar))
             uiCtx.slots.inject('shell.overlay', () => uiCtx.slots.register({
               name: 'shell.overlay', id: 'nexus-voice', locale: 'nexus',
-              inject: () => ({ call, remote: uiCtx.remote.nexusVoice, floating: true }),
+              inject: () => ({ call, remote: uiCtx.remote.nexusVoice, open: () => { P.closeTopModal(document); ctx.uiWorkspace.openSession(SUPERVISOR) }, floating: true }),
             }, CallBar))
             uiCtx.remote.nexusVoice.claimStartup().then(async response => {
               if (disposed) return

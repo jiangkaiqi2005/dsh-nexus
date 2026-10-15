@@ -48,13 +48,14 @@ async function spokenHost(endpoint, run, { real = false, observePlayback = false
     await writeFile(resolve(dir, 'ui-finish'), '')
     let report; await until(async () => { try { report = JSON.parse(await readFile(resolve(dir, 'report.json'), 'utf8')); return true } catch { return false } }, 'native report')
     assert.equal(report.error, undefined, report.stack)
+    if (report.persisted.some(event => event.type === 'assistant/message' && textOf(event.data.message).startsWith('FAIL。'))) assert.ok(downlink.join('').includes('TTS_SYNTHESIS_FAILED'))
     console.log('spoken evidence:', dir)
     return report
   } catch (error) { if (page) { await page.screenshot({ path: resolve(dir, 'failure.png') }); await writeFile(resolve(dir, 'failure.yml'), await page.locator('body').ariaSnapshot()) } throw error }
   finally { await browser?.close(); await host.close(); await writeFile(resolve(dir, 'host.log'), output.replace(/\?token=\S+/g, '?token=[redacted]')) }
 }
 const submit = async (page, words) => { const editor = page.getByRole('textbox').last(); await editor.fill(words); await editor.press('Enter') }
-const connected = page => page.getByRole('status').filter({ hasText: '已接通 Nexus' }).waitFor()
+const connected = page => until(async () => await page.locator('[data-nexus-voice]').getAttribute('data-state') === 'live', 'call live')
 
 test('cascade call receives its first PCM sentence while the native supervisor is still generating, and stops only audio on hangup', { timeout: 90000 }, async () => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await new Promise(accept => server.once('listening', accept))
@@ -80,7 +81,7 @@ test('cascade call receives its first PCM sentence while the native supervisor i
       await page.getByRole('status').filter({ hasText: '思考中' }).waitFor()
       await writeFile(resolve(dir, 'release-first-sentence'), '')
       await until(async () => Number(await page.locator('[data-nexus-voice]').getAttribute('data-played-samples')) > 0, 'first PCM at browser')
-      await page.getByRole('status').filter({ hasText: '朗读中' }).waitFor()
+      await page.getByRole('status').filter({ hasText: '正在朗读' }).waitFor()
       assert.deepEqual(tasks[0].sentences, ['第一句。'])
       assert.equal(tasks[0].finished, false, 'model is gated before second sentence')
       await page.screenshot({ path: resolve(dir, 'first-sentence.png') })
@@ -131,7 +132,7 @@ test('cascade speaks complete Chinese and English sentences in order, preserves 
       const before = tasks.length
       await submit(page, 'FAIL-SPEECH')
       await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor()
-      await page.getByRole('status').filter({ hasText: '语音合成失败 (TTS_SYNTHESIS_FAILED)' }).waitFor()
+      await page.getByRole('status').filter({ hasText: '朗读失败，文字已保留' }).waitFor(); assert.equal(await page.locator('[data-nexus-voice]').getAttribute('data-activity'), 'failed')
       await connected(page)
       assert.equal(tasks.length, before + 1)
       await page.screenshot({ path: resolve(dir, 'tts-failure-connected.png') })
@@ -217,14 +218,14 @@ test('queued spoken replies preserve order while native tool and next model step
       await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
       await submit(page, 'QUEUE-SPEECH')
       await until(() => readFile(resolve(dir, 'queue-next-started')).then(() => true, () => false), 'next native model step while TTS remains open')
-      await page.getByRole('status').filter({ hasText: '朗读中' }).waitFor()
+      await page.getByRole('status').filter({ hasText: '正在朗读' }).waitFor()
       assert.equal(tasks.length, 1); assert.deepEqual(tasks[0].sentences, ['QUEUE-FIRST。'])
       await until(() => typeof releaseFirst === 'function', 'first TTS finish request')
       releaseFirst()
       await page.getByRole('status').filter({ hasText: '思考中' }).waitFor()
       await writeFile(resolve(dir, 'release-queue-model'), '')
       await until(() => tasks.length === 2 && tasks[1].sentences.includes('QUEUED SECOND.'), 'second reply in spoken order')
-      await page.getByRole('status').filter({ hasText: '朗读中' }).waitFor()
+      await page.getByRole('status').filter({ hasText: '正在朗读' }).waitFor()
       await page.screenshot({ path: resolve(dir, 'queued-replies.png') })
       await page.getByRole('button', { name: '挂断', exact: true }).click()
     })
@@ -261,7 +262,7 @@ test('a later TTS failure stops only its own PCM while an earlier successful rep
       await submit(page, 'BLOCK-ONLY'); await page.getByText('TEXT ONLY.', { exact: true }).waitFor()
       await until(async () => first(await playback(page)).some(node => node.audible), 'first reply actually playing')
       await submit(page, 'FAIL-SPEECH'); await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor()
-      await page.getByRole('status').filter({ hasText: 'TTS_SYNTHESIS_FAILED' }).waitFor(); await connected(page)
+      await page.getByRole('status').filter({ hasText: '朗读失败，文字已保留' }).waitFor(); assert.equal(await page.locator('[data-nexus-voice]').getAttribute('data-activity'), 'failed'); await connected(page)
       const afterFailure = await playback(page)
       assert.ok(first(afterFailure).some(node => node.audible), 'the previous successful reply remains audible')
       assert.ok(first(afterFailure).every(node => !node.stopped), 'none of the prior reply nodes were stopped')

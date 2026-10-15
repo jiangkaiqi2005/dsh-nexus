@@ -49,7 +49,7 @@ async function tapHost(endpoint, asrEndpoint, run, { real = false, captureFile, 
   finally { await browser?.close(); await host.close(); await writeFile(resolve(dir, 'host.log'), output.replace(/\?token=\S+/g, '?token=[redacted]')) }
 }
 const submit = async (page, words) => { const editor = page.getByRole('textbox').last(); await editor.fill(words); await editor.press('Enter') }
-const connected = page => page.getByRole('status').filter({ hasText: '已接通 Nexus' }).waitFor()
+const connected = page => page.getByRole('status').filter({ hasText: /已接通 · 点按说话|通话中 · 自动听写/ }).waitFor()
 
 async function endpoints(run) {
   const requests = [], tasks = [], responses = []
@@ -74,7 +74,7 @@ async function endpoints(run) {
   try { return await run({ requests, tasks, responses, asr: `http://127.0.0.1:${http.address().port}`, tts: `ws://127.0.0.1:${ws.address().port}` }) }
   finally { for (const socket of ws.clients) socket.terminate(); await new Promise(accept => ws.close(accept)); http.closeAllConnections(); await new Promise(accept => http.close(accept)) }
 }
-const record = async (page, milliseconds = 350) => { await page.getByRole('button', { name: '开始录音', exact: true }).click(); await page.getByRole('status').filter({ hasText: '录音中' }).waitFor(); await sleep(milliseconds); await page.getByRole('button', { name: '结束录音', exact: true }).click() }
+const record = async (page, milliseconds = 350) => { await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await page.getByRole('status').filter({ hasText: '正在听' }).waitFor(); await sleep(milliseconds); await page.getByRole('button', { name: '结束录音', exact: true }).click() }
 
 test('cascade tap recording uploads Host-authenticated WAV and sends recognized text through the native supervisor to PCM playback', { timeout: 90000 }, async () => endpoints(async ({ asr, tts, requests, tasks }) => {
   const report = await tapHost(tts, asr, async (page, dir) => {
@@ -113,7 +113,7 @@ test('cascade recognized speech steers a running native supervisor in the same t
     await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
     await submit(page, 'HOLD'); await until(() => readFile(resolve(dir, 'model-started')).then(() => true, () => false), 'native running supervisor')
     await record(page); await page.getByRole('status').filter({ hasText: '识别中' }).waitFor()
-    assert.equal(await page.getByRole('button', { name: '开始录音', exact: true }).isDisabled(), true)
+    assert.equal(await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).isDisabled(), true)
     await until(() => complete, 'held HTTP request'); complete()
     await page.getByText('STEER-NEW', { exact: true }).waitFor()
     await writeFile(resolve(dir, 'release-model'), '')
@@ -129,8 +129,8 @@ test('Host finishes recording after 60 wall-clock seconds even when microphone c
   responses.push({ output: { text: '自动结束这句' } })
   const report = await tapHost(tts, asr, async (page, dir) => {
     await page.getByRole('button', { name: '接通语音', exact: true }).click(); await connected(page)
-    const started = Date.now(); await page.getByRole('button', { name: '开始录音', exact: true }).click()
-    await page.getByRole('status').filter({ hasText: '录音中' }).waitFor(); await sleep(500)
+    const started = Date.now(); await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click()
+    await page.getByRole('status').filter({ hasText: '正在听' }).waitFor(); await sleep(500)
     await page.evaluate(() => window.__captureContext.suspend())
     await until(() => requests.length === 1, 'Host wall-clock recording deadline', 65000)
     const elapsed = requests[0].at - started; assert.ok(elapsed >= 59000 && elapsed < 65000, `Host ended at ${elapsed} ms`)
@@ -151,7 +151,7 @@ test('hangup and client disconnect abort recognition and discard partial capture
     await connect(); await record(page); await until(() => response, 'in-flight ASR')
     await page.getByRole('button', { name: '挂断', exact: true }).click(); await until(() => lost === 1, 'aborted ASR HTTP')
     response.end(JSON.stringify({ output: { text: 'LATE-WORDS-MUST-NOT-COMMIT' } }))
-    await connect(); await page.getByRole('button', { name: '开始录音', exact: true }).click(); await sleep(350); await page.getByRole('button', { name: '挂断', exact: true }).click()
+    await connect(); await page.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await sleep(350); await page.getByRole('button', { name: '挂断', exact: true }).click()
     await connect(); await record(page); await until(() => requests.length === 2, 'second recognition request')
     await page.reload(); await until(() => lost === 2, 'disconnect aborted recognition')
     response.end(JSON.stringify({ output: { text: 'DISCONNECTED-LATE-WORDS' } }))

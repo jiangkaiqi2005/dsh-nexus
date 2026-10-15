@@ -1,3 +1,4 @@
+import { failureTooltip } from './voice-ui.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile, symlink, copyFile } from 'node:fs/promises'
@@ -378,7 +379,7 @@ for (const mode of ['transcribed', 'untranscribed', 'timeout']) {
       await until(async () => (await supervisorOf(host))?.status === 'idle', 'speech recovery idle')
       if (timeout) {
         await until(async () => (await state(bar)) === 'failed', 'unanswering call failed')
-        assert.match(await bar.getByRole('status').textContent(), /TIMEOUT/)
+        assert.equal(await bar.getByRole('status').textContent(), '连不上语音服务'); await failureTooltip(page, 'TIMEOUT')
         assert.ok((await trackStates(page)).every(track => track === 'ended'))
       } else await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
       const result = await host.finish()
@@ -400,9 +401,9 @@ test('disconnect lifecycle: another client cannot acquire media, closing the own
   await controlledCall(t, 'disconnect-client-close', model, capture, async ({ host, page, bar, browser }) => {
     await until(async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')?.status === 'running', 'worker running before close')
     const second = await openNexus(browser, host.url, [instrument, []])
-    await second.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await second.bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(second.bar)) === 'failed', 'second client rejected')
-    assert.match(await second.bar.getByRole('status').textContent(), /CALL_BUSY/)
+    assert.equal(await second.bar.getByRole('status').textContent(), '另一个窗口正在通话'); await failureTooltip(second.page, 'CALL_BUSY')
     assert.equal((await trackStates(second.page)).length, 0, 'second client never captures')
     assert.equal(await audible(second.page), 0)
     // Hiding the page leaves its call alive; closing its actual context ends the media owner.
@@ -413,7 +414,7 @@ test('disconnect lifecycle: another client cannot acquire media, closing the own
     await until(() => model.log.responses.some(response => response.text?.startsWith('RESULT-HEARD') && response.connection > 1), 'Host text work after page closed')
     await until(async () => (await supervisorOf(host))?.status === 'idle', 'background text settled')
     assert.equal((await trackStates(second.page)).length, 0)
-    await second.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await second.bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(second.bar)) === 'live', 'manual reentry')
     const connection = model.log.connections
     const replay = model.wire.filter(event => event.connection === connection && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
@@ -516,7 +517,7 @@ const instrument = delays => {
       })
     }
   }
-  new MutationObserver(() => { const bar = document.querySelector('[data-nexus-voice]'); const state = bar?.getAttribute('data-state'); const code = state === 'failed' ? bar.querySelector('[role=status]')?.textContent.match(/(([A-Z_]+))/)?.[1] : undefined; const entry = code ? state + ':' + code : state; if (entry && entry !== window.__states.at(-1)) window.__states.push(entry) }).observe(document, { subtree: true, attributes: true, childList: true })
+  new MutationObserver(() => { const bar = document.querySelector('[data-nexus-voice]'); const state = bar?.getAttribute('data-state'); const code = state === 'failed' ? window.__failures.at(-1) : undefined; const entry = code ? state + ':' + code : state; if (entry && entry !== window.__states.at(-1)) window.__states.push(entry) }).observe(document, { subtree: true, attributes: true, childList: true })
   navigator.mediaDevices.getUserMedia = async constraints => { const stream = await request(constraints); window.__streams.push(stream); await new Promise(accept => setTimeout(accept, delays.shift() ?? 0)); return stream }
 }
 const trackStates = page => page.evaluate(() => window.__streams.flatMap(stream => stream.getTracks().map(track => track.readyState)))
@@ -534,7 +535,7 @@ test('voice navigation: changing working conversation or project preserves the c
   t.after(() => browser.close())
   const { page, bar } = await openNexus(browser, host.url, [instrument, []])
   try {
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => await state(bar) === 'live', 'navigation call live')
     const voiceConnection = model.log.connections
     const closedBefore = model.log.closed
@@ -602,7 +603,7 @@ test('voice call: client audio reaches the Host-held model, which speaks, dispat
     const bar = opened.bar
     assert.equal(await state(bar), 'idle')
     assert.equal(model.log.connections, 0, 'opening Nexus does not connect the voice model')
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live', 'live call')
     const update = model.wire.find(event => event.type === 'session.update')
     assert.deepEqual(update.session.modalities, ['text', 'audio'])
@@ -691,19 +692,19 @@ test('voice call states: no device, denied permission and blocked playback never
   t.after(() => granting.close())
   const denying = await chromium.launch({ channel: process.env.NEXUS_TEST_BROWSER ?? 'msedge', headless: true, args: [...fake, '--deny-permission-prompts'] })
   t.after(() => denying.close())
-  const start = bar => bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+  const start = bar => bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
   const settled = async (bar, expected) => { await until(async () => (await state(bar)) === expected, `state ${expected}`, 15000); return bar.getByRole('status').textContent() }
   const states = {}
   try {
     // Browser-enforced denial (real Chromium permission path, no OS prompt).
     let { context, bar } = await openNexus(denying, host.url)
     await start(bar)
-    states.denied = await settled(bar, 'mic-denied')
+    states.denied = await settled(bar, 'mic-denied'); await failureTooltip(context.pages()[0], 'NotAllowedError')
     await context.close()
     // Simulated in page: no capture device present.
     ;({ context, bar } = await openNexus(granting, host.url, () => { navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Requested device not found', 'NotFoundError')) }))
     await start(bar)
-    states.noDevice = await settled(bar, 'no-device')
+    states.noDevice = await settled(bar, 'no-device'); await failureTooltip(context.pages()[0], 'NotFoundError')
     await context.close()
     // Browser-enforced autoplay policy: a start without user activation leaves the audio output suspended.
     // Opening Nexus takes real clicks and Playwright evaluation counts as a gesture, so a second context reopens
@@ -718,7 +719,7 @@ test('voice call states: no device, denied permission and blocked playback never
     // No Playwright call touches the page until the timer has pressed the button.
     await delay(10000)
     bar = page.locator('[data-nexus-voice]')
-    states.playback = await settled(bar, 'playback-blocked')
+    states.playback = await settled(bar, 'playback-blocked'); await failureTooltip(page, 'suspended')
     assert.equal(await page.evaluate(() => window.__activated), false, 'the call was started without user activation')
     await context.close()
     assert.equal(model.log.connections, 0, 'failed device states never open the model connection')
@@ -734,7 +735,7 @@ test('voice call states: no device, denied permission and blocked playback never
     await until(async () => (await state(bar)) === 'idle', 'hung up while connecting')
     await until(() => model.log.closed === 1, 'model connection closed with the call')
     await context.close()
-    assert.deepEqual(states, { denied: '麦克风权限被拒绝 (NotAllowedError)', noDevice: '没有可用的麦克风 (NotFoundError)', playback: '音频播放未就绪 (suspended)', connecting: '正在接通…' })
+    assert.deepEqual(states, { denied: '麦克风权限被拒绝', noDevice: '没有可用的麦克风', playback: '浏览器暂不允许播放声音', connecting: '正在接通…' })
     console.log('voice states evidence:', host.home, JSON.stringify(states))
   } catch (error) {
     console.log(host.output().slice(-4000))
@@ -762,7 +763,7 @@ test('accurate Realtime voice call: real model hears synthesized speech, dispatc
     const opened = await openNexus(browser, host.url)
     page = opened.page
     const bar = opened.bar
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live', 'live call', 30000)
     await until(async () => (await docs())?.status === 'running', 'docs worker running', 90000)
     // The second utterance gets its own completed native turn while the worker still runs.
@@ -845,7 +846,7 @@ test('voice call races: hanging up during the microphone request or rapidly rest
     const opened = await openNexus(browser, host.url, [instrument, [1500]])
     page = opened.page
     const bar = opened.bar
-    const start = () => bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    const start = () => bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     const hangup = () => bar.getByRole('button', { name: /挂断|Hang up/ }).click()
     const tracks = () => trackStates(page)
     // Hang up while the microphone request is pending.
@@ -860,7 +861,7 @@ test('voice call races: hanging up during the microphone request or rapidly rest
     await start()
     await until(async () => (await state(bar)) === 'live', 'first live call')
     // Hang up and call again one task later, as close as the page allows.
-    const previousControlConnected = await page.evaluate(async () => { const previous = document.querySelector('[data-nexus-voice] button'); previous.click(); await new Promise(accept => setTimeout(accept, 0)); const connected = previous.isConnected; document.querySelector('[data-nexus-voice] button').click(); return connected })
+    const previousControlConnected = await page.evaluate(async () => { const previous = document.querySelector('[data-nexus-voice] [aria-label="挂断"]'); previous.click(); await new Promise(accept => setTimeout(accept, 0)); const connected = previous.isConnected; document.querySelector('[data-nexus-voice] button').click(); return connected })
     console.log('rapid restart: previous control still connected:', previousControlConnected)
     await until(async () => (await state(bar)) === 'live', 'second live call')
     await until(() => model.log.closed === 1, 'first call closed')
@@ -913,7 +914,7 @@ test('voice call creates a new work session, may stay silent on its result, and 
     const opened = await openNexus(browser, host.url)
     page = opened.page
     const bar = opened.bar
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live', 'live call')
     const created = async () => (await host.status())?.agents?.find(agent => !['nexus-supervisor', 'docs'].includes(agent.id))
     await until(async () => (await created())?.status === 'running', 'new worker running')
@@ -996,7 +997,7 @@ test('voice hang-up keeps no unheard utterance, continues a pending result in te
     const opened = await openNexus(browser, host.url, [instrument, []])
     page = opened.page
     const bar = opened.bar
-    const start = async () => { await bar.getByRole('button', { name: /接通语音|Start voice/ }).click(); await until(async () => (await state(bar)) === 'live', 'live call') }
+    const start = async () => { await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click(); await until(async () => (await state(bar)) === 'live', 'live call') }
     const hangup = async () => { await bar.getByRole('button', { name: /挂断|Hang up/ }).click(); await until(async () => (await state(bar)) === 'idle', 'call ended') }
     // 1. The model committed an utterance but neither transcribed nor answered it before the hang-up.
     await start()
@@ -1021,7 +1022,10 @@ test('voice hang-up keeps no unheard utterance, continues a pending result in te
     await until(async () => (await page.evaluate(() => window.__failures)).includes('UNAVAILABLE'), 'Host sent the call an UNAVAILABLE failure', 15000)
     const history = await page.evaluate(() => window.__states)
     console.log('call states across the Host stop:', JSON.stringify(history), JSON.stringify(await page.evaluate(() => window.__failures)))
-    assert.ok(['live', 'failed:UNAVAILABLE'].includes(history.at(-1)))
+    // The polished UI subscribes synchronously, so disposal's idle notification
+    // can be observed before the slot unmounts. It must follow the real failure.
+    if (history.at(-1) === 'idle') assert.deepEqual(history.slice(-2), ['failed:UNAVAILABLE', 'idle'])
+    else assert.ok(['live', 'failed:UNAVAILABLE'].includes(history.at(-1)))
 
     const events = result.events
     const turnOf = seq => events.findLast(event => event.type === 'turn/start' && event.seq < seq).data.turn
@@ -1063,7 +1067,7 @@ test('accurate Realtime voice call: real model creates a new work session from s
     const opened = await openNexus(browser, host.url)
     page = opened.page
     const bar = opened.bar
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live', 'live call', 30000)
     await until(async () => (await created())?.status === 'running', 'new worker running', 120000)
     await host.release()
@@ -1131,7 +1135,7 @@ test('voice call whose response stalls fails the call instead of hanging the sup
     const opened = await openNexus(browser, host.url, [instrument, []])
     page = opened.page
     const bar = opened.bar
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live', 'live call')
     await until(async () => (await host.status())?.agents?.find(agent => agent.id === 'docs')?.status === 'running', 'docs worker running')
     await host.release()
@@ -1172,7 +1176,7 @@ async function controlledCall(t, scenario, model, capture, run, { key, beforeSta
     const opened = await openNexus(browser, host.url, [instrument, []], preparePage)
     page = opened.page
     await beforeStart?.({ host, page, bar: opened.bar })
-    await opened.bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await opened.bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(opened.bar)) === 'live', 'live call')
     await run({ host, page, bar: opened.bar, browser })
     await writeFile(resolve(host.home, 'wire.json'), JSON.stringify({ wire: model.wire, log: model.log }))
@@ -1575,7 +1579,7 @@ for (const [scenario, plan] of [['generating', { text: 'DISPATCH-LONG', paced: 6
       await delay(500)
       assert.equal((await trackStates(page)).length, 0)
       assert.equal(model.log.connections, connections)
-      await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+      await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
       await until(async () => (await state(bar)) === 'live', 'manually reconnected')
       const last = model.log.connections
       const replay = model.wire.filter(event => event.connection === last && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
@@ -1628,7 +1632,7 @@ test('accurate Realtime hangup: text-dispatched work continues through a voice c
       for (const response of responses) assert.deepEqual(response.response.modalities, ['text'])
       assert.ok(!incoming.some(event => event.type.startsWith('response.audio.')), 'text response generated no output audio')
     }
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live', 'real manual reconnect', 30000)
     const connection = model.log.connections
     const replay = model.wire.filter(event => event.connection === connection && event.direction === 'c2s' && event.type === 'conversation.item.create').map(event => event.item.text).join('\n')
@@ -1667,7 +1671,7 @@ test('hangup during a native tool keeps it running, and a rapid manual reconnect
   const capture = await voiceFixture([{ silence: 1.5 }, { text: '请查一下API资料。', voice: ZH }, { silence: 30 }])
   await controlledCall(t, 'hangup-tool', model, capture, async ({ host, page, bar }) => {
     await until(async () => { try { await readFile(resolve(host.home, 'tool-started')); return true } catch { return false } }, 'native tool pending')
-    await page.evaluate(async () => { document.querySelector('[data-nexus-voice] button').click(); await new Promise(accept => setTimeout(accept, 0)); document.querySelector('[data-nexus-voice] button').click() })
+    await page.evaluate(async () => { document.querySelector('[data-nexus-voice] [aria-label="挂断"]').click(); await new Promise(accept => setTimeout(accept, 0)); document.querySelector('[data-nexus-voice] button').click() })
     await until(async () => (await state(bar)) === 'live' && model.log.connections === 2, 'rapid manually reconnected')
     await writeFile(resolve(host.home, 'tool-release'), '')
     await until(() => model.log.responses.some(response => response.connection === 2 && response.text?.startsWith('TOOL-CONTINUED')), 'same tool result on new call')
@@ -1691,7 +1695,7 @@ test('hangup idle playback then immediately reconnect preserves its notice befor
   await controlledCall(t, 'hangup-idle-notice', model, capture, async ({ host, page, bar }) => {
     await until(async () => Number(await bar.getAttribute('data-played-samples')) >= 384000 && (await supervisorOf(host))?.status === 'idle', 'generated idle reply still playing')
     await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
-    await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+    await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
     await until(async () => (await state(bar)) === 'live' && model.log.connections === 2, 'immediate manual reconnect', 15000)
     const replay = model.wire.filter(event => event.connection === 2 && event.type === 'conversation.item.create').map(event => JSON.stringify(event.item)).join('\n')
     assert.match(replay, /ended the call during/)
@@ -1776,7 +1780,7 @@ for (const scenario of ['flush-pending', 'several-flushes-pending', 'played-in-t
       await editor.press('Enter')
       await until(() => model.log.responses.some(response => response.text === 'TEXT-REPLY'), 'text continuation recorded notices')
       await until(async () => (await supervisorOf(host))?.status === 'idle', 'text continuation idle')
-      await bar.getByRole('button', { name: /接通语音|Start voice/ }).click()
+      await bar.getByRole('button', { name: /接通语音|Start voice|重试|Retry/ }).click()
       await until(async () => (await state(bar)) === 'live', 'manual reconnect')
       await bar.getByRole('button', { name: /挂断|Hang up/ }).click()
       const result = await host.finish()

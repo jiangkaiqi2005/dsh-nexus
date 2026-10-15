@@ -212,17 +212,19 @@ for (const [failure, expected] of [['permission', 'mic-denied'], ['device', 'no-
       }
     }, failure])
     const bar = page.locator('[data-nexus-voice]')
+    const pageErrors = []; page.on('pageerror', error => pageErrors.push(String(error)))
     await until(async () => await bar.getAttribute('data-state') === expected, 'actual automatic failure')
     assert.equal(await page.evaluate(() => window.__attempts), 1)
     assert.equal(await page.evaluate(() => window.__requests), failure === 'playback' ? 0 : 1)
     assert.deepEqual(await page.evaluate(() => window.__streams.flatMap(stream => stream.getTracks().map(track => track.readyState))), failure === 'model' ? ['ended'] : [])
     await delay(1000)
     assert.equal(await page.evaluate(() => window.__attempts), 1, 'no automatic retry')
-    // The existing manual entry works once the external condition is repaired.
+    // Retry works once the external condition is repaired.
     rejectModel = false
     await page.evaluate(() => { window.__failure = undefined })
-    await bar.getByRole('button', { name: '接通语音', exact: true }).click()
-    await until(async () => await bar.getAttribute('data-state') === 'live', 'manual repair')
+    await bar.getByRole('button', { name: '重试', exact: true }).click()
+    try { await until(async () => await bar.getAttribute('data-state') === 'live', 'manual repair') }
+    catch (error) { await page.screenshot({ path: resolve(fixture.home, 'repair-failure.png') }); await writeFile(resolve(fixture.home, 'repair-failure.json'), JSON.stringify({ pageErrors, body: await page.locator('body').ariaSnapshot() }, null, 2)); throw error }
     await bar.getByRole('button', { name: '挂断', exact: true }).click()
     await page.reload()
     await dismissOnboarding(page)

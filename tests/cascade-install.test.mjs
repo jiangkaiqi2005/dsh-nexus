@@ -108,10 +108,10 @@ test('Desktop installed cascade bundle runs tap dispatch, interruption, native r
     await until(async () => { for (const name of ['继续', '稍后配置']) { const button = page.getByRole('button', { name, exact: true }); if (await button.isVisible()) await button.click() }; if (await bar.isVisible()) return true; await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click({ timeout: 1000 }).catch(() => {}) }, 'native Nexus entry')
     assert.equal(await bar.getAttribute('data-state'), 'idle'); assert.equal(await page.evaluate(() => window.__streams.length), 0)
     await bar.getByRole('button', { name: '接通语音', exact: true }).click(); await until(async () => await bar.getAttribute('data-state') === 'live', 'prepared cascade media')
-    const record = async () => { await bar.getByRole('button', { name: '开始录音', exact: true }).click(); await sleep(350); await bar.getByRole('button', { name: '结束录音', exact: true }).click() }
+    const record = async () => { await bar.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await sleep(350); await bar.getByRole('button', { name: '结束录音', exact: true }).click() }
     await record(); await until(async () => (await json(resolve(dir, 'ready.json')))?.agents.find(agent => agent.id === 'repair')?.status === 'running', 'actual dispatched native worker')
     await until(async () => Number(await bar.getAttribute('data-played-samples')) >= 96000, 'actual PCM confirmation')
-    await bar.getByRole('button', { name: '开始录音', exact: true }).click()
+    await bar.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click()
     assert.ok(await page.evaluate(() => window.__nodes.every(item => item.stopped || item.node.context.currentTime >= item.when + item.node.buffer.duration)), 'local playback stopped immediately')
     await until(() => tasks[0].canceled, 'synthesis canceled'); await sleep(350); await bar.getByRole('button', { name: '结束录音', exact: true }).click()
     await until(async () => (await json(resolve(dir, 'ready.json')))?.agents.find(agent => agent.id === 'repair')?.events.some(event => event.type === 'agent/inbox/spliced' && JSON.stringify(event).includes('ZERO-WORD')), 'voice steer delivered to running worker')
