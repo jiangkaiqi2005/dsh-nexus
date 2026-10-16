@@ -63,7 +63,7 @@ async function fixture(run, { credential = true } = {}) {
       await until(async () => { for (const label of ['继续', '稍后配置']) { const item = button(page, label); if (await item.isVisible()) await item.click() }; if (await voice(page).isVisible()) return true; await button(page, '打开 Nexus').click({ timeout: 1000 }).catch(() => {}) }, 'Nexus composer')
       return page
     }
-    await run({ open, browser, dir, responses, requests, tasks })
+    await run({ open, browser, dir, responses, requests, tasks, pageErrors })
     await writeFile(resolve(dir, 'ui-finish'), '')
     let report; await until(async () => { try { report = JSON.parse(await readFile(resolve(dir, 'report.json'), 'utf8')); return true } catch { return false } }, 'native journal')
     assert.equal(report.error, undefined, report.stack)
@@ -138,6 +138,7 @@ test('call bar stays in Nexus, pill navigates back, and only one voice control i
   await button(page, '设置').click()
   await page.locator('.nx-a-pill').waitFor()
   assert.equal(await voice(page).count(), 1)
+  assert.equal(await page.locator('.nx-a-pill').evaluate(element => element.offsetParent !== null), true, 'the settings pill has a layout layer to stay inside')
   if (process.env.NEXUS_UI_SHOTS === '1') { await mkdir(resolve('docs/ui-polish/verification/shots'), { recursive: true }); await page.mouse.move(0, 0); await page.screenshot({ path: resolve('docs/ui-polish/verification/shots/dark-pill-settings.png') }) }
   await page.locator('.nx-a-pill-main').click()
   await page.locator('.nx-a-bar').waitFor()
@@ -146,9 +147,8 @@ test('call bar stays in Nexus, pill navigates back, and only one voice control i
   await button(page, '挂断').click()
 }))
 
-test('call bar follows the host input width, both controls escape the Desktop drag region, and the pill drags and remembers its spot', { timeout: 150000 }, async () => fixture(async ({ open, dir }) => {
+test('call bar follows the host input width, both controls escape the Desktop drag region, and the pill drags and remembers its spot', { timeout: 150000 }, async () => fixture(async ({ open, dir, pageErrors }) => {
   const page = await open()
-  const errors = []; page.on('pageerror', error => errors.push(String(error))); page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
   const out = process.env.NEXUS_UI_SHOTS === '1' ? resolve('docs/ui-polish/verification/shots') : resolve(dir, 'shots')
   await mkdir(out, { recursive: true })
   const measurements = []
@@ -166,13 +166,20 @@ test('call bar follows the host input width, both controls escape the Desktop dr
     const regions = await page.locator(selector).evaluate(root => [root, ...root.querySelectorAll('*')].map(element => getComputedStyle(element).getPropertyValue('-webkit-app-region')))
     assert.ok(regions.length > 1 && regions.every(region => region === 'no-drag'), `${selector} opts out of the drag region: ${regions}`)
   }
-  const shotBar = async name => {
-    const box = await page.locator('[contenteditable=true]').last().boundingBox(), width = page.viewportSize().width
-    for (const colorScheme of ['dark', 'light']) { await page.emulateMedia({ colorScheme }); await page.mouse.move(0, 0); await page.waitForTimeout(200); await page.screenshot({ path: resolve(out, `${colorScheme}-${name}.png`), clip: { x: 200, y: Math.max(0, box.y - 190), width: width - 200, height: 330 } }) }
+  const shoot = async (name, clip) => {
+    for (const colorScheme of ['dark', 'light']) { await page.emulateMedia({ colorScheme }); await page.mouse.move(0, 0); await page.waitForTimeout(200); await page.screenshot({ path: resolve(out, `${colorScheme}-${name}.png`), clip }) }
     await page.emulateMedia({ colorScheme: 'dark' })
+  }
+  const shotBar = async name => {
+    const box = await page.locator('[contenteditable=true]').last().boundingBox()
+    await shoot(name, { x: 200, y: Math.max(0, box.y - 190), width: page.viewportSize().width - 200, height: 330 })
   }
   await noDrag('.nx-a-bar')
   await button(page, '接通语音').click(); await until(async () => await voice(page).getAttribute('data-state') === 'live', 'live')
+  // Once connected the bar also holds the mode tag, Tap to talk and Hang up.
+  await noDrag('.nx-a-bar')
+  for (const name of ['点按说话', '挂断']) assert.equal(await page.locator('.nx-a-bar').getByRole('button', { name, exact: true }).count(), 1)
+  assert.equal(await page.locator('.nx-a-bar .nx-tag').count(), 1)
   await aligned('empty 1360x860'); await shotBar('bar-align-1360')
   await page.setViewportSize({ width: 1920, height: 1080 })
   const wide = await aligned('empty 1920x1080'); await shotBar('bar-align-1920')
@@ -202,6 +209,7 @@ test('call bar follows the host input width, both controls escape the Desktop dr
   await button(page, '点按说话').click(); await until(async () => await voice(page).getAttribute('data-activity') === 'recording', 'recording')
   await elsewhere()
   await noDrag('.nx-a-pill')
+  assert.equal(await pill.evaluate(element => element.offsetParent?.hasAttribute('data-shell-overlay')), true, 'the pill is laid out in the shell overlay layer')
   const home = await centered()
   // From the icon/status area: past the threshold it drags and does not open Nexus.
   const main = await rect(page.locator('.nx-a-pill-main'))
@@ -213,8 +221,7 @@ test('call bar follows the host input width, both controls escape the Desktop dr
   assert.equal(await page.locator('.nx-a-bar').count(), 0, 'dragging does not return to Nexus')
   assert.deepEqual([await voice(page).getAttribute('data-state'), await voice(page).getAttribute('data-activity')], ['live', 'recording'], 'dragging neither ends recording nor hangs up')
   await until(async () => /0:0[3-9]/.test(await page.locator('.nx-timer').textContent()), 'pill recording timer')
-  for (const colorScheme of ['dark', 'light']) { await page.emulateMedia({ colorScheme }); await page.mouse.move(0, 0); await page.waitForTimeout(200); await page.screenshot({ path: resolve(out, `${colorScheme}-pill-dragged.png`) }) }
-  await page.emulateMedia({ colorScheme: 'dark' })
+  await shoot('pill-dragged')
   await button(page, '结束录音').click(); await status(page).filter({ hasText: '没听清' }).waitFor()
   near(await rect(pill), dropped.x, dropped.y, 'a pill button still clicks in place')
   // Clamped to the window, pulled back in when it shrinks, and the saved spot returns when it grows.
@@ -233,14 +240,15 @@ test('call bar follows the host input width, both controls escape the Desktop dr
   await page.locator('.nx-a-pill-main').click(); await page.locator('.nx-a-bar').waitFor()
   await elsewhere(); const fallback = await centered()
   await drag(fallback.x + 3, fallback.y + fallback.height / 2, 0, 200); near(await rect(pill), fallback.x, fallback.y + 200, 'drags without storage')
-  assert.deepEqual(errors, [], 'no page or console errors before the reload, including while storage is unavailable')
   // The saved spot also survives a reload.
   await page.reload()
   await until(async () => { if (await page.locator('.nx-a-bar').isVisible()) return true; await button(page, '打开 Nexus').click({ timeout: 1000 }).catch(() => {}) }, 'Nexus after reload')
   await button(page, '接通语音').click(); await until(async () => await voice(page).getAttribute('data-state') === 'live', 'live after reload')
   await elsewhere(); near(await rect(pill), corner.x, corner.y, 'restored after reload')
-  await writeFile(resolve(dir, '03-measurements.json'), JSON.stringify(measurements, null, 2))
+  await writeFile(resolve(dir, '03-measurements.json'), JSON.stringify({ measurements, pageErrors }, null, 2))
   assert.equal(await page.evaluate(() => window.__duplicateVoice), false)
+  // The host's own early-open race after a reload (sessions.retain before the session catalog loads) is not this client's error.
+  assert.deepEqual(pageErrors.filter(error => error !== 'Error: sessions.retain: unknown session nexus-supervisor'), [], 'no page or console errors, including while storage is unavailable')
   await button(page, '挂断').click()
 }))
 
