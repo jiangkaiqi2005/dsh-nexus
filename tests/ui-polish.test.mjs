@@ -6,6 +6,7 @@ import { chromium } from 'playwright'
 import { WebSocketServer } from 'ws'
 import { createServer } from 'node:http'
 import { startHost } from './host-process.mjs'
+import { failureTooltip } from './voice-ui.mjs'
 
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const until = async (check, label, ms = 20000) => { for (const deadline = Date.now() + ms; !(await check()); ) { if (Date.now() > deadline) throw new Error(`waiting for ${label}`); await sleep(50) } }
@@ -141,6 +142,7 @@ for (const scheme of ['dark', 'light']) test(`${scheme} real call scenes match t
   assert.match(await page.locator('.nx-timer-late').textContent(), /0:5\d \/ 1:00/)
   await page.clock.setSystemTime(Date.now())
   await button(page, '结束录音').click(); await status(page).filter({ hasText: '没听清' }).waitFor()
+  assert.equal(await status(page).locator('.nx-info').count(), 0, 'unheard without a code retains the prototype appearance')
   await shot('bar-unheard')
   await submit(page, 'HOLD-SPEECH'); await status(page).filter({ hasText: '思考中' }).waitFor()
   await shot('bar-thinking')
@@ -174,7 +176,7 @@ test('microphone errors stay friendly and persistent, retain the raw code in Too
   await button(page, '挂断').click()
 }))
 
-test('unheard and synthesis failure expire after four seconds and new activity replaces them immediately', { timeout: 90000 }, async () => fixture(async ({ open, responses }) => {
+test('unheard and synthesis failure expire after four seconds and new activity replaces them immediately', { timeout: 90000 }, async () => fixture(async ({ open, responses, dir }) => {
   const page = await open()
   await button(page, '接通语音').click(); await until(async () => await voice(page).getAttribute('data-state') === 'live', 'live')
   const record = async () => { await button(page, '点按说话').click(); await sleep(350); await button(page, '结束录音').click(); await status(page).filter({ hasText: '没听清' }).waitFor() }
@@ -188,9 +190,20 @@ test('unheard and synthesis failure expire after four seconds and new activity r
   assert.match(await status(page).textContent(), /正在听/)
   await button(page, '结束录音').click(); await status(page).filter({ hasText: '没听清' }).waitFor()
   await submit(page, 'FAIL-SPEECH'); await status(page).filter({ hasText: '朗读失败，文字已保留' }).waitFor()
+  const failureStart = Date.now()
+  await failureTooltip(page, 'TTS_SYNTHESIS_FAILED')
   await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor()
-  await sleep(3300); assert.equal(await status(page).textContent(), '朗读失败，文字已保留')
+  const out = process.env.NEXUS_UI_SHOTS === '1' ? resolve('docs/ui-polish/verification/shots') : resolve(dir, 'shots')
+  await mkdir(out, { recursive: true })
+  const box = await page.locator('[contenteditable=true]').last().boundingBox()
+  for (const colorScheme of ['dark', 'light']) {
+    await page.emulateMedia({ colorScheme })
+    await page.screenshot({ path: resolve(out, `${colorScheme}-bar-tts-failed.png`), clip: { x: 200, y: Math.max(0, box.y - 190), width: 1160, height: 330 } })
+  }
+  await sleep(Math.max(0, 3300 - (Date.now() - failureStart))); assert.equal(await status(page).textContent(), '朗读失败，文字已保留')
   await until(async () => await status(page).textContent() === '已接通 · 点按说话', 'TTS notice expired', 2000)
+  assert.ok(Date.now() - failureStart >= 3700 && Date.now() - failureStart < 5100)
+  assert.equal(await status(page).locator('.nx-info').count(), 0, 'the expired failure code disappears with its notice')
   await button(page, '挂断').click()
 }))
 

@@ -6,7 +6,7 @@
 
 - 从原型移植 `describe`、`Status`、`Bars`、按钮、模式标签、两个 SVG、`BarA`、`PillA` 和 `SidebarEntry`；复用 primitives，保留 DOM 顺序、`nx-` 类名、图标、原型中文文案和主题参数。英文通过现有 locale 注册。
 - 用真实 `Call` 状态、动作和录音开始时间替换假数据；麦克风及播放各分接一个只读 `AnalyserNode`，70ms 采样显示电平。采集、播放、冲刷、回报与帧校验保留。
-- 临时提示只在表现层计时，4 秒后显示空闲，新活动立即替换；不篡改 `data-activity`。持久错误显示重试和原始码 Tooltip。重试等待旧 Call stream 结束，避免抢占尚未释放的媒体所有权。
+- 临时提示只在表现层计时，4 秒后显示空闲，新活动立即替换；不篡改 `data-activity`。带 code 的失败（包括临时提示）显示原始码 Tooltip，持久错误另显示重试。重试等待旧 Call stream 结束，避免抢占尚未释放的媒体所有权。
 - 侧栏沿用原型图标与状态点；主会话横条、其他页面胶囊共用映射。保留全部六个 `data-*` 属性。
 - 未修改 `src/`、协议、状态码、设置表单及其保存语义。
 
@@ -59,10 +59,10 @@
 3. **修复原型缺陷：非空会话横条过宽。** 原型 `.nx-a-bar` 在空会话的窄容器中正好对齐，但真实消息出现后 dock 是整列宽度。保留原 CSS，追加 `width: calc(100% - 32px); max-width: 724px; margin-inline: auto`，使本票基线视口下空 / 非空会话都与原生输入卡片对齐。无新增颜色 token；1360×860 下仍是基线的 724px 宽、44px 高。对照 recording、thinking、reading、unheard 图；每次截图均检查横条与实际卡片的 x / width，容差小于 1px。
 4. **修复原型缺陷：设置遮罩后仍挂载横条。** 原型仅统计主会话是否挂载，打开设置后既隐藏胶囊，又把横条留在遮罩后。增加不可见的 `settings.action` 生命周期锚点，同一胶囊通过 portal 放入视口大小的设置遮罩层，保持 `PillA` DOM / CSS 不变。点击主区域调用原生 `closeTopModal` 后返回 Nexus，不改设置表单。补充证据：[设置中的胶囊](shots/dark-pill-settings.png)，以及导航测试的单控件和点击返回断言。
 5. **修复原型缺陷：跨槽位显示交接。** 原型用普通 effect 计数，初次挂载可能短暂出现横条与胶囊；改为 layout effect 和同步快照订阅，在交接完成后挂载对应控件。MutationObserver 覆盖打开、离开、返回和设置切换，检查任何一批 DOM 变动后均不超过一个 `[data-nexus-voice]`；保留现有实际状态及音频记账属性。
-6. **真实数据及原型缺口：失败码和真实动作。** 原型只有模拟的 `NotAllowedError` / `CALL_CLOSED`；实现增加 Spec 的完整失败映射与中英文文案。原始码放在 Tooltip，未知码无提示时直接显示码，避免空提示分隔符；临时 ASR / TTS 提示沿用原型无 info 图标的结构，准确码由语音测试在真实 gateway 下行验证。重试调用真实挂断与接通，并等待旧 stream 释放；这些都替换原型的假状态 / 假动作。同步订阅还会观察到 Host 停止后的实际清理状态：`failed:UNAVAILABLE → idle`；旧测试若最后观察到 idle，现在必须断言紧邻的前一状态确实为该失败，原有真实失败帧和麦克风释放断言不变。对照 mic-denied 图及失败 / 重试测试。
+6. **真实数据及原型缺口：失败码和真实动作。** 原型只有模拟的 `NotAllowedError` / `CALL_CLOSED`；实现增加 Spec 的完整失败映射与中英文文案。原始码放在 Tooltip，未知码无提示时直接显示码，避免空提示分隔符。第 1 轮修复补齐带 code 的临时 ASR / TTS 失败：复用原型 Status 已有的 info 图标及 Tooltip（与 mic-denied 相同），满足 Spec「失败时显示友好文案，Tooltip 里含原始码」；没有 code 的 `unheard` 保持原型无图标结构。真实 TTS 失败的原始码由浏览器 Tooltip 和 gateway 下行分别验证，4 秒后提示及图标一起消失。重试调用真实挂断与接通，并等待旧 stream 释放；这些都替换原型的假状态 / 假动作。同步订阅还会观察到 Host 停止后的实际清理状态：`failed:UNAVAILABLE → idle`；旧测试若最后观察到 idle，现在必须断言紧邻的前一状态确实为该失败，原有真实失败帧和麦克风释放断言不变。对照 mic-denied 图、下列 TTS 补充图及失败 / 重试测试。
 7. **原型专用元素按 Spec 移除。** 胶囊全屏基线底部有粉色 `Switcher`，实现不移植；也没有 B / C、假 store、随机电平、`localStorage` 原型状态。对照两张 pill-recording 图。
 
-## 实际命令与结果
+## 实际命令与结果（初次实施）
 
 最终完整检查：148 项，136 通过、0 失败、12 跳过，退出码 0；跳过的是需要显式启用真实服务的测试，Desktop 与独立安装均已实际执行通过。以下保留实施中实际执行的聚焦验证，不把失败写成通过。
 
@@ -98,6 +98,36 @@
 
 最终轮安装证据目录：`.scratch/cascade-voice/06-installed-HIgi9z`、`.scratch/nexus-v1/ticket11-scenario-YexpdN`、`.scratch/nexus-v1/desktop-smoke-sQB1Tg`。双主题测量与运行现场分别在 `.scratch/ui-polish/01-1792087484832`、`.scratch/ui-polish/01-1792087499084`；设置胶囊现场在 `.scratch/ui-polish/01-1792087479024`。
 
+## 第 1 轮评审修复
+
+- **S1 — fixed。** 核实全部翻译调用后，仅删除 en / zh 注册中各 10 个无调用方旧键：`start-recording`、`end-recording`、`activity-recording`、`activity-recognizing`、`activity-unheard`、`activity-thinking`、`activity-reading`、`activity-failed`、`start`、`hangup`。同名协议消息、校验及 Call 均保留。
+- **P1 — fixed。** `describe` 的 `unheard` / `tts-failed` 描述保留收到的 code，直接使用现有 Status Tooltip。`cascade-spoken.test.mjs` 两处恢复真实 UI 的 `TTS_SYNTHESIS_FAILED` Tooltip 断言；`ui-polish.test.mjs` 同时检查原始码、无 code 时无图标、4 秒到期后提示与图标消失。计时逻辑未改。
+- **P2 — fixed。** 窄侧栏追加状态的条件恢复为原型 `506ba38:prototype/ui-polish/client.prototype.js:245` 的 `d.live`，不再对 connecting / mic-denied 附加状态。无需新增偏离。
+- **P3 — 未决，保持原状。** ASR 缺凭据的原因在现有 Host 中被丢弃；不改 `src/`、协议、状态码或设置页，票 01 第 19 行保持未勾选，交由用户裁定。
+
+本轮运行完整截图单文件，实际生成全部 16 个基线场景及设置补充图；仅保留受影响的 `dark-bar-unheard.png` / `light-bar-unheard.png` 更新，其余无关截图恢复为本轮开始时版本。两张 unheard 图均已与基线目视对照：控件文字、图标和结构保持一致，没有新增 info；宿主非空会话与裁剪差异仍见偏离 2、3。另存真实 TTS 失败的深浅主题补充图，沿用相同视口与裁剪；基线没有这一场景，不伪称有对应基线，info 图标复用 mic-denied 的原型部件。
+
+| 补充场景（无独立基线） | dark | light |
+| --- | --- | --- |
+| 带 code 的普通 TTS 失败 | ![dark TTS 失败](shots/dark-bar-tts-failed.png) | ![light TTS 失败](shots/light-bar-tts-failed.png) |
+
+| 本轮命令 | 实际结果 |
+| --- | --- |
+| `node --test --test-name-pattern='unheard and synthesis' tests/ui-polish.test.mjs`（修复前） | 前两次各 0 通过 / 1 失败：Host URL 就绪超时且日志为空；第三次成功启动真实 Host，0 通过 / 1 失败，明确失败于查找缺失的 `.nx-info`，复现 P1。日志为 `.scratch/ui-polish/r1-red.log`、`r1-red-retry.log`、`r1-red-final.log` |
+| `$env:NEXUS_UI_SHOTS='1'; node --test tests/ui-polish.test.mjs` | 6 通过 / 0 失败，退出码 0，耗时 69.841 秒；日志 `.scratch/ui-polish/r1-ui.log` |
+| `node --test tests/cascade-spoken.test.mjs` | 4 通过 / 0 失败 / 1 项真实 DashScope opt-in 跳过，退出码 0；日志 `.scratch/ui-polish/r1-spoken.log` |
+| `npm run typecheck` | 通过，退出码 0 |
+| `npm run build` | 通过，退出码 0 |
+| `node --check client.js` | 通过，退出码 0 |
+| `node .scratch/ui-polish/audit.mjs` | 通过，退出码 0：Call（排除原有分析节点新增）、帧校验、Settings、CSS 及 SVG 的范围核对均保持通过 |
+| `git diff --check` | 通过，退出码 0 |
+| `$env:NEXUS_DESKTOP_SMOKE='1'; npm test` | 148 项：136 通过 / 0 失败 / 12 项真实服务 opt-in 跳过，退出码 0，耗时 1264.718 秒；三个 Desktop / 独立安装场景均实际通过。日志 `.scratch/ui-polish/r1-full.log` |
+| `git diff --cached --check` | 提交前通过，退出码 0 |
+
+本轮双主题 unheard 运行现场：`.scratch/ui-polish/01-1792113880422`、`.scratch/ui-polish/01-1792113894863`；TTS 临时失败与 Tooltip / 计时断言现场：`.scratch/ui-polish/01-1792113919202`。完整回归再次通过同样的 6 个 UI 用例，截图仅写入 `.scratch/`，未改动上述存档；新一轮 UI 现场在 `.scratch/ui-polish/01-1792114761666` 至 `01-1792114822729`。
+
+本轮安装证据：`.scratch/cascade-voice/06-installed-lDdw7M`、`.scratch/nexus-v1/ticket11-scenario-GvsLs6`、`.scratch/nexus-v1/desktop-smoke-oGI5rm`；使用既有 Desktop CLI `D:/DeepSeekHarness/resources/runtime/cli/bin/dsh.cmd`。级联安装包 SHA256 为 `40bf48806843a69ae7ac4d7878cfc4fd9b7cce2285f6d16fb03da00bd68a74c5`。
+
 ## 边界与待验
 
 - **ASR 缺凭据仍无法在真实 UI 中区别于其他 unheard。** `src/recognition.ts` 的 `Recording.finish()` 在 `.catch()` 中丢弃原因，活动回调只报告 phase；`src/supervisor.ts` 传给客户端的该帧没有 code。受控无凭据运行确认下行为 `activity/unheard` 且无 code。前端已支持收到 `ASR_CREDENTIAL_MISSING` 时的专用映射，但现有 Host 不会发它；没有修改 Host、状态码或协议，也没有用“没听清”伪称已完成凭据区分。TTS 缺凭据通过真实 `TTS_CREDENTIAL_MISSING` 验证，包括 4 秒后仍保留、后续活动不覆盖、Tooltip 和重试。
@@ -105,4 +135,4 @@
 - 实施期间曾在聚焦测试运行时继续编辑客户端，官方开发 Host 会热重载客户端；出现过控件被卸载的中间失败。保留上表失败事实；最终整套检查在固定客户端文件上串行运行，不以单次重跑代替最终回归。
 - 未调用真实 DashScope 服务；相关 opt-in 测试按默认条件跳过。假媒体不代表真实麦克风、扬声器或设备权限体验的实机验收。
 - 横条非空对齐修复按当前原生默认输入宽度和本票视口验证；用户另行调整宿主聊天宽度后的布局未专门验收。
-- 用户实机目视验收及协调者独立 code-review 待进行；票 02 设置页分组未实施。
+- 用户实机目视验收及协调者本轮复审待进行；票 02 设置页分组未实施。

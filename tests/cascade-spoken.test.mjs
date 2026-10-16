@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { startHost } from './host-process.mjs'
 import { chromium } from 'playwright'
 import { WebSocketServer } from 'ws'
+import { failureTooltip } from './voice-ui.mjs'
 
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const until = async (predicate, label, ms = 15000) => { for (const deadline = Date.now() + ms; !(await predicate()); ) { if (Date.now() > deadline) throw new Error(`waiting for ${label}`); await sleep(50) } }
@@ -133,6 +134,7 @@ test('cascade speaks complete Chinese and English sentences in order, preserves 
       await submit(page, 'FAIL-SPEECH')
       await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor()
       await page.getByRole('status').filter({ hasText: '朗读失败，文字已保留' }).waitFor(); assert.equal(await page.locator('[data-nexus-voice]').getAttribute('data-activity'), 'failed')
+      await failureTooltip(page, 'TTS_SYNTHESIS_FAILED')
       await connected(page)
       assert.equal(tasks.length, before + 1)
       await page.screenshot({ path: resolve(dir, 'tts-failure-connected.png') })
@@ -263,6 +265,7 @@ test('a later TTS failure stops only its own PCM while an earlier successful rep
       await until(async () => first(await playback(page)).some(node => node.audible), 'first reply actually playing')
       await submit(page, 'FAIL-SPEECH'); await page.getByText('FAIL。文字仍然完整。', { exact: true }).waitFor()
       await page.getByRole('status').filter({ hasText: '朗读失败，文字已保留' }).waitFor(); assert.equal(await page.locator('[data-nexus-voice]').getAttribute('data-activity'), 'failed'); await connected(page)
+      await failureTooltip(page, 'TTS_SYNTHESIS_FAILED')
       const afterFailure = await playback(page)
       assert.ok(first(afterFailure).some(node => node.audible), 'the previous successful reply remains audible')
       assert.ok(first(afterFailure).every(node => !node.stopped), 'none of the prior reply nodes were stopped')
