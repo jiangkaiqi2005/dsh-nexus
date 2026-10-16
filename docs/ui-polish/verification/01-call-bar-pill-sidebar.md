@@ -103,7 +103,7 @@
 - **S1 — fixed。** 核实全部翻译调用后，仅删除 en / zh 注册中各 10 个无调用方旧键：`start-recording`、`end-recording`、`activity-recording`、`activity-recognizing`、`activity-unheard`、`activity-thinking`、`activity-reading`、`activity-failed`、`start`、`hangup`。同名协议消息、校验及 Call 均保留。
 - **P1 — fixed。** `describe` 的 `unheard` / `tts-failed` 描述保留收到的 code，直接使用现有 Status Tooltip。`cascade-spoken.test.mjs` 两处恢复真实 UI 的 `TTS_SYNTHESIS_FAILED` Tooltip 断言；`ui-polish.test.mjs` 同时检查原始码、无 code 时无图标、4 秒到期后提示与图标消失。计时逻辑未改。
 - **P2 — fixed。** 窄侧栏追加状态的条件恢复为原型 `506ba38:prototype/ui-polish/client.prototype.js:245` 的 `d.live`，不再对 connecting / mic-denied 附加状态。无需新增偏离。
-- **P3 — 未决，保持原状。** ASR 缺凭据的原因在现有 Host 中被丢弃；不改 `src/`、协议、状态码或设置页，票 01 第 19 行保持未勾选，交由用户裁定。
+- **P3 — 用户已接受例外。** 用户于 2026-10-15 裁定「接受这个例外」：现有 Host 对 ASR 失败只下发不带 code 的 `unheard`，ASR 缺凭据在本票显示为「没听清」；其余失败码按对照表映射、Tooltip 含原始码。本票不改 Host、协议或状态码，票 01 第 19 行据此勾选；评审仍在进行，不代表已通过评审。
 
 本轮运行完整截图单文件，实际生成全部 16 个基线场景及设置补充图；仅保留受影响的 `dark-bar-unheard.png` / `light-bar-unheard.png` 更新，其余无关截图恢复为本轮开始时版本。两张 unheard 图均已与基线目视对照：控件文字、图标和结构保持一致，没有新增 info；宿主非空会话与裁剪差异仍见偏离 2、3。另存真实 TTS 失败的深浅主题补充图，沿用相同视口与裁剪；基线没有这一场景，不伪称有对应基线，info 图标复用 mic-denied 的原型部件。
 
@@ -130,7 +130,7 @@
 
 ## 边界与待验
 
-- **ASR 缺凭据仍无法在真实 UI 中区别于其他 unheard。** `src/recognition.ts` 的 `Recording.finish()` 在 `.catch()` 中丢弃原因，活动回调只报告 phase；`src/supervisor.ts` 传给客户端的该帧没有 code。受控无凭据运行确认下行为 `activity/unheard` 且无 code。前端已支持收到 `ASR_CREDENTIAL_MISSING` 时的专用映射，但现有 Host 不会发它；没有修改 Host、状态码或协议，也没有用“没听清”伪称已完成凭据区分。TTS 缺凭据通过真实 `TTS_CREDENTIAL_MISSING` 验证，包括 4 秒后仍保留、后续活动不覆盖、Tooltip 和重试。
+- **ASR 缺凭据按用户裁定接受为本票例外。** `src/recognition.ts` 的 `Recording.finish()` 在 `.catch()` 中丢弃原因，活动回调只报告 phase；`src/supervisor.ts` 传给客户端的该帧没有 code。受控无凭据运行确认下行为 `activity/unheard` 且无 code。前端已支持收到 `ASR_CREDENTIAL_MISSING` 时的专用映射，但现有 Host 不会发它。用户于 2026-10-15 裁定「接受这个例外」：ASR 缺凭据在本票显示为「没听清」，其余失败码按对照表映射、Tooltip 含原始码；不改 Host、协议或状态码。此裁定不表示现有 Host 已能区分 ASR 原因。TTS 缺凭据通过真实 `TTS_CREDENTIAL_MISSING` 验证，包括 4 秒后仍保留、后续活动不覆盖、Tooltip 和重试。本次补充仅更新文档，未改 `spec.md`，未运行测试。
 - 8 个要求截图场景在两种主题均实际驱动成功；没有用假 Call 状态替代截图。
 - 实施期间曾在聚焦测试运行时继续编辑客户端，官方开发 Host 会热重载客户端；出现过控件被卸载的中间失败。保留上表失败事实；最终整套检查在固定客户端文件上串行运行，不以单次重跑代替最终回归。
 - 未调用真实 DashScope 服务；相关 opt-in 测试按默认条件跳过。假媒体不代表真实麦克风、扬声器或设备权限体验的实机验收。
