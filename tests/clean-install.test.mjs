@@ -128,7 +128,7 @@ test('clean bundled profile completes controlled repair, voice steering, review 
   await command(['plugin', '--profile', 'nexus-scenario', 'add', packed.tgz], env, resolve(dir, 'install.log'))
   const hashes = []
   for (const file of packed.manifest.files) {
-    assert.match(file.path, /^(?:README\.md|package\.json|client\.js|typert\.js|icon\.svg|cordis\.patch\.yml|locale\/(?:en|zh)\.json|dist\/[a-z-]+\.(?:js|d\.ts))$/)
+    assert.match(file.path, /^(?:README(?:\.zh-CN)?\.md|package\.json|client\.js|typert\.js|icon\.svg|cordis\.patch\.yml|locale\/(?:en|zh)\.json|dist\/[a-z-]+\.(?:js|d\.ts))$/)
     const hash = bytes => createHash('sha256').update(bytes).digest('hex')
     const installed = hash(await readFile(resolve(profile, 'node_modules/dsh-nexus', file.path)))
     assert.equal(installed, hash(await readFile(resolve(root, file.path))), `${file.path} installed from this final bundle`)

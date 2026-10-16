@@ -74,7 +74,7 @@ test('Desktop installed cascade bundle runs tap dispatch, interruption, native r
   await command(['plugin', '--profile', 'nexus-cascade', 'add', packed.tgz], env, resolve(dir, 'install.log'))
   const installedManifest = []
   for (const file of packed.manifest.files) {
-    assert.match(file.path, /^(?:README\.md|package\.json|client\.js|typert\.js|icon\.svg|cordis\.patch\.yml|locale\/(?:en|zh)\.json|dist\/[a-z-]+\.(?:js|d\.ts))$/)
+    assert.match(file.path, /^(?:README(?:\.zh-CN)?\.md|package\.json|client\.js|typert\.js|icon\.svg|cordis\.patch\.yml|locale\/(?:en|zh)\.json|dist\/[a-z-]+\.(?:js|d\.ts))$/)
     const sha256 = hash(await readFile(resolve(profile, 'node_modules/dsh-nexus', file.path))); assert.equal(sha256, hash(await readFile(resolve(root, file.path))), file.path)
     installedManifest.push({ path: file.path, sha256 })
   }
