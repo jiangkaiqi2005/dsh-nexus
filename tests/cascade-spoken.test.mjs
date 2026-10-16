@@ -139,8 +139,8 @@ test('cascade speaks complete Chinese and English sentences in order, preserves 
       assert.equal(tasks.length, before + 1)
       await page.screenshot({ path: resolve(dir, 'tts-failure-connected.png') })
       // The next reply gets a fresh healthy task, with configurable model and voice saved in native settings.
-      await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: 'Nexus', exact: true }).click()
-      const model = page.getByRole('textbox', { name: '语音合成型号', exact: true }); const voice = page.getByRole('textbox', { name: '语音合成音色', exact: true })
+      await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: 'Nexus', exact: true }).click(); await page.getByRole('button', { name: '高级：识别与合成端点、型号', exact: true }).click()
+      const model = page.getByRole('textbox', { name: '合成型号', exact: true }); const voice = page.getByRole('textbox', { name: '合成音色', exact: true })
       assert.equal(await model.inputValue(), 'qwen-audio-3.1-tts-flash'); assert.equal(await voice.inputValue(), 'longanhuan_v3.1')
       await model.fill('fixture-tts'); await model.press('Tab'); await until(() => model.isDisabled().then(value => !value), 'saved model')
       await voice.fill('fixture-voice'); await voice.press('Tab'); await until(() => voice.isDisabled().then(value => !value), 'saved voice')

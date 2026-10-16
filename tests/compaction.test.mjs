@@ -344,9 +344,9 @@ test('the Nexus conversation lists /compact on first open; budget, summary model
       for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
       await page.getByRole('button', { name: '设置', exact: true }).click({ timeout: 1000 }).catch(() => {})
       await page.getByRole('button', { name: 'Nexus', exact: true }).click({ timeout: 1000 }).catch(() => {})
-      return page.getByRole('spinbutton', { name: /主会话压缩预算/ }).isVisible()
+      return page.getByRole('spinbutton', { name: /压缩预算/ }).isVisible()
     }, 'Nexus settings')
-    return { budget: page.getByRole('spinbutton', { name: /主会话压缩预算/ }), summary: page.getByRole('combobox', { name: /压缩摘要模型/ }), effort: page.getByRole('combobox', { name: /摘要思考强度/ }) }
+    return { budget: page.getByRole('spinbutton', { name: /压缩预算/ }), summary: page.getByRole('combobox', { name: /摘要模型/ }), effort: page.getByRole('combobox', { name: /摘要思考强度/ }) }
   }
   const evidence = resolve(home, 'browser')
   await mkdir(evidence)
@@ -370,6 +370,20 @@ test('the Nexus conversation lists /compact on first open; budget, summary model
     assert.equal(await fields.budget.inputValue(), '128000')
     assert.equal(await fields.summary.inputValue(), '')
     await until(async () => (await fields.summary.locator('option').allTextContents()).some(text => text.includes('ui-sum')), 'model catalog in the summary model choice')
+    assert.match(await fields.summary.locator('option').first().textContent(), /deepseek-account\/deepseek-flash/)
+    await fields.summary.selectOption('nexus-test-summary/broken')
+    await until(async () => await fields.summary.isEnabled() && await fields.effort.isDisabled(), 'model without reasoning efforts')
+    assert.deepEqual(await fields.effort.locator('option').allTextContents(), ['该模型不提供思考强度选项'])
+    await fields.summary.selectOption('nexus-test-summary/configured-sum')
+    await until(async () => await fields.effort.isEnabled() && (await fields.effort.locator('option').allTextContents()).join('|') === '最低 (Off)|模型默认|High|Low|Off', 'off is preferred to low')
+    await fields.effort.selectOption('model-default')
+    await until(async () => await fields.effort.isEnabled() && await fields.effort.inputValue() === 'model-default', 'explicit model default saved')
+    await fields.effort.selectOption('off')
+    await until(async () => await fields.effort.isEnabled() && await fields.effort.inputValue() === 'off', 'off saved')
+    await fields.budget.fill('0'); await fields.budget.blur()
+    assert.equal(await fields.budget.inputValue(), '128000', 'invalid budgets are not submitted')
+    await fields.budget.fill('19000.5'); await fields.budget.press('Enter')
+    assert.equal(await fields.budget.inputValue(), '128000', 'fractional budgets are not submitted')
     await fields.budget.fill('19000')
     await fields.budget.press('Enter')
     await until(async () => !(await fields.budget.isDisabled()) && await fields.budget.inputValue() === '19000', 'budget saved')

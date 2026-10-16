@@ -296,6 +296,31 @@ window.__ModuleLoader__.load({
       "回到 Nexus": "Back to Nexus",
     }
 
+    const SETTINGS_TEXT = {
+      "语音管家：听你说、替你调度工作会话、按需汇报": "Voice supervisor: listens, dispatches work sessions and reports when needed",
+      "通话": "Calls",
+      "语音模式": "Voice mode",
+      "下一次接通时生效。级联更省钱，主管跟随 Harness 默认模型；Realtime 延迟更低。": "Applies on the next call. Cascade costs less and uses the Harness default model; Realtime has lower latency.",
+      "启动后自动接通": "Connect automatically on startup",
+      "下一次启动 Harness 时生效；挂断、刷新不会重新开麦。": "Applies on the next Harness startup; hanging up or refreshing will not reopen the microphone.",
+      "语音服务": "Voice services",
+      "合成音色": "Speech voice",
+      "级联模式朗读所用的声音": "Voice used for read aloud in cascade mode",
+      "高级：识别与合成端点、型号": "Advanced: recognition and synthesis endpoints and models",
+      "识别端点": "Recognition endpoint",
+      "识别型号": "Recognition model",
+      "合成端点": "Synthesis endpoint",
+      "合成型号": "Synthesis model",
+      "上下文压缩": "Context compaction",
+      "压缩预算": "Compaction budget",
+      "主会话超过这个 token 数时，在轮次之间总结较早的历史": "Summarize older history between turns when the main conversation exceeds this token budget",
+      "摘要模型": "Summary model",
+      "默认 DeepSeek Flash，以最低思考强度运行": "DeepSeek Flash by default, using the lowest reasoning effort",
+      "了解更多": "Learn more",
+      "思考型模型摘要明显更慢，思考内容计入输出上限。预算应明显高于主管每次请求的固定开销（系统提示、工具定义等）；压缩几乎无效时会跳过。自动压缩期间会话显示通用的运行状态。": "Reasoning models summarize markedly slower, and reasoning counts toward the output limit. Keep the budget well above the fixed overhead of each supervisor request (system prompt, tool definitions, etc.); compaction is skipped when it would barely help. Automatic compaction shows the general running status.",
+      "预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。摘要无法让请求低于固定开销；自动压缩的运行状态与原生自动压缩一致。": "Budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless another model is selected, at the lowest effort the model offers. Summarizing cannot reduce a request below its fixed overhead; automatic compaction uses the same running status as native compaction.",
+    }
+
     const VoiceUI = React.createContext(null)
     const useUI = () => React.useContext(VoiceUI)
     function useCall(call) {
@@ -527,6 +552,28 @@ window.__ModuleLoader__.load({
 .nx-side-dot-live { background: var(--dsw-alias-state-success-primary); } .nx-side-dot-rec { background: var(--nx-rec); animation: nx-blink 1s steps(2) infinite; } .nx-side-dot-error { background: var(--dsw-alias-state-warn-primary); }
 @keyframes nx-blink { 50% { opacity: 0.35; } }
 
+/* settings — mirrors native settings rows */
+.nx-set { padding: 4px 0 24px; color: var(--dsw-alias-label-primary); }
+.nx-set-head { display: flex; align-items: center; gap: 12px; padding-bottom: 8px; }
+.nx-set-h1 { font: var(--dsw-font-m-18); }
+.nx-set-group { font: var(--dsw-font-s-strong-14); margin: 24px 0 4px; color: var(--dsw-alias-label-primary); }
+.nx-set-row { display: flex; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.nx-set-row-stack { flex-direction: column; align-items: stretch; gap: 8px; }
+.nx-set-label { flex: 1 1 auto; min-width: 0; } .nx-set-title { font: var(--dsw-font-s-14); } .nx-set-desc { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); margin-top: 2px; }
+.nx-set-control { flex: none; display: flex; } .nx-set-row-stack .nx-set-control { flex: 1 1 auto; }
+.nx-set-input, .nx-set-select { height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: var(--dsw-radius-md); border: 1px solid transparent; background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font: var(--dsw-font-xs-13); min-width: 220px; outline: none; }
+.nx-set-input:focus, .nx-set-select:focus { border-color: var(--nx-accent); }
+.nx-set-row-stack .nx-set-input { width: 100%; }
+.nx-set-input-num { min-width: 0; width: 140px; text-align: right; font-variant-numeric: tabular-nums; }
+.nx-mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+.nx-set-disclosure { border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.nx-set-toggle { display: flex; align-items: center; gap: 6px; width: 100%; padding: 14px 0; border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font: var(--dsw-font-xs-13); cursor: pointer; text-align: left; }
+.nx-set-toggle:hover { color: var(--dsw-alias-label-primary); }
+.nx-chev { display: inline-flex; transition: transform 150ms; } .nx-chev-open { transform: rotate(180deg); }
+.nx-set-disclosure-body { padding: 0 0 8px 12px; border-left: 2px solid var(--dsw-alias-border-l2); margin-bottom: 12px; }
+.nx-set-disclosure-body .nx-set-row:last-child { border-bottom: 0; }
+.nx-set-note { font: var(--dsw-font-xxs-12); color: var(--dsw-alias-label-tertiary); margin: 0; line-height: 20px; }
+
 `
 
     // As DEFAULT_SUMMARY_MODEL in src/compaction.ts: the summary model while the setting is empty.
@@ -537,13 +584,23 @@ window.__ModuleLoader__.load({
       return named(/^(?:none|off|disabled?)$/i) ?? named(/^minimal$/i) ?? named(/^low$/i)
     }
 
+    const Row = ({ title, desc, children, stack }) => h('div', { className: `nx-set-row ${stack ? 'nx-set-row-stack' : ''}` },
+      h('div', { className: 'nx-set-label' }, h('div', { className: 'nx-set-title' }, title), desc ? h('div', { className: 'nx-set-desc' }, desc) : null),
+      h('div', { className: 'nx-set-control' }, children))
+    function Disclosure({ label, children, open: initial = false }) {
+      const [open, setOpen] = React.useState(initial)
+      return h('div', { className: 'nx-set-disclosure' },
+        h('button', { type: 'button', className: 'nx-set-toggle', 'aria-expanded': open, onClick: () => setOpen(!open) },
+          label, h('span', { className: `nx-chev ${open ? 'nx-chev-open' : ''}` }, h(P.IconChevronDownOutlineRegular, { size: 14 }))),
+        open ? h('div', { className: 'nx-set-disclosure-body' }, children) : null)
+    }
     function Settings({ form, catalog, t }) {
       const snapshot = React.useSyncExternalStore(listener => form.subscribe(listener), () => form.getSnapshot())
       const [error, setError] = React.useState(false)
       const [saving, setSaving] = React.useState(false)
       const [budget, setBudget] = React.useState()
       const [models, setModels] = React.useState()
-      const [speech, setSpeech] = React.useState({})
+      const [draft, setDraft] = React.useState({})
       React.useEffect(() => {
         let live = true
         catalog().then(response => { if (live && response.ok) setModels(response.value) }, () => {})
@@ -577,37 +634,47 @@ window.__ModuleLoader__.load({
         ...lowest ? [h('option', { key: 'model-default', value: 'model-default' }, t('effort-model-default'))] : [],
         ...efforts.map(item => h('option', { key: item.id, value: item.id }, item.name)),
       ]
-      return h('div', { style: { padding: 16 } },
-        h('h2', null, 'Nexus'),
-        h('label', { style: { display: 'block', marginBottom: 12 } }, t('voice-mode'), ' ', h('select', {
-          value: snapshot.value?.voiceMode ?? 'cascade', disabled,
-          onChange: event => save('voiceMode', event.target.value),
-        }, h('option', { value: 'cascade' }, t('cascade')), h('option', { value: 'realtime' }, 'Realtime'))),
-        h('p', null, t('voice-mode-hint')),
-        ...[['asrEndpoint', 'asr-endpoint', 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'], ['asrModel', 'asr-model', 'qwen-audio-3.1-asr-flash'], ['ttsEndpoint', 'tts-endpoint', 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'], ['ttsModel', 'tts-model', 'qwen-audio-3.1-tts-flash'], ['ttsVoice', 'tts-voice', 'longanhuan_v3.1']].map(([key, label, fallback]) => h('label', { key, style: { display: 'block', marginBottom: 12 } }, t(label), ' ', h('input', {
-          type: 'text', value: speech[key] ?? snapshot.value?.[key] ?? fallback, disabled,
-          onChange: event => setSpeech({ ...speech, [key]: event.target.value }),
-          onBlur: () => { if (speech[key] !== undefined) { const value = speech[key].trim(); setSpeech(current => { const next = { ...current }; delete next[key]; return next }); if (value && value !== snapshot.value?.[key]) save(key, value) } },
-        }))),
-        h('label', null, h('input', {
-          type: 'checkbox', checked: snapshot.value?.autoVoice ?? false, disabled,
-          onChange: event => save('autoVoice', event.target.checked),
-        }), t('auto-voice')),
-        h('p', null, t('next-startup')),
-        h('label', { style: { display: 'block', marginTop: 12 } }, t('compaction-budget'), ' ', h('input', {
-          type: 'number', min: 1, step: 1, value: budget ?? savedBudget, disabled,
-          onChange: event => setBudget(event.target.value), onBlur: commitBudget,
-          onKeyDown: event => { if (event.key === 'Enter') commitBudget() },
-        })),
-        h('label', { style: { display: 'block', marginTop: 12 } }, t('summary-model'), ' ', h('select', {
-          value: summaryModel, disabled,
-          onChange: event => save('summaryModel', event.target.value),
-        }, h('option', { value: '' }, `${t('summary-default')} (${DEFAULT_SUMMARY_MODEL})`), ...routes.map(route => h('option', { key: route.value, value: route.value }, route.label)))),
-        h('label', { style: { display: 'block', marginTop: 12 } }, t('summary-effort'), ' ', h('select', {
-          value: effort, disabled: disabled || !efforts.length,
-          onChange: event => save('summaryReasoningEffort', event.target.value),
-        }, ...effortOptions)),
-        h('p', null, t('compaction-hint')),
+      const v = snapshot.value ?? {}
+      const commitText = key => {
+        if (draft[key] !== undefined) {
+          const value = draft[key].trim()
+          setDraft(current => { const next = { ...current }; delete next[key]; return next })
+          if (value && value !== v[key]) save(key, value)
+        }
+      }
+      const text = (key, label, fallback, mono = true) => h('input', {
+        className: `nx-set-input ${mono ? 'nx-mono' : ''}`, type: 'text', 'aria-label': t(label), disabled, value: draft[key] ?? v[key] ?? fallback,
+        onChange: event => setDraft({ ...draft, [key]: event.target.value }),
+        onBlur: () => commitText(key),
+        onKeyDown: event => { if (event.key === 'Enter') commitText(key) },
+      })
+      return h('div', { className: 'nx-set' },
+        h('div', { className: 'nx-set-head' }, h(NexusMark, { size: 28 }), h('div', null, h('div', { className: 'nx-set-h1' }, 'Nexus'), h('div', { className: 'nx-set-desc' }, t('语音管家：听你说、替你调度工作会话、按需汇报')))),
+        h('div', { className: 'nx-set-group' }, t('通话')),
+        h(Row, { title: t('语音模式'), desc: t('下一次接通时生效。级联更省钱，主管跟随 Harness 默认模型；Realtime 延迟更低。') },
+          h(P.SegmentedControl, { id: 'nexus-voice-mode', label: t('语音模式'), value: v.voiceMode ?? 'cascade', disabled, onChange: value => save('voiceMode', value), options: [{ value: 'cascade', label: t('级联') }, { value: 'realtime', label: 'Realtime' }] })),
+        h(Row, { title: t('启动后自动接通'), desc: t('下一次启动 Harness 时生效；挂断、刷新不会重新开麦。') },
+          h(P.Switch, { label: t('启动后自动接通'), checked: v.autoVoice ?? false, disabled, onChange: value => save('autoVoice', value) })),
+        h('div', { className: 'nx-set-group' }, t('语音服务')),
+        h(Row, { title: t('合成音色'), desc: t('级联模式朗读所用的声音') }, text('ttsVoice', '合成音色', 'longanhuan_v3.1')),
+        h(Disclosure, { label: t('高级：识别与合成端点、型号') },
+          h(Row, { title: t('识别端点'), stack: true }, text('asrEndpoint', '识别端点', 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation')),
+          h(Row, { title: t('识别型号') }, text('asrModel', '识别型号', 'qwen-audio-3.1-asr-flash')),
+          h(Row, { title: t('合成端点'), stack: true }, text('ttsEndpoint', '合成端点', 'wss://dashscope.aliyuncs.com/api-ws/v1/inference')),
+          h(Row, { title: t('合成型号') }, text('ttsModel', '合成型号', 'qwen-audio-3.1-tts-flash'))),
+        h('div', { className: 'nx-set-group' }, t('上下文压缩')),
+        h(Row, { title: t('压缩预算'), desc: t('主会话超过这个 token 数时，在轮次之间总结较早的历史') },
+          h('input', { className: 'nx-set-input nx-set-input-num', type: 'number', 'aria-label': t('压缩预算'), min: 1, step: 1, disabled, value: budget ?? savedBudget, onChange: event => setBudget(event.target.value), onBlur: commitBudget, onKeyDown: event => { if (event.key === 'Enter') commitBudget() } })),
+        h(Row, { title: t('摘要模型'), desc: t('默认 DeepSeek Flash，以最低思考强度运行') },
+          h('select', { className: 'nx-set-select', 'aria-label': t('摘要模型'), disabled, value: v.summaryModel ?? '', onChange: e => save('summaryModel', e.target.value) },
+            h('option', { value: '' }, `${t('summary-default')}（${DEFAULT_SUMMARY_MODEL}）`), ...routes.map(r => h('option', { key: r.value, value: r.value }, r.label)))),
+        h(Row, { title: t('summary-effort') },
+          h('select', { className: 'nx-set-select', 'aria-label': t('summary-effort'), value: effort, disabled: disabled || !efforts.length,
+            onChange: event => save('summaryReasoningEffort', event.target.value),
+          }, ...effortOptions)),
+        h(Disclosure, { label: t('了解更多') },
+          h('p', { className: 'nx-set-note' }, t('思考型模型摘要明显更慢，思考内容计入输出上限。预算应明显高于主管每次请求的固定开销（系统提示、工具定义等）；压缩几乎无效时会跳过。自动压缩期间会话显示通用的运行状态。')),
+          h('p', { className: 'nx-set-note' }, t('预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。摘要无法让请求低于固定开销；自动压缩的运行状态与原生自动压缩一致。'))),
         error ? h('p', { role: 'alert' }, t('save-failed')) : null)
     }
 
@@ -619,8 +686,8 @@ window.__ModuleLoader__.load({
         const call = new Call()
         call.ui = presentation(call)
         ctx.effect(() => () => call.ui.dispose())
-        ctx.locale.register('nexus', 'en', { 'asr-endpoint': 'Speech recognition endpoint', 'asr-model': 'Speech recognition model', open: 'Open Nexus', 'voice-mode': 'Voice mode', cascade: 'Cascade', 'voice-mode-hint': 'Changes apply on the next call. Cascade uses the Harness default model.', 'tts-endpoint': 'Speech synthesis endpoint', 'tts-model': 'Speech synthesis model', 'tts-voice': 'Speech voice', 'auto-voice': 'Enter Nexus voice automatically when Harness starts', 'next-startup': 'Changes apply on the next Harness startup.', 'save-failed': 'Could not save the setting.', 'compaction-budget': 'Main conversation compaction budget (tokens)', 'summary-model': 'Compaction summary model', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', 'compaction-hint': 'When the main conversation exceeds the budget, older history is summarized between turns; budget, summary model and reasoning effort apply immediately. Summaries use DeepSeek Flash unless you choose another model, at the lowest reasoning effort the model offers. Known limits: a reasoning model summarizes markedly slower, and its reasoning counts toward the output limit. Keep the budget well above the fixed part of each supervisor request (system prompt, tool definitions and similar): summarizing cannot bring a request below it, so automatic compaction is skipped when it would barely help. During automatic compaction the conversation shows the general running status, as native automatic compaction does.', ...VOICE_TEXT })
-        ctx.locale.register('nexus', 'zh', { 'asr-endpoint': '语音识别端点', 'asr-model': '语音识别型号', open: '打开 Nexus', 'voice-mode': '语音模式', cascade: '级联', 'voice-mode-hint': '更改在下一次接通时生效。级联主管跟随 Harness 默认模型。', 'tts-endpoint': '语音合成端点', 'tts-model': '语音合成型号', 'tts-voice': '语音合成音色', 'auto-voice': '启动 Harness 后自动进入 Nexus 语音', 'next-startup': '更改在下一次 Harness 启动时生效。', 'save-failed': '设置保存失败。', 'compaction-budget': '主会话压缩预算（token）', 'summary-model': '压缩摘要模型', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', 'compaction-hint': '主会话超过预算时，会在轮次之间总结较早的历史；预算、摘要模型与思考强度立即生效。未另选时由 DeepSeek Flash 写摘要，并以该模型可用的最低思考强度运行。已知局限：思考型模型摘要明显更慢，思考内容计入输出上限；预算应明显高于主管每次请求的固定开销（系统提示、工具定义等），摘要无法让请求低于这部分，压缩几乎无效时会跳过自动压缩；自动压缩期间会话显示通用的运行状态，与原生自动压缩一致。', ...Object.fromEntries(Object.keys(VOICE_TEXT).map(text => [text, text])) })
+        ctx.locale.register('nexus', 'en', { open: 'Open Nexus', 'save-failed': 'Could not save the setting.', 'summary-default': 'Default', 'summary-effort': 'Summary reasoning effort', 'effort-lowest': 'Lowest', 'effort-model-default': 'Model default', 'effort-none': 'This model offers no reasoning efforts', ...VOICE_TEXT, ...SETTINGS_TEXT })
+        ctx.locale.register('nexus', 'zh', { open: '打开 Nexus', 'save-failed': '设置保存失败。', 'summary-default': '默认', 'summary-effort': '摘要思考强度', 'effort-lowest': '最低', 'effort-model-default': '模型默认', 'effort-none': '该模型不提供思考强度选项', ...Object.fromEntries(Object.keys({ ...VOICE_TEXT, ...SETTINGS_TEXT }).map(text => [text, text])) })
         ctx.inject(['configForms', 'remote', 'remote.session'], settingsCtx => {
           const form = settingsCtx.configForms.get('nexus')
           const catalog = () => settingsCtx.remote.session.modelCatalog()

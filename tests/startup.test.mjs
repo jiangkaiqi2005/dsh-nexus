@@ -77,7 +77,7 @@ async function setting(page) {
     await page.getByRole('button', { name: '设置', exact: true }).click({ timeout: 1000 }).catch(() => {})
     return page.getByRole('dialog', { name: '设置', exact: true }).isVisible()
   }, 'native settings panel')
-  const toggle = page.getByRole('checkbox', { name: /启动 Harness 后自动进入 Nexus 语音/ })
+  const toggle = page.getByRole('switch', { name: /启动后自动接通/ })
   await until(async () => {
     for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
     await page.getByRole('button', { name: 'Nexus', exact: true }).click({ timeout: 1000 }).catch(() => {})

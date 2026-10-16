@@ -179,9 +179,9 @@ test('native Nexus settings default to cascade and switch modes only on the next
         const settings = async () => {
           await page.getByRole('button', { name: '设置', exact: true }).click()
           await page.getByRole('button', { name: 'Nexus', exact: true }).click()
-          return page.getByRole('combobox', { name: '语音模式', exact: true })
+          return page.getByRole('tablist', { name: '语音模式', exact: true })
         }
-        const saveMode = async mode => { const choice = await settings(); await choice.selectOption(mode); await until(async () => !(await choice.isDisabled()) && await choice.inputValue() === mode, 'mode saved') }
+        const saveMode = async mode => { const choice = await settings(); const tab = choice.getByRole('tab', { name: mode === 'cascade' ? '级联' : 'Realtime', exact: true }); await tab.click(); await until(async () => await tab.isEnabled() && await tab.getAttribute('aria-selected') === 'true', 'mode saved') }
         const submit = async (words, expected) => {
           const previous = await page.getByText(expected, { exact: true }).count()
           const editor = page.getByRole('textbox').last()
@@ -196,7 +196,7 @@ test('native Nexus settings default to cascade and switch modes only on the next
           }
         }
         const initial = await settings()
-        assert.equal(await initial.inputValue(), 'cascade')
+        assert.equal(await initial.getByRole('tab', { name: '级联', exact: true }).getAttribute('aria-selected'), 'true')
         await page.screenshot({ path: resolve(dir, 'settings-default.png') })
         await open()
         await submit('UI-CASCADE', 'CASCADE-REPLY')

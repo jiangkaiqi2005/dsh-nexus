@@ -163,8 +163,8 @@ test('hangup and client disconnect abort recognition and discard partial capture
 test('Nexus settings persist the recognition model and endpoint used by the next tap', { timeout: 90000 }, async () => endpoints(async ({ asr, tts, requests, responses }) => {
   responses.push({ text: '设置生效' })
   await tapHost(tts, asr, async (page, dir) => {
-    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: 'Nexus', exact: true }).click()
-    const model = page.getByRole('textbox', { name: '语音识别型号', exact: true }), endpoint = page.getByRole('textbox', { name: '语音识别端点', exact: true })
+    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: 'Nexus', exact: true }).click(); await page.getByRole('button', { name: '高级：识别与合成端点、型号', exact: true }).click()
+    const model = page.getByRole('textbox', { name: '识别型号', exact: true }), endpoint = page.getByRole('textbox', { name: '识别端点', exact: true })
     assert.equal(await model.inputValue(), 'qwen-audio-3.1-asr-flash'); assert.equal(await endpoint.inputValue(), asr)
     await model.fill('fixture-asr-model'); await model.blur(); await until(async () => !(await model.isDisabled()), 'saved model')
     await endpoint.fill(asr + '/recognize'); await endpoint.blur(); await until(async () => !(await endpoint.isDisabled()), 'saved endpoint')

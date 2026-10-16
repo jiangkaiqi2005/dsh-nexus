@@ -72,6 +72,57 @@ async function fixture(run, { credential = true } = {}) {
   finally { await browser?.close(); await host.close(); for (const socket of ws.clients) socket.terminate(); await new Promise(accept => ws.close(accept)); http.closeAllConnections(); await new Promise(accept => http.close(accept)); await writeFile(resolve(dir, 'host.log'), output.replace(/\?token=\S+/g, '?token=[redacted]')) }
 }
 
+test('Nexus settings show native groups, keep advanced details folded and persist edits through the new controls', { timeout: 90000 }, async () => fixture(async ({ open, dir }) => {
+  const page = await open()
+  const settings = async () => { await button(page, '设置').click(); await button(page, 'Nexus').click(); await page.getByText('上下文压缩', { exact: true }).waitFor() }
+  await settings()
+  for (const name of ['通话', '语音服务', '上下文压缩']) assert.equal(await page.getByText(name, { exact: true }).isVisible(), true)
+  const advanced = button(page, '高级：识别与合成端点、型号'), more = button(page, '了解更多')
+  assert.equal(await advanced.getAttribute('aria-expanded'), 'false')
+  assert.equal(await more.getAttribute('aria-expanded'), 'false')
+  assert.equal(await page.getByRole('textbox', { name: '识别端点', exact: true }).count(), 0)
+  const out = process.env.NEXUS_SETTINGS_SHOTS === '1' ? resolve('docs/ui-polish/verification/shots') : resolve(dir, 'shots')
+  await mkdir(out, { recursive: true })
+  for (const colorScheme of ['dark', 'light']) {
+    await page.emulateMedia({ colorScheme })
+    await page.waitForTimeout(250)
+    await page.mouse.move(0, 0)
+    await page.screenshot({ path: resolve(out, `${colorScheme}-settings.png`) })
+    await advanced.click(); await more.click()
+    await page.getByText('上下文压缩', { exact: true }).scrollIntoViewIfNeeded()
+    await page.mouse.move(0, 0)
+    await page.screenshot({ path: resolve(out, `${colorScheme}-settings-expanded.png`) })
+    const note = page.locator('.nx-set-note')
+    assert.match(await note.allTextContents().then(text => text.join('')), /预算、摘要模型与思考强度立即生效/)
+    assert.match(await note.allTextContents().then(text => text.join('')), /摘要无法让请求低于固定开销/)
+    await note.last().scrollIntoViewIfNeeded()
+    await page.screenshot({ path: resolve(out, `${colorScheme}-settings-more.png`) })
+    await advanced.click(); await more.click()
+    await page.getByText('Nexus', { exact: true }).last().scrollIntoViewIfNeeded()
+  }
+  await page.getByRole('tab', { name: 'Realtime', exact: true }).click()
+  await until(async () => await page.getByRole('tab', { name: 'Realtime', exact: true }).getAttribute('aria-selected') === 'true' && await page.getByRole('switch', { name: '启动后自动接通', exact: true }).isEnabled(), 'mode saved')
+  const auto = page.getByRole('switch', { name: '启动后自动接通', exact: true })
+  assert.equal(await auto.isChecked(), false)
+  await auto.click(); await until(async () => await auto.isChecked() && await auto.isEnabled(), 'automatic voice saved')
+  await advanced.click()
+  const edits = { '识别端点': 'https://example.invalid/asr', '识别型号': 'fixture-asr', '合成端点': 'wss://example.invalid/tts', '合成型号': 'fixture-tts', '合成音色': 'fixture-voice' }
+  for (const [name, value] of Object.entries(edits)) {
+    const input = page.getByRole('textbox', { name, exact: true })
+    await input.fill(` ${value} `)
+    if (name.includes('端点')) await input.press('Enter'); else await input.blur()
+    await until(async () => await input.isEnabled() && await input.inputValue() === value, `${name} saved`)
+  }
+  await page.keyboard.press('Escape'); await settings()
+  assert.equal(await page.getByRole('tab', { name: 'Realtime', exact: true }).getAttribute('aria-selected') === 'true', true)
+  assert.equal(await auto.isChecked(), true)
+  assert.equal(await advanced.getAttribute('aria-expanded'), 'false')
+  assert.equal(await more.getAttribute('aria-expanded'), 'false')
+  await advanced.click()
+  for (const [name, value] of Object.entries(edits)) assert.equal(await page.getByRole('textbox', { name, exact: true }).inputValue(), value)
+  assert.equal(await page.getByRole('alert').count(), 0)
+}))
+
 test('call bar stays in Nexus, pill navigates back, and only one voice control is ever mounted', { timeout: 90000 }, async () => fixture(async ({ open }) => {
   const page = await open()
   assert.equal(await page.locator('.nx-a-bar').count(), 1)
