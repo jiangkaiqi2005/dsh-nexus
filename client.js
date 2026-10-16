@@ -461,8 +461,60 @@ window.__ModuleLoader__.load({
         d.live && mode === 'cascade' ? h(RecordButton, { d }) : null,
         d.state !== 'off' ? h(HangupButton, { size: 'sm' }) : null)
     }
+    // Where this viewer dropped the pill, in the browser's own storage; any storage failure means the top center.
+    const PILL_KEY = 'dsh-nexus.pillPosition'
+    const readPill = () => { try { const value = JSON.parse(localStorage.getItem(PILL_KEY)); return Number.isFinite(value?.x) && Number.isFinite(value?.y) ? { x: value.x, y: value.y } : undefined } catch { return undefined } }
+    const writePill = value => { try { localStorage.setItem(PILL_KEY, JSON.stringify(value)) } catch {} }
+    // Dragging past a few pixels moves the pill and swallows the click that ends it. The spot
+    // stays inside the overlay layer; a smaller window pulls the pill in without losing the spot.
+    function usePillDrag() {
+      const ref = React.useRef(null), saved = React.useRef(), moved = React.useRef(false)
+      const [position, setPosition] = React.useState()
+      const fit = React.useCallback(target => {
+        const pill = ref.current, layer = pill?.offsetParent
+        if (!target || !layer) return undefined
+        const clamp = (value, max) => Math.max(0, Math.min(value, max))
+        return { x: clamp(target.x, layer.clientWidth - pill.offsetWidth), y: clamp(target.y, layer.clientHeight - pill.offsetHeight) }
+      }, [])
+      React.useLayoutEffect(() => {
+        saved.current = readPill()
+        const place = () => setPosition(fit(saved.current))
+        place()
+        const observer = new ResizeObserver(place)
+        observer.observe(ref.current)
+        if (ref.current.offsetParent) observer.observe(ref.current.offsetParent)
+        return () => observer.disconnect()
+      }, [fit])
+      const onPointerDown = event => {
+        moved.current = false
+        // The blank area and the icon/status area drag; the round buttons only click.
+        if (event.button !== 0 || event.target.closest('button:not(.nx-a-pill-main)')) return
+        const pill = ref.current, layer = pill.offsetParent, from = pill.getBoundingClientRect(), origin = layer.getBoundingClientRect()
+        const start = { x: from.left - origin.left - layer.clientLeft, y: from.top - origin.top - layer.clientTop }
+        const move = e => {
+          if (e.pointerId !== event.pointerId) return
+          const dx = e.clientX - event.clientX, dy = e.clientY - event.clientY
+          if (!moved.current && Math.hypot(dx, dy) < 4) return
+          moved.current = true
+          saved.current = { x: start.x + dx, y: start.y + dy }
+          setPosition(fit(saved.current))
+        }
+        const up = e => {
+          if (e.pointerId !== event.pointerId) return
+          removeEventListener('pointermove', move); removeEventListener('pointerup', up); removeEventListener('pointercancel', up)
+          const spot = fit(saved.current)
+          if (moved.current && spot) { saved.current = spot; writePill(spot) }
+          // The click this release may produce comes first; a later click is not part of the drag.
+          setTimeout(() => { moved.current = false })
+        }
+        addEventListener('pointermove', move); addEventListener('pointerup', up); addEventListener('pointercancel', up)
+      }
+      const onClickCapture = event => { if (moved.current) { event.preventDefault(); event.stopPropagation() } }
+      return { ref, position, onPointerDown, onClickCapture }
+    }
     function PillA({ d, mode }) {
-      return h('div', { className: 'nx-a-pill', ...voiceAttributes(useUI().call) },
+      const drag = usePillDrag()
+      return h('div', { className: drag.position ? 'nx-a-pill nx-pill-placed' : 'nx-a-pill', ...voiceAttributes(useUI().call), ref: drag.ref, style: drag.position && { left: drag.position.x, top: drag.position.y }, onPointerDown: drag.onPointerDown, onClickCapture: drag.onClickCapture },
         h('button', { type: 'button', className: 'nx-a-pill-main', onClick: useUI().open, title: useUI().t('回到 Nexus') }, h(NexusMark, { size: 16 }), h(Status, { d, compact: true })),
         d.recording ? h(Bars, { active: true, tone: 'rec', count: 10 }) : d.speaking ? h(Bars, { active: true, count: 8 }) : null,
         d.tone === 'error' ? h(RetryButton) : null,
@@ -538,11 +590,15 @@ window.__ModuleLoader__.load({
 
 /* A */
 .nx-a-bar { display: flex; align-items: center; gap: 10px; margin: 0 16px 8px; padding: 6px 6px 6px 12px; min-height: 44px; box-sizing: border-box; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-bg-layer-1); }
-/* The populated conversation has a full-width dock, unlike the prototype's empty hero. */
-.nx-a-bar { width: calc(100% - 32px); max-width: 724px; margin-inline: auto; }
+/* As wide as the host input card, in the empty hero and in the full-width conversation dock. */
+.nx-a-bar { width: calc(100% - var(--dsh-composer-side-clearance) * 2); max-width: var(--dsh-composer-card-max-width); margin-inline: auto; }
 .nx-a-wave { margin-left: 4px; } .nx-a-wave-short i { width: 2px; }
 .nx-a-pill { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); pointer-events: auto; display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 6px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); box-shadow: var(--dsw-shadow-lv3); z-index: 20; }
 .nx-a-pill-main { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 6px 2px 2px; border-radius: 999px; } .nx-a-pill-main:hover { background: var(--dsw-alias-interactive-bg-hover); }
+/* The Windows title bar is a window drag region: opt out so the controls click, and let the pill drag itself. */
+.nx-a-bar, .nx-a-bar *, .nx-a-pill, .nx-a-pill * { -webkit-app-region: no-drag; }
+.nx-a-pill { user-select: none; touch-action: none; }
+.nx-a-pill.nx-pill-placed { transform: none; }
 
 /* sidebar */
 .nx-side { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 6px; border-radius: var(--dsw-radius-md); font: var(--dsw-font-s-14); } .nx-side:hover { background: var(--dsw-alias-interactive-bg-hover); }
