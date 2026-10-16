@@ -4,7 +4,7 @@
 
 **阻塞于：** 01、02（同一个 `client.js`）。
 
-**状态：** 实施及自验完成，待评审 / 实机；[验证记录](../verification/03-desktop-feedback.md)。Electron 拖动区中胶囊能否点中、拖动，只能由用户在 Windows Desktop 实机确认。
+**状态：** 实施完成；第 1 轮修复（6a0cefe）后双轴复审放行，待实机；[验证记录](../verification/03-desktop-feedback.md)。Electron 拖动区中胶囊能否点中、拖动，只能由用户在 Windows Desktop 实机确认。
 
 **范围与约束：** 依据 Spec「通话横条」「通话胶囊」两节中标注「见票 03」的补充条目。
 
