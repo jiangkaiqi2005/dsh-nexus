@@ -4,7 +4,7 @@
 
 **阻塞于：** 01（复用其中引入的 primitives 和样式表基础设施，两张票都改同一个文件）。
 
-**状态：** 实施及自验完成，待独立评审 / 用户实机验收。验证记录：[02-settings-page.md](../verification/02-settings-page.md)。
+**状态：** 实施完成；首轮双轴评审（8f9115d）即放行，无遗留问题，待用户实机验收。验证记录：[02-settings-page.md](../verification/02-settings-page.md)。
 
 **范围与约束：** 依据 Spec 中「设置页」和「技术路线」两节。
 
