@@ -113,6 +113,7 @@ export function apply(ctx, config) {
           await quiet()
 
           // A native continuable child of the supervisor itself: the runtime's own settled notice is its route.
+          // Only the start is awaited, not the result; observing it keeps a rejection from going unhandled.
           const activation = await ctx.subagents.startActivation({ provider: 'spawn', childId: 'nexus-child', label: 'Nexus native child', request: { parent: supervisor, agentOptions: { provider: 'delivery-worker', model: 'worker-model' }, prompt: [{ type: 'text', text: 'ok-native' }] }, signal: new AbortController().signal, delivery: 'parent' }); activation.result.catch(() => {})
           await quiet()
         }

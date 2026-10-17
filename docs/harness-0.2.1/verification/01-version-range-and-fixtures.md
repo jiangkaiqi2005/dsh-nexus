@@ -4,7 +4,7 @@
 
 ## 实施范围
 
-- `package.json`：插件版本 0.2.1；`@deepseek-ai/dsh*` peer 全部改为 `>=0.2.1-rc.2 <0.3.0`，新增 `engines.dsh` 同一区间；`@deepseek-ai/cordis` `^4.0.5`、`@deepseek-ai/schemastery` `^3.18.5`；devDependencies 精确写 `@deepseek-ai/dsh` 0.2.1-rc.2、`@deepseek-ai/cordis` 4.0.5、`@deepseek-ai/schemastery` 3.18.5。`npm install` 重新生成 `package-lock.json`，锁文件中已没有 0.2.0-rc.2 包。
+- `package.json`：插件版本 0.2.1；`@deepseek-ai/dsh*` peer 全部改为 `>=0.2.1-rc.2 <0.3.0-0`（第 1 轮评审由 `<0.3.0` 改为 `<0.3.0-0`），新增 `engines.dsh` 同一区间；`@deepseek-ai/cordis` `^4.0.5`、`@deepseek-ai/schemastery` `^3.18.5`；devDependencies 精确写 `@deepseek-ai/dsh` 0.2.1-rc.2、`@deepseek-ai/cordis` 4.0.5、`@deepseek-ai/schemastery` 3.18.5。`npm install` 重新生成 `package-lock.json`，锁文件中已没有 0.2.0-rc.2 包。
 - R7：删除 `src/work-session-titles.ts`、`src/work-sessions.ts` 中的导入、注册与 `trackTitle` 调用、`tests/title-budget.test.mjs`；同时删除只为该文件加入的 peer `@deepseek-ai/dsh-session-title-llm`（源自 `434f75e`，删除后 `src/` 再无引用）。`titles.test.mjs` 删去两条只验证补丁的断言（补丁日志 `nexus title budget`、「普通会话仍为 64」），`titles-probe.js` 删去对应的日志收集；新建会话标题请求为 4096、原生请求不重复、模型标题生成等其余断言保留，现由原生 4096 满足。
 - R1a：新增 `tests/native-settings.mjs` 的 `openSettings(page, options)`（账号菜单 → menuitem「设置」），替换 7 个文件里原来的侧栏「设置」按钮点击。
 - R1b（裁定 9）：14 个使用浏览器的测试在测试 profile 的 `cordis.patch.yml` 里加入 `ui-settings-models` / `@deepseek-ai/dsh-client-ui-settings-models` 的 `credentialOnboarding: false`。已有 `welcomeNoticeVersion` 的 11 个文件追加在其后；`clean-install`、`titles`、`ui` 原本靠点击「继续」处理预览版说明，保持不变，未新增 `welcomeNoticeVersion`。没有使用 `page.addLocatorHandler`。`ui.test.mjs` 删掉对已不存在的「稍后配置」的硬点击；其余文件里带 `isVisible()` 守卫的「稍后配置」清理循环未改（现在是空操作）。
@@ -64,3 +64,29 @@
 - helper 名为 `tests/native-settings.mjs`，只保留 `openSettings`。
 - 额外删除 `@deepseek-ai/dsh-session-title-llm` peer，并删除 `dist/` 中的旧补丁产物。
 - devDependencies 按 Spec 增加 cordis 4.0.5、schemastery 3.18.5 两项（试验副本未加）。
+
+## 第 1 轮评审处置
+
+第 1 轮双轴评审（`3479b37`）两轴均 approve；以下按协调者裁定处置。
+
+| 原问题 | 状态 | 处置与理由 | 证据 |
+| --- | --- | --- | --- |
+| 规格轴 #1：上界 `<0.3.0` 在开启 includePrerelease 的兼容门下放行 0.3.0-rc.x | fixed | `engines.dsh` 与全部 dsh peer 改为 `>=0.2.1-rc.2 <0.3.0-0`，同步 Spec 裁定 2、票 01 范围、本记录；`npm install` 重新生成锁文件（只变了 20 行区间字符串） | `evaluatePluginCompatibility`：0.2.1-rc.2、0.2.1、0.2.2-rc.1、0.2.5、0.2.9 返回 `undefined`；0.3.0-rc.1、0.3.0、0.2.0-rc.2 被拒；旧区间 `<0.3.0` 对 0.3.0-rc.1 返回 `undefined`（即原问题属实）。`semver.validRange` 接受新区间；`npm ls --depth=0` 无报错；Desktop CLI 的 pnpm 安装打包产物成功，包内 `engines.dsh` 为新区间。`.scratch/harness-0.2.1/01/r1/compat-r1.txt` |
+| 标准轴 #2：关掉 onboarding 后「稍后配置」处理成了死代码 | fixed（部分保留） | 所有 `['继续', '稍后配置']` 循环改为 `['继续']`，`voice.test` 的 `dialogs` 去掉「稍后配置」并更新注释；`desktop.test` 删除 1.5 秒等待、条件点击与过时注释。`clean-install.test` 删除条件点击，**保留 1.5 秒等待**并改写注释：删除后 3 次运行都在「发送消息」处超时（按钮一直 disabled），说明这段等待还在让原生输入框就绪，不是死代码 | 去掉等待：clean-install 0/1 共 3 次（`r1-smoke.log`、`r1-clean-nosleep-1/2.log`）；desktop 无等待 3/3 通过（`r1-smoke.log`、`r1-desktop-nodelay-1/2.log`）；恢复等待后三项冒烟 3/3（`r1-smoke2.log`） |
+| 标准轴 #3：`activation.result.catch(() => {})` 缺说明 | fixed | 两个探针各加一行注释：只等启动、不等结果，观察 promise 以免 rejection 未处理 | delivery 1/1、dispatch 1/1 |
+| 规格轴 #2：`cascade-spoken.test.mjs:102` 的 import 位置 | fixed | 移到文件开头 import 区（第 9 行） | cascade-spoken 4/4（1 跳过） |
+| 标准轴 #4：`src/compaction.ts` 注释写的是 0.2.0-rc.2 内部实现 | fixed | 对照 node_modules 中 0.2.1-rc.2 核实：`BasicCompactionEngine.summarize(input, agent, signal)` 仍是唯一子类钩子，内部用 `this.ctx`、`this.config` 和 `summarizationProvider/Model`、`modelPolicies`，只读取 `agent.session.requestHeader()`、`toolHistory()`、`id` 与 `agent.options`；`selectCompactableRange` 的选择规则（跳过开头 system、按价格保留尾部、不拆工具调用对）与 `compactableRange` 等价；`dsh-command-compact` 六条失败文案逐字一致。只把 4 处版本号改为 0.2.1-rc.2，不改逻辑。npm 缓存里没有 0.2.0-rc.2 的包，所以没做新旧逐行 diff | compaction 10/10 |
+| 标准轴 #1：14 个测试内联重复 profile patch | rejected（本票不做） | 协调者裁定：要和现有 `welcomeNoticeVersion` 片段一起收拢，属于邻近代码重构，记为后续票 | — |
+
+验收项「全套只剩 R6/R8/R9」按协调者裁定视为满足：干净 worktree 全套中那 1 项 profile `RESPONSE_FAILED` 属偶发（worktree 单独重跑 2/2 通过，规格评审在仓库目录单跑 13/0/1 通过），票 02 全套继续观察。仓库目录内的额外时序失败源于新版 `dsh-workspace-changes` 对含大量未跟踪文件的 git 仓库做整树快照，全套以干净 worktree 为准（见上文「环境发现」）。
+
+### 本轮命令与结果
+
+在 `3479b37` 的干净 worktree 中应用本轮改动，`npm ci --ignore-scripts`、`npm run build` 后运行。日志在 `.scratch/harness-0.2.1/01/r1/`。
+
+| 命令 | 实际结果 |
+| --- | --- |
+| `npm run typecheck`（仓库目录） | 通过 |
+| `node --test --test-concurrency=1 tests/<f>.test.mjs`，逐文件 | cascade-barge 9/0、cascade-lifecycle 6/0、cascade-spoken 4/0（1 跳过）、cascade 10/0、compaction 10/0、delivery 1/0（1 跳过）、dispatch 1/0（1 跳过）、titles 1/0、ui-polish 8/0、voice 27/0（5 跳过）；cascade-tap 5/1（1 跳过，R6 挂断重拨）、startup 4/1（R9），与票 01 预期一致 |
+| `NEXUS_DESKTOP_SMOKE=1 node --test --test-concurrency=1 tests/desktop.test.mjs tests/cascade-install.test.mjs tests/clean-install.test.mjs` | 第一次 2/1（clean-install 失败，原因见上表）；恢复 clean-install 的等待后 3/3 通过，`D:/DeepSeekHarness` 0.2.1-rc.2 CLI 安装 `dsh-nexus-0.2.1.tgz`（`engines.dsh` 为 `>=0.2.1-rc.2 <0.3.0-0`）成功 |
+| `node <scratch>/compat.mjs E:/Agent/dsh-nexus` 与 semver 检查 | 见上表第一行 |

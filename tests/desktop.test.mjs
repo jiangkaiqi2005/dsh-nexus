@@ -117,13 +117,9 @@ test('Desktop bundled CLI activates the packed Nexus, queries registered project
           const bar = page.locator('[data-nexus-voice]')
           for (const begin = Date.now(); !(await bar.isVisible()); await delay(200)) {
             if (Date.now() - begin > 45000) throw new Error('native Nexus composer did not open')
-            for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() }
+            for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() }
             await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click({ timeout: 1000 }).catch(() => {})
           }
-          // The first-run model dialog may arrive after the Nexus view.
-          await delay(1500)
-          const skip = page.getByRole('button', { name: '稍后配置', exact: true })
-          if (await skip.isVisible()) await skip.click()
           const editor = page.locator('[contenteditable="true"]').last()
           await editor.fill('DESKTOP-RESTORE-MARKER')
           await page.getByRole('button', { name: '发送消息', exact: true }).click()

@@ -477,9 +477,9 @@ async function openNexus(browser, url, init, preparePage) {
   if (init) await (Array.isArray(init) ? page.addInitScript(...init) : page.addInitScript(init))
   await preparePage?.(page)
   await page.goto(url)
-  // Preview and setup dialogs may appear at any point while the UI loads; dismiss them until Nexus opens.
+  // The preview notice may appear at any point while the UI loads; dismiss it until Nexus opens.
   const nexus = page.getByRole('button', { name: /打开 Nexus|Open Nexus/ })
-  const dialogs = [page.getByRole('button', { name: '继续', exact: true }), page.getByRole('button', { name: '稍后配置', exact: true })]
+  const dialogs = [page.getByRole('button', { name: '继续', exact: true })]
   const bar = page.locator('[data-nexus-voice]')
   for (const begin = Date.now(); !(await bar.isVisible()); ) {
     if (Date.now() - begin > 45000) { console.log(await page.locator('body').ariaSnapshot()); throw new Error('Nexus call bar did not open') }

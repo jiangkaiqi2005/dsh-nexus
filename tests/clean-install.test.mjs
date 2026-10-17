@@ -167,15 +167,14 @@ test('clean bundled profile completes controlled repair, voice steering, review 
     await page.goto(host.url)
     const bar = page.locator('[data-nexus-voice]')
     await until(async () => {
-      for (const name of ['继续', '稍后配置']) { const button = page.getByRole('button', { name, exact: true }); if (await button.isVisible()) await button.click() }
+      for (const name of ['继续']) { const button = page.getByRole('button', { name, exact: true }); if (await button.isVisible()) await button.click() }
       if (await bar.isVisible()) return true
       await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click({ timeout: 1000 }).catch(() => {})
     }, 'native Nexus entry')
     assert.equal(await bar.getAttribute('data-state'), 'idle')
     assert.equal(await page.evaluate(() => window.__streams.length), 0, 'clean install defaults to no microphone')
+    // Let the native composer settle after the Nexus view opens; input typed earlier leaves 发送消息 disabled.
     await sleep(1500)
-    const skip = page.getByRole('button', { name: '稍后配置', exact: true })
-    if (await skip.isVisible()) await skip.click()
     const input = async text => { await page.locator('[contenteditable="true"]').last().fill(text); await page.getByRole('button', { name: '发送消息', exact: true }).click() }
     await input('SCENARIO-START：让已有修复会话修复报错，完成后交给已有审查会话审查。')
     await until(async () => (await json(resolve(dir, 'ready.json')))?.agents.some(agent => agent.id === 'repair' && agent.status === 'running'), 'existing repair running')

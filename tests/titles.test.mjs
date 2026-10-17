@@ -112,7 +112,7 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
       for (let begin = Date.now(), clear = 0; clear < 10; await delay(200)) {
         if (Date.now() - begin > 45000) throw new Error('the sidebar did not become usable')
         clear = (await tree.getByRole('treeitem', { name: /^我的管家/ }).isVisible()) ? clear + 1 : 0
-        for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) { clear = 0; await button.click({ timeout: 1000 }).catch(() => {}) } }
+        for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) { clear = 0; await button.click({ timeout: 1000 }).catch(() => {}) } }
       }
       await tree.getByRole('treeitem', { name: /^workspace/ }).click()
       await tree.getByRole('treeitem', { name: /^未分组/ }).click()

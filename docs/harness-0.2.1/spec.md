@@ -31,7 +31,7 @@
 ## 裁定（协调者 2026-10-17，经用户授权）
 
 1. **只支持 0.2.1-rc.2 及以后的 0.2.x。** 不保留 0.2.0-rc.2 兼容：子代理 API 与设置入口都是不兼容变化，双兼容要在测试里写分支。
-2. **peer 改为区间**：所有 `@deepseek-ai/dsh*` peer 写 `>=0.2.1-rc.2 <0.3.0`，并新增 `engines.dsh` 同一区间（新版兼容门有 `engines.dsh` 时只看它）；`@deepseek-ai/cordis` 写 `^4.0.5`，`@deepseek-ai/schemastery` 写 `^3.18.5`。devDependencies 精确写 0.2.1-rc.2 / 4.0.5 / 3.18.5，重新生成 `package-lock.json`。插件版本升到 **0.2.1**。
+2. **peer 改为区间**：所有 `@deepseek-ai/dsh*` peer 写 `>=0.2.1-rc.2 <0.3.0-0`（`-0` 让开启 includePrerelease 的兼容门也拒绝 0.3.0 预发布版），并新增 `engines.dsh` 同一区间（新版兼容门有 `engines.dsh` 时只看它）；`@deepseek-ai/cordis` 写 `^4.0.5`，`@deepseek-ai/schemastery` 写 `^3.18.5`。devDependencies 精确写 0.2.1-rc.2 / 4.0.5 / 3.18.5，重新生成 `package-lock.json`。插件版本升到 **0.2.1**。
 3. **R4 只改测试**（调高预算并加长历史）。是否从主管工具集过滤 `schedule_*`、`working_directory` 与 `harness-dev-context` 是独立的产品优化，不在本批。
 4. **R5 接受新版的 `aborted(disposed)`**，不改插件。
 5. **R7 删除** `src/work-session-titles.ts` 及其接线与专属测试/断言。

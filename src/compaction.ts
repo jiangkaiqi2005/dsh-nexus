@@ -57,7 +57,7 @@ export function summaryEffort(setting: string, efforts: readonly LlmReasoningEff
   return lowestEffort(efforts)?.id
 }
 
-/** The parts of `@deepseek-ai/dsh-compaction-basic` 0.2.0-rc.2 this module relies on beyond the abstract engine. */
+/** The parts of `@deepseek-ai/dsh-compaction-basic` 0.2.1-rc.2 this module relies on beyond the abstract engine. */
 interface SummaryPolicy { summarizationProvider?: string; summarizationModel?: string }
 interface BasicEngine {
   /** The engine's documented sole subclass hook (`BasicCompactionEngine.summarize`), used by every compaction path. */
@@ -74,7 +74,7 @@ interface BasicEngine {
  * Summarization fields of the engine's own config are cleared for these calls, so the Nexus
  * setting decides the summary model; its other policy fields (such as maxTokens) still apply.
  * The summary runs at the reasoning effort `effort` resolves to by `summaryEffort` for that model.
- * Depends on `BasicCompactionEngine` internals of 0.2.0-rc.2: re-verify on Harness upgrades.
+ * Depends on `BasicCompactionEngine` internals of 0.2.1-rc.2: re-verify on Harness upgrades.
  */
 export function withSummaryModel(engine: CompactionEngine, target: () => ModelTarget, effort: () => string): CompactionEngine {
   const native = engine as unknown as Partial<BasicEngine>
@@ -111,7 +111,7 @@ export function withSummaryModel(engine: CompactionEngine, target: () => ModelTa
  * The span automatic compaction replaces, as the native selection: from the first node after a
  * leading system message up to a priced recent tail of at least `retain` tokens, never cutting
  * between a tool call and its result, with its priced tokens. Null when nothing before that tail can be compacted.
- * Mirrors the range selection of `@deepseek-ai/dsh-compaction-basic` 0.2.0-rc.2, which is not exported.
+ * Mirrors the range selection of `@deepseek-ai/dsh-compaction-basic` 0.2.1-rc.2, which is not exported.
  */
 export function compactableRange(session: Session, measurement: TokenMeasurement, retain: number) {
   const nodes = measurement.nodes
@@ -129,7 +129,7 @@ export function compactableRange(session: Session, measurement: TokenMeasurement
   return { start: nodes[first].seq, end: nodes[keepFrom - 1].seq, tokens }
 }
 
-/** The native `/compact` command's reports of expected failures, by failure code, as `@deepseek-ai/dsh-command-compact` 0.2.0-rc.2 words them. */
+/** The native `/compact` command's reports of expected failures, by failure code, as `@deepseek-ai/dsh-command-compact` 0.2.1-rc.2 words them. */
 export const MANUAL_FAILURES: Record<string, string> = {
   busy: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
   cancelled: 'Compaction cancelled.',

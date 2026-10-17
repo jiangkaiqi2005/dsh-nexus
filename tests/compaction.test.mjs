@@ -331,18 +331,18 @@ test('the Nexus conversation lists /compact on first open; budget, summary model
     const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1360, height: 900 } })
     await page.goto(url)
     await until(async () => {
-      for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
+      for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
       return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible()
     }, 'normal Harness entrance')
     // First-run native onboarding can mount after the sidebar becomes visible.
     for (let start = Date.now(); Date.now() - start < 2500; await delay(100)) {
-      for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
+      for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
     }
     return page
   }
   const settings = async page => {
     await until(async () => {
-      for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
+      for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
       await openSettings(page, { timeout: 1000 }).catch(() => {})
       await page.getByRole('button', { name: 'Nexus', exact: true }).click({ timeout: 1000 }).catch(() => {})
       return page.getByRole('spinbutton', { name: /压缩预算/ }).isVisible()

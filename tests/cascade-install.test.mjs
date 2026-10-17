@@ -105,7 +105,7 @@ test('Desktop installed cascade bundle runs tap dispatch, interruption, native r
   page.on('websocket', socket => socket.on('framereceived', frame => wire.push(String(frame.payload))))
   try {
     await page.goto(host.url); const bar = page.locator('[data-nexus-voice]')
-    await until(async () => { for (const name of ['继续', '稍后配置']) { const button = page.getByRole('button', { name, exact: true }); if (await button.isVisible()) await button.click() }; if (await bar.isVisible()) return true; await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click({ timeout: 1000 }).catch(() => {}) }, 'native Nexus entry')
+    await until(async () => { for (const name of ['继续']) { const button = page.getByRole('button', { name, exact: true }); if (await button.isVisible()) await button.click() }; if (await bar.isVisible()) return true; await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click({ timeout: 1000 }).catch(() => {}) }, 'native Nexus entry')
     assert.equal(await bar.getAttribute('data-state'), 'idle'); assert.equal(await page.evaluate(() => window.__streams.length), 0)
     await bar.getByRole('button', { name: '接通语音', exact: true }).click(); await until(async () => await bar.getAttribute('data-state') === 'live', 'prepared cascade media')
     const record = async () => { await bar.getByRole('button', { name: /^点按(?:说话|插话)$/ }).click(); await sleep(350); await bar.getByRole('button', { name: '结束录音', exact: true }).click() }

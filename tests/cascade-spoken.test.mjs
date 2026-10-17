@@ -6,6 +6,7 @@ import { startHost } from './host-process.mjs'
 import { chromium } from 'playwright'
 import { WebSocketServer } from 'ws'
 import { failureTooltip } from './voice-ui.mjs'
+import { openSettings } from './native-settings.mjs'
 
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const until = async (predicate, label, ms = 15000) => { for (const deadline = Date.now() + ms; !(await predicate()); ) { if (Date.now() > deadline) throw new Error(`waiting for ${label}`); await sleep(50) } }
@@ -42,7 +43,7 @@ async function spokenHost(endpoint, run, { real = false, observePlayback = false
     })
     const downlink = []; page.on('websocket', socket => socket.on('framereceived', frame => downlink.push(String(frame.payload))))
     await page.goto(url)
-    await until(async () => { for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() } return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible() }, 'native UI')
+    await until(async () => { for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() } return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible() }, 'native UI')
     await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click()
     await run(page, dir)
     assert.ok(!downlink.join('').includes('host-only-fixture-key'), 'Host credential never appears in browser frames')
@@ -99,7 +100,6 @@ test('cascade call receives its first PCM sentence while the native supervisor i
     assert.ok(!JSON.stringify(report.streams).includes('host-only-fixture-key'))
   } finally { for (const socket of server.clients) socket.terminate(); await new Promise(accept => server.close(accept)) }
 })
-import { openSettings } from './native-settings.mjs'
 
 test('cascade speaks complete Chinese and English sentences in order, preserves text after TTS failure and reads native work reports', { timeout: 120000 }, async () => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await new Promise(accept => server.once('listening', accept))

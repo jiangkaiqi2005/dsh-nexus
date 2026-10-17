@@ -35,7 +35,7 @@ async function open(browser, url, { init, storageState, onSocket, onFrame } = {}
   if (onSocket) await page.routeWebSocket(/.*/, socket => { const server = socket.connectToServer(); socket.onMessage(data => server.send(data)); server.onMessage(data => { onFrame?.(String(data)); socket.send(data) }); onSocket(() => { server.close(); socket.close() }) })
   await page.goto(url)
   await until(async () => {
-    for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() }
+    for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() }
     if (await page.locator('[data-nexus-voice]').isVisible()) return true
     await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click({ timeout: 1000 }).catch(() => {})
   }, 'native Nexus entry')

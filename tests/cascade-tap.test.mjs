@@ -37,7 +37,7 @@ async function tapHost(endpoint, asrEndpoint, run, { real = false, captureFile, 
     })
     const downlink = []; page.on('websocket', socket => socket.on('framereceived', frame => downlink.push(String(frame.payload))))
     await page.goto(url)
-    await until(async () => { for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() } return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible() }, 'native UI')
+    await until(async () => { for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() } return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible() }, 'native UI')
     await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click()
     await run(page, dir)
     assert.ok(!downlink.join('').includes('host-only-fixture-key'), 'Host credential never appears in browser frames')

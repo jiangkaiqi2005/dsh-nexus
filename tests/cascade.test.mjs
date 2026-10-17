@@ -172,7 +172,7 @@ test('native Nexus settings default to cascade and switch modes only on the next
         await page.goto(url)
         const until = async (predicate, description) => { for (const deadline = Date.now() + 15000; !(await predicate()); ) { if (Date.now() > deadline) throw new Error(`waiting for ${description}`); await sleep(100) } }
         await until(async () => {
-          for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() }
+          for (const label of ['继续']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click() }
           return page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).isVisible()
         }, 'native app ready')
         await writeFile(resolve(dir, 'ui-start.yml'), await page.locator('body').ariaSnapshot())

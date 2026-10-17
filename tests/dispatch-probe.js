@@ -32,6 +32,7 @@ export function apply(ctx, config) {
         let coldChildPrepared = false
         if (!config.real) {
           const parent = await ctx.agents.create({ sessionId: 'cold-parent', meta: { cwd: config.workspace }, agentOptions: { provider: 'dispatch-worker', model: 'worker-model' } })
+          // Only the start is awaited, not the result; observing it keeps a rejection from going unhandled.
           const activation = await ctx.subagents.startActivation({ provider: 'spawn', childId: 'cold-child', label: 'Existing non-Nexus child', request: { parent: parent.agent, prompt: [{ type: 'text', text: 'run-initial-child' }] }, signal: new AbortController().signal, delivery: 'parent' }); activation.result.catch(() => {})
           await ctx.agents.get('cold-child').whenIdle()
           await ctx.subagents.drainChildren(parent.agent, ['cold-child'])

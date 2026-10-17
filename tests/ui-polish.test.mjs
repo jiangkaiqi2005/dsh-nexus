@@ -61,7 +61,7 @@ async function fixture(run, { credential = true } = {}) {
         window.AudioContext = class extends NativeContext { constructor(options) { super(options); if (options?.sampleRate === 16000) window.__capture = this } }
       })
       await page.goto(url)
-      await until(async () => { for (const label of ['继续', '稍后配置']) { const item = button(page, label); if (await item.isVisible()) await item.click() }; if (await voice(page).isVisible()) return true; await button(page, '打开 Nexus').click({ timeout: 1000 }).catch(() => {}) }, 'Nexus composer')
+      await until(async () => { for (const label of ['继续']) { const item = button(page, label); if (await item.isVisible()) await item.click() }; if (await voice(page).isVisible()) return true; await button(page, '打开 Nexus').click({ timeout: 1000 }).catch(() => {}) }, 'Nexus composer')
       return page
     }
     await run({ open, browser, dir, responses, requests, tasks, pageErrors })
