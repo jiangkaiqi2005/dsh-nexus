@@ -113,7 +113,7 @@ export function apply(ctx, config) {
           await quiet()
 
           // A native continuable child of the supervisor itself: the runtime's own settled notice is its route.
-          await ctx.subagents.startContinuable({ provider: 'spawn', childId: 'nexus-child', label: 'Nexus native child', request: { parent: supervisor, agentOptions: { provider: 'delivery-worker', model: 'worker-model' }, prompt: [{ type: 'text', text: 'ok-native' }] }, signal: new AbortController().signal })
+          const activation = await ctx.subagents.startActivation({ provider: 'spawn', childId: 'nexus-child', label: 'Nexus native child', request: { parent: supervisor, agentOptions: { provider: 'delivery-worker', model: 'worker-model' }, prompt: [{ type: 'text', text: 'ok-native' }] }, signal: new AbortController().signal, delivery: 'parent' }); activation.result.catch(() => {})
           await quiet()
         }
 

@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { openSettings } from './native-settings.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, copyFile, symlink, writeFile, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -22,7 +23,7 @@ async function tapHost(endpoint, asrEndpoint, run, { real = false, captureFile, 
   await symlink(resolve('.'), resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(probe, resolve(profile, 'node_modules/nexus-spoken-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-spoken-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'DASHSCOPE_API_KEY' : 'NEXUS_SPOKEN_KEY'}\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ${endpoint}\n    asrEndpoint: ${asrEndpoint}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'DASHSCOPE_API_KEY' : 'NEXUS_SPOKEN_KEY'}\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ${endpoint}\n    asrEndpoint: ${asrEndpoint}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   let output = '', browser, page
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'spoken', '--port', '0', '--no-open'], { cwd: resolve('.'), env: { ...process.env, DSH_HOME: dir, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_SPOKEN_KEY: 'host-only-fixture-key', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => { child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data }); return {} })
   try {
@@ -163,7 +164,7 @@ test('hangup and client disconnect abort recognition and discard partial capture
 test('Nexus settings persist the recognition model and endpoint used by the next tap', { timeout: 90000 }, async () => endpoints(async ({ asr, tts, requests, responses }) => {
   responses.push({ text: '设置生效' })
   await tapHost(tts, asr, async (page, dir) => {
-    await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: 'Nexus', exact: true }).click(); await page.getByRole('button', { name: '高级：识别与合成端点、型号', exact: true }).click()
+    await openSettings(page); await page.getByRole('button', { name: 'Nexus', exact: true }).click(); await page.getByRole('button', { name: '高级：识别与合成端点、型号', exact: true }).click()
     const model = page.getByRole('textbox', { name: '识别型号', exact: true }), endpoint = page.getByRole('textbox', { name: '识别端点', exact: true })
     assert.equal(await model.inputValue(), 'qwen-audio-3.1-asr-flash'); assert.equal(await endpoint.inputValue(), asr)
     await model.fill('fixture-asr-model'); await model.blur(); await until(async () => !(await model.isDisabled()), 'saved model')

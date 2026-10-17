@@ -7,8 +7,6 @@ export function apply(ctx, config) {
   // What each work agent's model actually received as human text, per session, in request order.
   const received = {}
   const titleRequests = []
-  const titleBudgetLogs = []
-  ctx.logger.exporter({ export: message => { for (const text of message.args) if (typeof text === 'string' && text.startsWith('nexus title budget: ')) titleBudgetLogs.push(JSON.parse(text.slice('nexus title budget: '.length))) } })
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
       let text
@@ -118,7 +116,7 @@ export function apply(ctx, config) {
         const reader = await ctx.sessionPersistence.open(agent.id, 'read')
         const { events } = await reader.read()
         await reader.close()
-        await writeFile(config.report, JSON.stringify({ phase: config.phase, startup, final, events, workers, listed, received, titleRequests, titleBudgetLogs }))
+        await writeFile(config.report, JSON.stringify({ phase: config.phase, startup, final, events, workers, listed, received, titleRequests }))
       } catch (error) { await writeFile(config.report, JSON.stringify({ error: String(error), stack: error.stack })) }
     }, 1800)
     return () => clearTimeout(timer)

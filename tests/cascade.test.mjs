@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { openSettings } from './native-settings.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, copyFile, symlink, writeFile, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -20,7 +21,7 @@ async function scenario(name, { model, nexus = '', endpoint = 'ws://127.0.0.1:1'
   await symlink(resolve('.'), resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(probe, resolve(profile, 'node_modules/nexus-cascade-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-cascade-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_CASCADE_UNUSED\n    endpoint: ${endpoint}\n    timeoutMs: ${interact ? 3000 : 300}\n${nexus}${interact ? '- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n' : ''}`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_CASCADE_UNUSED\n    endpoint: ${endpoint}\n    timeoutMs: ${interact ? 3000 : 300}\n${nexus}${interact ? '- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n' : ''}`)
   let output = ''
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'cascade', '--port', '0', '--no-open'], { cwd: resolve('.'), env: { ...process.env, DSH_HOME: dir, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_CASCADE_UNUSED: interact ? 'fixture-not-a-secret' : '', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => {
     child.stdout.on('data', data => { output += data })
@@ -177,7 +178,7 @@ test('native Nexus settings default to cascade and switch modes only on the next
         await writeFile(resolve(dir, 'ui-start.yml'), await page.locator('body').ariaSnapshot())
         const open = async () => { await page.keyboard.press('Escape'); await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click() }
         const settings = async () => {
-          await page.getByRole('button', { name: '设置', exact: true }).click()
+          await openSettings(page)
           await page.getByRole('button', { name: 'Nexus', exact: true }).click()
           return page.getByRole('tablist', { name: '语音模式', exact: true })
         }

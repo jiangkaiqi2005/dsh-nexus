@@ -44,7 +44,7 @@ test('Nexus archives running work with native stops, protects the main conversat
   })
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-archive-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
   await copyFile(resolve('tests/archive-probe.js'), resolve(fixture, 'index.js'))
-  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: archive-schedule\n      name: '@deepseek-ai/dsh-schedule'\n    - id: nexus-archive-probe\n      name: nexus-archive-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n`)
+  await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-archive-probe\n      name: nexus-archive-probe\n      config:\n        report: ${JSON.stringify(report)}\n        workspace: ${JSON.stringify(workspace)}\n`)
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-archive-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-archive-probe'] } } }))

@@ -62,7 +62,7 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-titles-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-titles-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_TITLES_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n    timeoutMs: 30000\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_TITLES_KEY\n    endpoint: ws://127.0.0.1:${server.address().port}\n    timeoutMs: 30000\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   const reports = []
   const ui = {}
   // Every Host runs under the repository launcher so its whole process tree is gone before the next one reuses this home.
@@ -176,9 +176,7 @@ test('dispatch as marked user input: native naming, unchanged existing titles, n
   assert.equal(one.listed.find(item => item.sessionId === created.id).title, 'Title run-titled-new: 实现登录页并写测')
   assert.deepEqual(one.received[created.id][0], [dispatchText], 'the work model receives exactly the dispatched text as the user request')
   assert.deepEqual(one.titleRequests.find(request => request.sessionId === created.id), { sessionId: created.id, provider: 'title-worker', model: 'worker-model', maxTokens: 4096 })
-  assert.deepEqual(one.titleBudgetLogs, [{ sessionId: created.id, titleProvider: 'session-title-first-prompt-llm', messageSeq: dispatchEvent.seq, callId: createCall.call_id, originalMaxTokens: 64, maxTokens: 4096 }])
   assert.equal(created.events.filter(event => event.type === 'session/title-llm-request').length, 1, 'the native pre-waterfall request is not duplicated')
-  assert.ok(one.titleRequests.filter(request => !request.sessionId.startsWith('session-')).every(request => request.maxTokens === 64), 'ordinary existing conversations keep the native title budget')
   // A later dispatch after a restart reaches the now titled session and leaves its title alone.
   assert.ok(worker(four, created.id).events.some(event => event.type === 'user/message' && isDispatch(event.data.source) && textOf(event.data) === 'run-new phase two from Nexus'))
   assert.deepEqual(titles(worker(four, created.id).events), titles(created.events))

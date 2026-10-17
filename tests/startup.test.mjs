@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { openSettings } from './native-settings.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile, symlink, copyFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -20,7 +21,7 @@ async function profile(endpoint, autoVoice = false) {
   await symlink(resolve('.'), resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(probe, resolve(profile, 'node_modules/nexus-startup-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-startup-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_STARTUP_KEY\n    endpoint: ${endpoint}\n    timeoutMs: 2000\n${autoVoice ? '    autoVoice: true\n' : ''}- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_STARTUP_KEY\n    endpoint: ${endpoint}\n    timeoutMs: 2000\n${autoVoice ? '    autoVoice: true\n' : ''}- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   let cycle = 0
   return {
     home,
@@ -74,7 +75,7 @@ async function dismissOnboarding(page) {
 async function setting(page) {
   await until(async () => {
     for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
-    await page.getByRole('button', { name: '设置', exact: true }).click({ timeout: 1000 }).catch(() => {})
+    await openSettings(page, { timeout: 1000 }).catch(() => {})
     return page.getByRole('dialog', { name: '设置', exact: true }).isVisible()
   }, 'native settings panel')
   const toggle = page.getByRole('switch', { name: /启动后自动接通/ })

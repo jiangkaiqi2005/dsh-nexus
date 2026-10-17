@@ -7,6 +7,7 @@ import { WebSocketServer } from 'ws'
 import { createServer } from 'node:http'
 import { startHost } from './host-process.mjs'
 import { failureTooltip } from './voice-ui.mjs'
+import { openSettings } from './native-settings.mjs'
 
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const until = async (check, label, ms = 20000) => { for (const deadline = Date.now() + ms; !(await check()); ) { if (Date.now() > deadline) throw new Error(`waiting for ${label}`); await sleep(50) } }
@@ -40,7 +41,7 @@ async function fixture(run, { credential = true } = {}) {
       if (event.header.action === 'finish-task') send('task-finished')
     })
   })
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_POLISH_KEY\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ws://127.0.0.1:${ws.address().port}\n    asrEndpoint: http://127.0.0.1:${http.address().port}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: NEXUS_POLISH_KEY\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ws://127.0.0.1:${ws.address().port}\n    asrEndpoint: http://127.0.0.1:${http.address().port}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   let output = '', browser, page
   const pageErrors = [], downlink = []
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'polish', '--port', '0', '--no-open'], { cwd: resolve('.'), env: { ...process.env, DSH_HOME: dir, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_POLISH_KEY: credential ? 'host-only-polish-key' : '', DSH_TELEMETRY: '0' } }, async child => { child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data }); return {} })
@@ -74,7 +75,7 @@ async function fixture(run, { credential = true } = {}) {
 
 test('Nexus settings show native groups, keep advanced details folded and persist edits through the new controls', { timeout: 90000 }, async () => fixture(async ({ open, dir }) => {
   const page = await open()
-  const settings = async () => { await button(page, '设置').click(); await button(page, 'Nexus').click(); await page.getByText('上下文压缩', { exact: true }).waitFor() }
+  const settings = async () => { await openSettings(page); await button(page, 'Nexus').click(); await page.getByText('上下文压缩', { exact: true }).waitFor() }
   await settings()
   for (const name of ['通话', '语音服务', '上下文压缩']) assert.equal(await page.getByText(name, { exact: true }).isVisible(), true)
   const advanced = button(page, '高级：识别与合成端点、型号'), more = button(page, '了解更多')
@@ -135,7 +136,7 @@ test('call bar stays in Nexus, pill navigates back, and only one voice control i
   await page.locator('.nx-a-pill-main').click()
   await page.locator('.nx-a-bar').waitFor()
   assert.equal(await page.locator('.nx-a-pill').count(), 0)
-  await button(page, '设置').click()
+  await openSettings(page)
   await page.locator('.nx-a-pill').waitFor()
   assert.equal(await voice(page).count(), 1)
   assert.equal(await page.locator('.nx-a-pill').evaluate(element => element.offsetParent !== null), true, 'the settings pill has a layout layer to stay inside')

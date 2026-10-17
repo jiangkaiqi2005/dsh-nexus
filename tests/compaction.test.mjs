@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { openSettings } from './native-settings.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, writeFile, readFile, symlink, copyFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -311,7 +312,7 @@ test('the Nexus conversation lists /compact on first open; budget, summary model
   await symlink(root, resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(fixture, resolve(profile, 'node_modules/nexus-compaction-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-compaction-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_COMPACTION_KEY\n    endpoint: ${model.url}\n    timeoutMs: 5000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   const cycle = async (report, steps) => {
     await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-compaction-probe\n      name: nexus-compaction-probe\n      config:\n        dir: ${JSON.stringify(home)}\n        report: ${report}\n        live: true\n        steps: ${JSON.stringify(steps)}\n`)
     let output = ''
@@ -342,7 +343,7 @@ test('the Nexus conversation lists /compact on first open; budget, summary model
   const settings = async page => {
     await until(async () => {
       for (const label of ['继续', '稍后配置']) { const button = page.getByRole('button', { name: label, exact: true }); if (await button.isVisible()) await button.click().catch(() => {}) }
-      await page.getByRole('button', { name: '设置', exact: true }).click({ timeout: 1000 }).catch(() => {})
+      await openSettings(page, { timeout: 1000 }).catch(() => {})
       await page.getByRole('button', { name: 'Nexus', exact: true }).click({ timeout: 1000 }).catch(() => {})
       return page.getByRole('spinbutton', { name: /压缩预算/ }).isVisible()
     }, 'Nexus settings')
@@ -521,8 +522,8 @@ test('during a call a replacement discarded once the agent is idle is retried at
 test('automatic compaction skips a span too small to shrink the request, warning once per stretch, and still compacts a useful span; /compact is not limited', { timeout: 180000 }, async () => {
   // A budget just above the fixed supervisor prompt: early spans and a lone checkpoint are too small to matter.
   const report = await scenario('useless', {
-    nexus: '    compactionBudget: 9000\n    summaryModel: nexus-test-summary/configured-sum\n    summaryReasoningEffort: model-default\n',
-    steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { long: 4 }, { command: '/compact' }],
+    nexus: '    compactionBudget: 10850\n    summaryModel: nexus-test-summary/configured-sum\n    summaryReasoningEffort: model-default\n',
+    steps: [{ prompt: 'Remember the codename KESTREL-9.' }, { long: 6 }, { command: '/compact' }],
   })
   const { events, pressure, commands, warnings } = report
   const turnOf = text => events.find(event => sourceOf(event) === 'user' && userText(event).startsWith(text)).seq
@@ -533,7 +534,7 @@ test('automatic compaction skips a span too small to shrink the request, warning
   }
   const automatic = of(events, 'compaction/start').filter(event => typeof event.data.turn === 'number')
   // Over budget from the first long prompt, but the first spans are mostly prompt and retained tail: skipped, no checkpoint.
-  assert.ok(pressure[1] > 9000)
+  assert.ok(pressure[1] > 10850)
   assert.equal(compactedIn('LONG-1 '), false)
   // Once the history outweighs that, it compacts with the configured model.
   assert.equal(automatic.length, 1)
@@ -542,8 +543,8 @@ test('automatic compaction skips a span too small to shrink the request, warning
   // The model-default effort setting sends none, so the model's own default effort (high) applies, not its lowest.
   assert.ok(report.summaries.length && report.summaries.every(call => call.reasoningEffort === 'high'))
   // Afterwards the request stays over budget, but the checkpoint alone is not summarized again.
-  assert.ok(pressure.at(-1) > 9000)
-  assert.equal(compactedIn('LONG-4 '), false)
+  assert.ok(pressure.at(-1) > 10850)
+  assert.equal(compactedIn('LONG-6 '), false)
   // One warning before the compaction and one after it, not one per turn.
   assert.equal(warnings.filter(warning => warning.includes('automatic compaction skipped')).length, 2)
   // /compact still compacts on request.

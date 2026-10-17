@@ -8,8 +8,8 @@
 
 [English](README.md) | 简体中文
 
-![version](https://img.shields.io/badge/version-0.2.0-176b69)
-![Harness](https://img.shields.io/badge/Harness%20%2F%20Desktop-0.2.0--rc.2-176b69)
+![version](https://img.shields.io/badge/version-0.2.1-176b69)
+![Harness](https://img.shields.io/badge/Harness%20%2F%20Desktop-0.2.1--rc.2-176b69)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%E2%89%A524-176b69)
 ![platform](https://img.shields.io/badge/tested%20on-Windows-lightgrey)
 
@@ -59,7 +59,7 @@ flowchart LR
 
 ## 环境要求
 
-- DeepSeek Harness / Desktop **0.2.0-rc.2**（Cordis 4.0.4）。其它版本暂时没有测过。
+- DeepSeek Harness / Desktop **0.2.1-rc.2**（Cordis 4.0.5）。包声明兼容之后的 0.2.x，但只测过 0.2.1-rc.2；不再支持 0.2.0-rc.2。
 - Windows。macOS 和 Linux 没有测过。
 - 在 Harness 里配好一个支持工具调用的默认模型。
 - [DashScope](https://dashscope.aliyun.com/) API Key，在 Host 的凭据服务里以 `DASHSCOPE_API_KEY` 保存。
@@ -67,14 +67,14 @@ flowchart LR
 
 ## 快速开始
 
-从 [Releases](https://github.com/jiangkaiqi2005/dsh-nexus/releases/latest) 下载 `dsh-nexus-0.2.0.tgz`。
+从 [Releases](https://github.com/jiangkaiqi2005/dsh-nexus/releases/latest) 下载 `dsh-nexus-0.2.1.tgz`。
 
 先正常打开一次 Desktop，让它建立 `desktop` profile，再退出。然后用 Desktop 自带的 CLI 安装（PowerShell，CLI 和 tgz 的路径都改成你自己的）：
 
 ```powershell
 $dsh = 'D:\DeepSeekHarness\resources\runtime\cli\bin\dsh.cmd'
-& $dsh --version   # 应为 0.2.0-rc.2
-& $dsh plugin --profile desktop add .\dsh-nexus-0.2.0.tgz
+& $dsh --version   # 应为 0.2.1-rc.2
+& $dsh plugin --profile desktop add .\dsh-nexus-0.2.1.tgz
 ```
 
 装好以后：
@@ -150,10 +150,10 @@ npm ci --ignore-scripts
 npm run typecheck
 npm run build
 npm test
-npm pack   # 自己打包，生成 dsh-nexus-0.2.0.tgz
+npm pack   # 自己打包，生成 dsh-nexus-0.2.1.tgz
 ```
 
-测试不调用付费模型，用的是独立 profile、本地受控端点和无头 Edge。本机装了 Desktop 0.2.0-rc.2 的话，还可以跑打包安装和完整场景检查：
+测试不调用付费模型，用的是独立 profile、本地受控端点和无头 Edge。本机装了 Desktop 0.2.1-rc.2 的话，还可以跑打包安装和完整场景检查：
 
 ```powershell
 $env:NEXUS_DESKTOP_SMOKE = '1'

@@ -117,7 +117,7 @@ for (const scenario of ['normal', 'reload', 'race', 'interrupt', 'active-exit'])
     assert.deepEqual(second.events.filter(event => event.type === 'turn/start').map(event => event.data.turn), exited ? [1, 2, 3, 4, 5, 6, 7] : [1, 2, 3, 4, 5, 6])
     assert.ok(second.models.every(model => model === 'qwen3.8-omni-flash-realtime'))
     if (scenario === 'race') assert.match(second.raceError, /Unknown agent preset: nexus/)
-    if (scenario === 'active-exit') assert.equal(second.before.findLast(event => event.type === 'turn/end').data.reason.kind, 'interrupted')
+    if (scenario === 'active-exit') assert.deepEqual(second.before.findLast(event => event.type === 'turn/end').data.reason, { kind: 'aborted', reason: { kind: 'disposed' } })
     if (scenario === 'interrupt') {
       assert.equal(second.before.findLast(event => event.type === 'turn/end').data.reason.kind, 'interrupted')
       assert.deepEqual(second.before.filter(event => event.type === 'tool/result').map(event => event.data.error.code), ['TOOL_OUTCOME_UNKNOWN', 'TOOL_NOT_STARTED'])

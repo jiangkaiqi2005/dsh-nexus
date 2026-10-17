@@ -21,7 +21,7 @@ async function spokenHost(endpoint, run, { real = false, observePlayback = false
   await symlink(resolve('.'), resolve(profile, 'node_modules/dsh-nexus'), 'junction')
   await symlink(probe, resolve(profile, 'node_modules/nexus-spoken-probe'), 'junction')
   await writeFile(resolve(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-nexus', 'nexus-spoken-probe'] } } }))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'DASHSCOPE_API_KEY' : 'NEXUS_SPOKEN_KEY'}\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ${endpoint}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    credentialRef: ${real ? process.env.NEXUS_REAL_CREDENTIAL_REF ?? 'DASHSCOPE_API_KEY' : 'NEXUS_SPOKEN_KEY'}\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ${endpoint}\n    timeoutMs: 10000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   let output = '', browser, page
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'spoken', '--port', '0', '--no-open'], { cwd: resolve('.'), env: { ...process.env, DSH_HOME: dir, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_SPOKEN_KEY: 'host-only-fixture-key', DEEPSEEK_API_KEY: '', DSH_TELEMETRY: '0' } }, async child => { child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data }); return {} })
   try {
@@ -99,6 +99,7 @@ test('cascade call receives its first PCM sentence while the native supervisor i
     assert.ok(!JSON.stringify(report.streams).includes('host-only-fixture-key'))
   } finally { for (const socket of server.clients) socket.terminate(); await new Promise(accept => server.close(accept)) }
 })
+import { openSettings } from './native-settings.mjs'
 
 test('cascade speaks complete Chinese and English sentences in order, preserves text after TTS failure and reads native work reports', { timeout: 120000 }, async () => {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await new Promise(accept => server.once('listening', accept))
@@ -139,7 +140,7 @@ test('cascade speaks complete Chinese and English sentences in order, preserves 
       assert.equal(tasks.length, before + 1)
       await page.screenshot({ path: resolve(dir, 'tts-failure-connected.png') })
       // The next reply gets a fresh healthy task, with configurable model and voice saved in native settings.
-      await page.getByRole('button', { name: '设置', exact: true }).click(); await page.getByRole('button', { name: 'Nexus', exact: true }).click(); await page.getByRole('button', { name: '高级：识别与合成端点、型号', exact: true }).click()
+      await openSettings(page); await page.getByRole('button', { name: 'Nexus', exact: true }).click(); await page.getByRole('button', { name: '高级：识别与合成端点、型号', exact: true }).click()
       const model = page.getByRole('textbox', { name: '合成型号', exact: true }); const voice = page.getByRole('textbox', { name: '合成音色', exact: true })
       assert.equal(await model.inputValue(), 'qwen-audio-3.1-tts-flash'); assert.equal(await voice.inputValue(), 'longanhuan_v3.1')
       await model.fill('fixture-tts'); await model.press('Tab'); await until(() => model.isDisabled().then(value => !value), 'saved model')

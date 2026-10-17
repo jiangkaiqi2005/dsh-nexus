@@ -72,7 +72,7 @@ async function lifecycle(run, { autoVoice = false, denying = false, blocked = fa
       if (event.header.action === 'finish-task') send('task-finished')
     })
   })
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    autoVoice: ${autoVoice}\n    credentialRef: NEXUS_LIFECYCLE_KEY\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ws://127.0.0.1:${ws.address().port}\n    asrEndpoint: http://127.0.0.1:${http.address().port}\n    timeoutMs: 5000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    autoVoice: ${autoVoice}\n    credentialRef: NEXUS_LIFECYCLE_KEY\n    endpoint: ws://127.0.0.1:1\n    ttsEndpoint: ws://127.0.0.1:${ws.address().port}\n    asrEndpoint: http://127.0.0.1:${http.address().port}\n    timeoutMs: 5000\n- id: ui-settings-general\n  name: "@deepseek-ai/dsh-client-ui-settings-general"\n  config:\n    welcomeNoticeVersion: 2026-09-28.1\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n`)
   let output = '', browser, page
   const host = await startHost(process.execPath, [resolve('node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'lifecycle', '--port', '0', '--no-open'], { cwd: resolve('.'), env: { ...process.env, DSH_HOME: dir, DSH_AGENTS_HOME: resolve(dir, 'agents'), NEXUS_LIFECYCLE_KEY: 'host-only-lifecycle-key', DSH_TELEMETRY: '0' } }, async child => { child.stdout.on('data', data => { output += data }); child.stderr.on('data', data => { output += data }); return {} })
   try {

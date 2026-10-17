@@ -32,9 +32,9 @@ export function apply(ctx, config) {
         let coldChildPrepared = false
         if (!config.real) {
           const parent = await ctx.agents.create({ sessionId: 'cold-parent', meta: { cwd: config.workspace }, agentOptions: { provider: 'dispatch-worker', model: 'worker-model' } })
-          await ctx.subagents.startContinuable({ provider: 'spawn', childId: 'cold-child', label: 'Existing non-Nexus child', request: { parent: parent.agent, prompt: [{ type: 'text', text: 'run-initial-child' }] }, signal: new AbortController().signal })
+          const activation = await ctx.subagents.startActivation({ provider: 'spawn', childId: 'cold-child', label: 'Existing non-Nexus child', request: { parent: parent.agent, prompt: [{ type: 'text', text: 'run-initial-child' }] }, signal: new AbortController().signal, delivery: 'parent' }); activation.result.catch(() => {})
           await ctx.agents.get('cold-child').whenIdle()
-          await ctx.subagents.drainContinuableChildren(parent.agent, ['cold-child'])
+          await ctx.subagents.drainChildren(parent.agent, ['cold-child'])
           await parent.agent.whenIdle()
           await parent.dispose()
           coldChildPrepared = !ctx.agents.get('cold-parent') && !ctx.agents.get('cold-child')

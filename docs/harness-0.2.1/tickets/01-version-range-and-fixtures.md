@@ -4,7 +4,7 @@
 
 **阻塞于：** 无。
 
-**状态：** 待实施。
+**状态：** 实施完成，待评审；[验证记录](../verification/01-version-range-and-fixtures.md)。全套验收项未勾选：干净 worktree 中除 R6/R8/R9 外另有 1 项 profile 用例失败一次且单独重跑 2/2 未复现；仓库目录中因未跟踪的 `promo/`、`.claude/` 拖慢原生整树快照，另有 10 项时序失败，详见验证记录。
 
 **范围与约束：** 依据 Spec「诊断结论」R1a、R1b、R2、R3、R4、R5、R7 与「裁定」1–5、9、10。
 
@@ -14,10 +14,10 @@
 - README（中英）、`docs/installation-and-use.md` 的版本要求与安装示例（tgz 文件名 0.2.1）。
 - 不改 `src/voice.ts`、`client.js` 的行为（属于 02–04）。
 
-- [ ] 用 0.2.1-rc.2 自带 CLI `dsh plugin add` 打包产物不再被拒；`evaluatePluginCompatibility` 对新 manifest 返回 undefined。
-- [ ] `npm run typecheck` 通过。
+- [x] 用 0.2.1-rc.2 自带 CLI `dsh plugin add` 打包产物不再被拒；`evaluatePluginCompatibility` 对新 manifest 返回 undefined。
+- [x] `npm run typecheck` 通过。
 - [ ] `npm test` 全套中失败只剩 R6、R8、R9 对应的用例（`cascade-tap` 挂断重拨、`ui` Realtime 模型名、`startup` 新 Host 周期），其余通过或为原有 opt-in 跳过。
-- [ ] `NEXUS_DESKTOP_SMOKE=1` 下 `desktop.test.mjs` 通过。
-- [ ] 每处测试改动都能对应到 Spec 的根因，断言的行为不降低。
+- [x] `NEXUS_DESKTOP_SMOKE=1` 下 `desktop.test.mjs` 通过。
+- [x] 每处测试改动都能对应到 Spec 的根因，断言的行为不降低。
 
 **Spec 对照：** 诊断结论 R1a–R5、R7；裁定 1–5、9、10；测试决定。

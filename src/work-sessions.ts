@@ -6,7 +6,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
-import { registerWorkSessionTitles } from './work-session-titles.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -26,7 +25,6 @@ export const isNexusDispatch = ({ source }: UserMessage) => source.kind === 'nex
  * Nexus manages conversation sessions only; subagent sessions belong to the agent that spawned them.
  */
 export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: ToolRuntime) {
-  const trackTitle = registerWorkSessionTitles(ctx)
   const output = { schema: { type: 'json' } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
   const sessionId = { type: 'string', required: true, description: 'Target native conversation session identity.' } as const
   const text = { type: 'string', required: true, description: 'Task or guidance to deliver, preserving the user requirements.' } as const
@@ -76,7 +74,6 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
       const created = await ctx.sessionController.create({ workspaceId: workspace.id, ...(args.agentPreset ? { agentPreset: args.agentPreset } : {}) })
       exec.signal.throwIfAborted()
       const agent = await resolve(created.sessionId)
-      trackTitle(agent.session, exec.callId)
       return send(agent, args.text, exec.callId)
     },
   }))

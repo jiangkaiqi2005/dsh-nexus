@@ -36,8 +36,8 @@ export function apply(ctx, config) {
         }
         if (!stopping && !results.length) call = { name: 'pwsh', arguments: { command: "Start-Sleep -Seconds 45; Write-Output 'TIMER-DONE'", description: 'Start the controlled background timer', run_in_background: true } }
         if (stopping && !results.length) call = { name: 'job_list', arguments: {} }
-        if (stopping && results.length === 1) call = { name: 'job_kill', arguments: { job_id: textOf(results[0]).match(/pwsh-\d+/)?.[0], reason: 'User asked to stop the timer' } }
-        if (stopping && results.length === 2) call = { name: 'job_output', arguments: { job_id: textOf(results[0]).match(/pwsh-\d+/)?.[0], wait: true } }
+        if (stopping && results.length === 1) call = { name: 'job_kill', arguments: { job_id: textOf(results[0]).match(/pwsh-[0-9a-f]+/)?.[0], reason: 'User asked to stop the timer' } }
+        if (stopping && results.length === 2) call = { name: 'job_output', arguments: { job_id: textOf(results[0]).match(/pwsh-[0-9a-f]+/)?.[0], wait: true } }
         if (stopping && results.length === 3) call = { name: 'job_list', arguments: {} }
         if (call) {
           const block = { type: 'tool-call', id: `timer-${crypto.randomUUID()}`, name: call.name, arguments: JSON.stringify(call.arguments) }

@@ -143,7 +143,7 @@ test('clean bundled profile completes controlled repair, voice steering, review 
   await mkdir(fixture)
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-scenario-probe', type: 'module', exports: './index.js' }))
   await copyFile(resolve('tests/scenario-probe.js'), resolve(fixture, 'index.js'))
-  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_SCENARIO_KEY\n    endpoint: ws://127.0.0.1:${endpoint.server.address().port}\n- insert:\n    - id: scenario-probe\n      name: nexus-scenario-probe\n      config:\n        dir: ${JSON.stringify(dir)}\n        workspace: ${JSON.stringify(workspace)}\n`)
+  await writeFile(resolve(profile, 'cordis.patch.yml'), `- id: nexus\n  config:\n    voiceMode: realtime\n    credentialRef: NEXUS_SCENARIO_KEY\n    endpoint: ws://127.0.0.1:${endpoint.server.address().port}\n- id: ui-settings-models\n  name: "@deepseek-ai/dsh-client-ui-settings-models"\n  config:\n    credentialOnboarding: false\n- insert:\n    - id: scenario-probe\n      name: nexus-scenario-probe\n      config:\n        dir: ${JSON.stringify(dir)}\n        workspace: ${JSON.stringify(workspace)}\n`)
   let output = ''
   const host = await startHost(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `""${cli}" --profile nexus-scenario --port 0 --no-open"`], { cwd: workspace, env, windowsVerbatimArguments: true }, async child => {
     child.stdout.on('data', data => { output += data })
