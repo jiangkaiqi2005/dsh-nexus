@@ -4,7 +4,7 @@
 
 **阻塞于：** 无。
 
-**状态：** 实施完成；第 1 轮双轴评审（3479b37）两轴均 approve，低严重度意见按协调者裁定处置后待复核；[验证记录](../verification/01-version-range-and-fixtures.md)。
+**状态：** 实施完成；第 1 轮双轴评审（3479b37）两轴均 approve，低严重度意见按协调者裁定处置（0c000d6）后两轴复审放行；14 处内联重复 profile patch 记为后续整理；[验证记录](../verification/01-version-range-and-fixtures.md)。
 
 **范围与约束：** 依据 Spec「诊断结论」R1a、R1b、R2、R3、R4、R5、R7 与「裁定」1–5、9、10。
 
