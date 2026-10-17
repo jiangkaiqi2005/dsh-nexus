@@ -52,6 +52,8 @@ export class VoiceController extends TypertRemoteService {
   private ready: Promise<void>
   private markReady!: () => void
   private owner?: symbol
+  /** Calls waiting briefly for the owner to release. */
+  private vacated = new Set<() => void>()
 
   constructor(ctx: Context, private startup: { enabled: boolean; attempted: boolean }) {
     super(ctx, 'nexusVoice')
@@ -85,6 +87,13 @@ export class VoiceController extends TypertRemoteService {
    */
   @Remote({ mode: 'stream' })
   async *call(signal: AbortSignal): AsyncGenerator<VoiceFrame> {
+    // A hangup can reach the Host together with the same client's redial; let the ending call release first.
+    if (this.owner) await new Promise<void>(resolve => {
+      const done = () => { clearTimeout(timer); this.vacated.delete(done); resolve() }
+      const timer = setTimeout(done, 500)
+      this.vacated.add(done)
+    })
+    if (signal.aborted) return
     if (this.owner) { yield { type: 'state', state: 'failed', code: 'CALL_BUSY' }; return }
     const owner = this.owner = Symbol()
     const frames = new Frames()
@@ -108,7 +117,7 @@ export class VoiceController extends TypertRemoteService {
           else if (item.type === 'start-recording') live.startRecording?.(item.playback)
           else if (item.type === 'end-recording') live.endRecording?.()
           else if (item.type === 'played' && Number.isSafeInteger(item.samples) && item.samples >= 0) live.played(item.samples, item.replyId)
-          else if (item.type === 'hangup') { live.hangup(item.samples, item.playback); frames.end(true); return }
+          else if (item.type === 'hangup') { live.hangup(item.samples, item.playback); this.release(owner); frames.end(true); return }
         }
       })()
       pump.catch(() => frames.end())
@@ -117,7 +126,14 @@ export class VoiceController extends TypertRemoteService {
       if (!signal.aborted) yield { type: 'state', state: 'failed', code: error instanceof RealtimeFailure ? error.code : 'UNKNOWN' }
     } finally {
       live?.end()
-      if (this.owner === owner) this.owner = undefined
+      this.release(owner)
     }
+  }
+
+  /** Release the media owner held by this call; a later call's owner stays in place. */
+  private release(owner: symbol) {
+    if (this.owner !== owner) return
+    this.owner = undefined
+    for (const done of this.vacated) done()
   }
 }
