@@ -52,7 +52,7 @@ async function profileTurn(scenario) {
   try {
     let result
     for (let i = 0; i < 450; i++) { try { result = JSON.parse(await readFile(report, 'utf8')); break } catch {} if (child.exitCode !== null) break; await delay(100) }
-    assert.ok(result, 'profile did not produce a report: ' + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-6000))
+    assert.ok(result, `profile did not produce a report (exitCode=${child.exitCode}, signalCode=${child.signalCode}): ` + output.replace(/\?token=\S+/g, '?token=[redacted]').slice(-6000))
     assert.equal(result.error, undefined, result.stack)
     if (scenario === 'late-conflict' || scenario.startsWith('storage-')) return { ...result, wire, report }
     // The ordinary worker's finished turn is delivered to the supervisor first; every scenario
