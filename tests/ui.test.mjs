@@ -37,8 +37,14 @@ test('Nexus footer opens an enabled native composer and sends to the fixed super
   await writeFile(resolve(fixture, 'package.json'), JSON.stringify({ name: 'nexus-ui-probe', version: '1.0.0', type: 'module', exports: './index.js', dsh: { bundle: { patch: './patch.yml' } } }))
   await writeFile(resolve(fixture, 'patch.yml'), `- insert:\n    - id: nexus-ui-probe\n      name: nexus-ui-probe\n      config:\n        report: ${JSON.stringify(report)}\n`)
   await writeFile(resolve(fixture, 'index.js'), `import { writeFile } from 'node:fs/promises'
-export const inject = ['agents', 'sessionPersistence']
+import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+export const inject = ['agents', 'sessionPersistence', 'llm']
 export function apply(ctx, config) {
+  class WorkerAdapter extends LlmAdapter {
+    async listModels(provider) { return [{ provider, id: 'worker-model', name: 'UI worker model' }] }
+    async *stream() {}
+  }
+  ctx.llm.registerAdapter(['nexus-ui-worker'], new WorkerAdapter())
   ctx.on('session/event', async (session, event) => {
     if (session.id !== 'nexus-supervisor' || event.type !== 'turn/end') return
     try {
@@ -73,7 +79,8 @@ export function apply(ctx, config) {
     await writeFile(resolve(artifacts, 'nexus-open.yml'), await page.locator('body').ariaSnapshot())
     const editor = page.getByRole('textbox').last()
     assert.equal(await editor.getAttribute('contenteditable'), 'true', 'Nexus must accept text without switching to a new worker workspace')
-    assert.match(await page.getByRole('button', { name: /选择模型/ }).innerText(), /qwen3\.8-omni-flash-realtime/)
+    // R8: the Realtime model is outside the shared model catalog, so the native selector shows its fallback.
+    assert.equal(await page.getByRole('button', { name: /选择模型/ }).innerText(), '请选择模型')
     await page.getByRole('button', { name: /打开 Nexus|Open Nexus/ }).click()
     assert.equal(await editor.getAttribute('contenteditable'), 'true')
     assert.equal(modelRequests, 0, 'opening Nexus must not start a model request')
@@ -94,6 +101,12 @@ export function apply(ctx, config) {
     const header = result.events.find(event => event.type === 'request/header')
     const turn = result.events.find(event => event.type === 'turn/start')
     assert.ok(header.seq > turn.seq, 'request header belongs to the real admitted turn')
+    await page.getByRole('button', { name: '新建会话' }).first().click()
+    await page.getByRole('treeitem', { name: '新会话', selected: true }).waitFor()
+    await page.getByRole('button', { name: /选择模型/ }).click()
+    const models = page.getByRole('group', { name: '模型与推理等级' })
+    await models.getByRole('menuitemradio', { name: /UI worker model/ }).waitFor()
+    assert.doesNotMatch(await models.innerText(), /dashscope-realtime|qwen3\.8-omni-flash-realtime/, 'a work session must not list the Nexus Realtime model')
     console.log('native UI evidence:', home)
   } catch (error) {
     if (page) {
