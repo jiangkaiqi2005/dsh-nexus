@@ -38,6 +38,7 @@
 6. **R6 在 Host 侧修**：收到挂断上行时立即释放 `owner`；若仍有竞争，`call()` 遇到占用可等待不超过 500ms 再回 `CALL_BUSY`。真实占线照常报。
 7. **R9 等会话列表就绪再打开主会话**，不用盲目重试；失败仍走现有失败态。
 8. **R8 让 Nexus 输入框显示真实 Realtime 模型名**，且该模型不得出现在其他会话的模型列表中。若公开 API 做不到，实施代理报告并停在"需人工关注"，不做 hack。
+   - **2026-10-17 补充裁定（协调者，经用户授权）：** 票 04 调研证实公开 API 做不到（模型目录全局共享，`conversation.input.model` 是全局 single 插槽，见[票 04 验证记录](verification/04-realtime-model-label.md)）。改为接受新版原生回退「请选择模型」：不注册 provider、不加标签、不覆盖选择器。测试断言该回退，并断言普通会话的模型目录里没有 Realtime 模型。向上游提需求的草稿交用户决定是否发出。
 9. **测试首启弹窗**：在测试 profile patch 里设 `@deepseek-ai/dsh-client-ui-settings-models` 的 `credentialOnboarding: false`（并按需设置预览版说明已读），与真实 Desktop 行为一致；不依赖 `page.addLocatorHandler`。
 10. 不提交工作区里与本批无关的 `promo/`、`.claude/`、`skills-lock.json`。
 
