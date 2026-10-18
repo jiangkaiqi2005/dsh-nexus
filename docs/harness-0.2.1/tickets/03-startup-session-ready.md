@@ -4,15 +4,15 @@
 
 **阻塞于：** 01。
 
-**状态：** 待实施。
+**状态：** 实施完成，待评审；[验证记录](../verification/03-startup-session-ready.md)。等待的是原生会话列表 `ctx.sessions.list` 中出现 `nexus-supervisor`（上限 10 秒）。
 
 **范围与约束：** 依据 Spec R9 与裁定 7。
 
 - 只改 `client.js` 中 `claimStartup()` 之后打开主会话的流程。用宿主公开的就绪信号（例如会话列表的 phase / 列表内容）等待，不用固定次数的盲目重试；等待有上限，超时仍走现有失败态。
 - 自动接通只消费一次的语义不变。
 
-- [ ] `startup.test.mjs`「native default and save, new Host cycles…」通过，连续重跑 3 次都通过。
-- [ ] 其余 `startup` 用例（权限、设备、播放、模型失败）保持通过。
-- [ ] `npm run typecheck`、`npm test` 全套：除 R8 对应用例外全部通过。
+- [x] `startup.test.mjs`「native default and save, new Host cycles…」通过，连续重跑 3 次都通过。
+- [x] 其余 `startup` 用例（权限、设备、播放、模型失败）保持通过。
+- [x] `npm run typecheck`、`npm test` 全套：除 R8 对应用例外全部通过。
 
 **Spec 对照：** 诊断结论 R9；裁定 7。

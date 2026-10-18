@@ -405,6 +405,15 @@ window.__ModuleLoader__.load({
     const recordLabel = d => d.recording ? '结束录音' : d.state === 'reading' ? '点按插话' : '点按说话'
     const connect = (call, remote) => { call.autoPending = false; call.ui.retry = undefined; call.ui.running = call.start(remote) }
     const hangup = call => { call.autoPending = false; call.ui.retry = undefined; call.hangup() }
+    // The startup claim can settle before this client's first session-list pull lands, and opening an
+    // unlisted session throws; wait, at most `limit` ms, until the native list carries the supervisor.
+    const supervisorListed = (list, limit = 10000) => new Promise(resolve => {
+      const listed = () => list.getSnapshot().ids.includes(SUPERVISOR)
+      if (listed()) return resolve()
+      const done = () => { clearTimeout(timer); stop(); resolve() }
+      const timer = setTimeout(done, limit)
+      const stop = list.subscribe(() => { if (listed()) done() })
+    })
     const retry = async (call, remote) => {
       const previous = call.ui.running, pending = {}
       call.ui.retry = pending
@@ -736,7 +745,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'uiWorkspace', 'locale'],
+      inject: ['slots', 'uiWorkspace', 'locale', 'sessions'],
       apply(ctx) {
         const style = document.createElement('style'); style.textContent = CSS; document.head.append(style)
         ctx.effect(() => () => style.remove())
@@ -779,7 +788,8 @@ window.__ModuleLoader__.load({
               if (!response.ok) { call.set('failed', response.error.code); return }
               if (!response.value) return
               call.autoPending = true
-              await uiCtx.uiWorkspace.openSession(SUPERVISOR)
+              await supervisorListed(ctx.sessions.list)
+              if (!disposed) await uiCtx.uiWorkspace.openSession(SUPERVISOR)
               if (disposed) { call.autoPending = false; return }
               call.set(call.state, call.code)
             }).catch(error => call.set('failed', error?.code ?? 'UNAVAILABLE'))

@@ -6,7 +6,7 @@
 | --- | --- | --- | --- | --- |
 | [01](tickets/01-version-range-and-fixtures.md) | 版本区间、测试夹具与过时补丁 | 无 | 新版能安装与启动；测试只剩 R6/R8/R9 失败 | 实施完成，第 1 轮修复后双轴复审放行（0c000d6）；[验证记录](verification/01-version-range-and-fixtures.md) |
 | [02](tickets/02-hangup-redial-busy.md) | 挂断后立即重拨不再误报占线 | 01 | 挂断即释放通话占用 | 实施完成，首轮双轴评审放行（6878856）；[验证记录](verification/02-hangup-redial-busy.md) |
-| [03](tickets/03-startup-session-ready.md) | 启动自动接通等待会话列表就绪 | 01 | 冷启动多窗口自动接通不再 UNAVAILABLE | 待实施 |
+| [03](tickets/03-startup-session-ready.md) | 启动自动接通等待会话列表就绪 | 01 | 冷启动多窗口自动接通不再 UNAVAILABLE | 实施完成，待评审；[验证记录](verification/03-startup-session-ready.md) |
 | [04](tickets/04-realtime-model-label.md) | Realtime 模式输入框显示真实模型名 | 01 | 不再显示「请选择模型」 | 待实施 |
 
 ## 为什么这样拆
