@@ -4,7 +4,7 @@
 
 **阻塞于：** 01。
 
-**状态：** 实施完成，待评审。曾停在需人工关注（公开 API 做不到「只让 Nexus 认得、别的会话看不到」），按补充裁定改为锁定原生回退；证据、上游需求草稿与检查结果见[验证记录](../verification/04-realtime-model-label.md)。
+**状态：** 实施完成，首轮双轴评审（3b9fc87）两轴均 approve。曾停在需人工关注（公开 API 做不到「只让 Nexus 认得、别的会话看不到」），按补充裁定改为锁定原生回退；证据、上游需求草稿与检查结果见[验证记录](../verification/04-realtime-model-label.md)。
 
 **范围与约束：** 依据 Spec R8 与裁定 8。
 
@@ -17,3 +17,5 @@
 - [x] `npm run typecheck`、`npm test` 全套通过（opt-in 跳过除外）；`NEXUS_DESKTOP_SMOKE=1` 三项冒烟通过。
 
 **Spec 对照：** 诊断结论 R8；裁定 8；测试决定。
+
+**评审遗留（协调者裁定不修）：** 「新建会话」定位写法与 `cascade-lifecycle.test.mjs:106` 不一致（`.first()` 与 `exact: true` 加 `.last()`，两者都能用）；`tests/ui.test.mjs:82` 注释带批次编号 `R8:`；夹具模型名用正则而不是精确字符串；回退文案分不清"选了目录外模型"和"根本没选"（`source.model` 断言已经证明实际用的是 Realtime 模型）。均为低严重度判断题。Realtime 模式下 Nexus 的模型按钮仍可点开选目录里的模型，这是原生行为，本票未处理。

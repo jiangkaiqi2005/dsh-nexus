@@ -23,7 +23,7 @@
 | R5 | 有活跃轮次时正常退出，supervisor 自己写入 `turn/end` `{kind:'aborted', reason:{kind:'disposed'}}`，不再是重启后补的 `interrupted` | 恢复测试断言 | 01 |
 | R6 | 挂断上行与下一通 `call()` 竞争：`src/voice.ts` 的 `owner` 只在生成器 finally 里释放，立即重拨得到 `CALL_BUSY` | **插件代码** | 02 |
 | R7 | `dsh-base` 原生标题 `maxOutputTokens` 从 64 改为 4096，`src/work-session-titles.ts` 的补丁变成空操作 | 插件代码（删除） | 01 |
-| R8 | 当前模型不在模型目录时，新版模型选择器显示「请选择模型」而不是 `${provider}/${model}`；Realtime 模式下 Nexus 输入框因此显示误导文案 | **插件代码**（用户可见） | 04 |
+| R8 | 当前模型不在模型目录时，新版模型选择器显示「请选择模型」而不是 `${provider}/${model}`；Realtime 模式下 Nexus 输入框因此显示误导文案 | 测试（按补充裁定接受原生回退，插件代码不改） | 04 |
 | R9 | 启动自动接通：`claimStartup()` 为 true 后 `uiWorkspace.openSession(SUPERVISOR)` 抛 `sessions.retain: unknown session nexus-supervisor`（客户端会话列表尚未就绪），被吞成 `UNAVAILABLE` | **插件代码** `client.js` | 03 |
 
 另：`archive.test` 的 profile 重复挂载 `@deepseek-ai/dsh-schedule`（新版 `dsh-web-app` 已自带），日志报 `service "schedule" has been registered`，去掉重复行（01）。
@@ -44,7 +44,7 @@
 
 ## 不变的部分
 
-- Nexus 的领域行为、上下行协议、状态码、UI 视觉一律不变（R8 只改模型名显示）。
+- Nexus 的领域行为、上下行协议、状态码、UI 视觉一律不变（R8 按补充裁定也不改显示）。
 - 测试断言的行为不降低：改的是定位方式、夹具与随新版语义变化的期望值，每处都要能对应到上表根因。
 
 ## 测试决定
