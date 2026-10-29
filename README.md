@@ -8,8 +8,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
-![version](https://img.shields.io/badge/version-0.2.1-176b69)
-![Harness](https://img.shields.io/badge/Harness%20%2F%20Desktop-0.2.1--rc.2-176b69)
+![version](https://img.shields.io/badge/version-0.2.2-176b69)
+![Harness](https://img.shields.io/badge/Harness%20%2F%20Desktop-0.2.1--rc.3-176b69)
 ![node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%E2%89%A524-176b69)
 ![platform](https://img.shields.io/badge/tested%20on-Windows-lightgrey)
 
@@ -59,7 +59,7 @@ In Cascade mode, connecting a call only prepares the microphone and playback. No
 
 ## Requirements
 
-- DeepSeek Harness / Desktop **0.2.1-rc.2** (Cordis 4.0.5). The package accepts later 0.2.x releases, but only 0.2.1-rc.2 has been tested; 0.2.0-rc.2 is no longer supported.
+- DeepSeek Harness / Desktop **0.2.1-rc.3** (Cordis 4.0.5), the current verification baseline. Compatibility still starts at 0.2.1-rc.2, which was tested for the previous release; other 0.2.x versions remain untested. 0.2.0-rc.2 is not supported.
 - Windows. macOS and Linux are untested.
 - A default model configured in Harness that supports tool calls.
 - A [DashScope](https://dashscope.aliyun.com/) API key, stored in the Host's credential service as `DASHSCOPE_API_KEY`.
@@ -67,14 +67,14 @@ In Cascade mode, connecting a call only prepares the microphone and playback. No
 
 ## Quick start
 
-Download `dsh-nexus-0.2.1.tgz` from [Releases](https://github.com/jiangkaiqi2005/dsh-nexus/releases/latest).
+The installation package is `dsh-nexus-0.2.2.tgz`. See [Releases](https://github.com/jiangkaiqi2005/dsh-nexus/releases/latest) for published builds, or build it yourself using the development steps below.
 
 Open Desktop once so it creates its `desktop` profile, then quit it. Install with the CLI that ships inside Desktop (PowerShell; adjust both the CLI and tgz paths to yours):
 
 ```powershell
 $dsh = 'D:\DeepSeekHarness\resources\runtime\cli\bin\dsh.cmd'
-& $dsh --version   # should print 0.2.1-rc.2
-& $dsh plugin --profile desktop add .\dsh-nexus-0.2.1.tgz
+& $dsh --version   # verified with 0.2.1-rc.3
+& $dsh plugin --profile desktop add .\dsh-nexus-0.2.2.tgz
 ```
 
 Then:
@@ -152,10 +152,10 @@ npm ci --ignore-scripts
 npm run typecheck
 npm run build
 npm test
-npm pack   # build the package yourself: dsh-nexus-0.2.1.tgz
+npm pack   # build the package yourself: dsh-nexus-0.2.2.tgz
 ```
 
-Tests don't call paid models. They use an isolated profile, local controlled endpoints, and headless Edge. With Desktop 0.2.1-rc.2 installed, you can also run the packaged-install and full-scenario checks:
+Tests don't call paid models. They use an isolated profile, local controlled endpoints, and headless Edge. With Desktop 0.2.1-rc.3 installed, you can also run the packaged-install and full-scenario checks:
 
 ```powershell
 $env:NEXUS_DESKTOP_SMOKE = '1'
