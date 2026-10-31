@@ -1,8 +1,8 @@
 # Nexus 安装与使用
 
-本指南对应 Nexus 0.2.2、Harness / Desktop **0.2.1-rc.3**（Cordis 4.0.5）。兼容区间仍从 0.2.1-rc.2 起，该版本已在上一版验证；不支持 0.2.0-rc.2。其它 0.2.x 版本、macOS、Linux 和全新 Windows 机器尚无本次兼容结论。运行时包的 peer 版本区间见包内 `package.json`；不要在 profile 自动安装另一套 Host peer SDK。
+本指南对应 Nexus 0.2.3、Harness / Desktop **0.2.1-rc.5**（Cordis 4.0.5）。兼容区间仍从 0.2.1-rc.2 起，该版本与上一版基线 0.2.1-rc.3 都已验证；不支持 0.2.0-rc.2。其它 0.2.x 版本、macOS、Linux 和全新 Windows 机器尚无本次兼容结论。运行时包的 peer 版本区间见包内 `package.json`；不要在 profile 自动安装另一套 Host peer SDK。
 
-本次适配与测试范围见 [Desktop rc.3 验证记录](harness-0.2.1/verification/05-desktop-rc.3.md)。
+本次适配与测试范围见 [Desktop rc.5 验证记录](harness-0.2.1/verification/06-desktop-rc.5.md)。
 
 ## 安装到现有 Desktop
 
@@ -10,12 +10,12 @@
 
 ```powershell
 $nexusCli = 'D:\DeepSeekHarness\resources\runtime\cli\bin\dsh.cmd'
-$nexusBundle = 'C:\Downloads\dsh-nexus-0.2.2.tgz' # 改成实际文件
-& $nexusCli --version # 本次验证版本为 0.2.1-rc.3
+$nexusBundle = 'C:\Downloads\dsh-nexus-0.2.3.tgz' # 改成实际文件
+& $nexusCli --version # 本次验证版本为 0.2.1-rc.5
 & $nexusCli plugin --profile desktop add $nexusBundle
 ```
 
-安装退出码为 0 后，正常打开 Desktop，从侧栏底部 Nexus 进入主会话。npm 版 CLI 不管理 Desktop 保留的 profile。旧版 0.2.0 不能在 0.2.1-rc.2 及之后的版本上加载，需要替换为本次 0.2.2 tgz；请按交付文件的 SHA256 核对实际字节。
+安装退出码为 0 后，正常打开 Desktop，从侧栏底部 Nexus 进入主会话。npm 版 CLI 不管理 Desktop 保留的 profile。旧版 0.2.0 不能在 0.2.1-rc.2 及之后的版本上加载，需要替换为本次 0.2.3 tgz；请按交付文件的 SHA256 核对实际字节。
 
 安装器可能提示宿主 peer 未由 profile 的 pnpm 安装；这些包由实际 Host 提供。保持官方生成的 `nodeLinker: hoisted`、`autoInstallPeers: false`。安装成功还需确认入口能打开、文字输入能执行；出现激活或版本错误时保留实际错误，勿通过自动安装 peers 或忽略版本检查来掩盖问题。
 
@@ -25,7 +25,7 @@ $nexusBundle = 'C:\Downloads\dsh-nexus-0.2.2.tgz' # 改成实际文件
 
 ```powershell
 $nexusCli = 'D:\DeepSeekHarness\resources\runtime\cli\bin\dsh.cmd'
-$nexusBundle = 'C:\Downloads\dsh-nexus-0.2.2.tgz' # 改成实际文件
+$nexusBundle = 'C:\Downloads\dsh-nexus-0.2.3.tgz' # 改成实际文件
 $env:DSH_HOME = Join-Path $env:LOCALAPPDATA 'NexusHarnessClean'
 $env:DSH_AGENTS_HOME = Join-Path $env:DSH_HOME 'agents'
 & $nexusCli --profile nexus-clean --from-default-profile web --dump-default-config | Out-Null
