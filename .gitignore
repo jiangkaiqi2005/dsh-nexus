@@ -1,6 +1,9 @@
 .scratch/
 .agents/
 .codebase-memory/
+.claude/
+promo/
+skills-lock.json
 node_modules/
 dist/
 coverage/
