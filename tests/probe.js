@@ -2,6 +2,7 @@ import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { Session, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 
 export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'llm', 'loader']
 export function apply(ctx, config) {
@@ -19,7 +20,8 @@ export function apply(ctx, config) {
       let worker
       try {
         if (config.scenario.startsWith('storage-')) {
-          const session = ctx.sessions.prepare('nexus-supervisor', { meta: { agentPreset: 'nexus', cwd: process.cwd() } })
+          // A detached Session builds the stored artifact; a prepared one refuses appends until it is announced.
+          const session = Session.create('nexus-supervisor', undefined, { version: SESSION_FORMAT_VERSION, id: 'nexus-supervisor', createdAt: Date.now(), cwd: process.cwd(), isSeeded: false, agentPreset: 'nexus' })
           session.append('model/selection', { provider: 'storage-fixture', model: 'preserved-model' })
           const handle = await ctx.sessionPersistence.create(session.header)
           let artifact

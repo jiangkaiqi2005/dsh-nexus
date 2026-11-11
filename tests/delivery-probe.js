@@ -1,11 +1,15 @@
 import { writeFile } from 'node:fs/promises'
 import { LlmAdapter, HarnessError, createUserMessage } from '@deepseek-ai/dsh-llm'
 
-export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools', 'subagents']
+export const inject = ['agents', 'sessions', 'sessionController', 'sessionQuery', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools', 'subagents']
 const sleep = ms => new Promise(accept => setTimeout(accept, ms))
 const SUPERVISOR = 'nexus-supervisor'
 
 export function apply(ctx, config) {
+  const inspect = async sessionId => {
+    const observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' })
+    try { return { meta: observation.header, events: [...observation.events] } } finally { observation[Symbol.dispose]() }
+  }
   const gates = new Map()
   const gate = tag => {
     let entry = gates.get(tag)
@@ -120,7 +124,7 @@ export function apply(ctx, config) {
 
         for (const current of ctx.agents.list()) await current.whenIdle()
         const workers = ctx.agents.list().filter(current => current !== supervisor).map(current => ({ id: current.id, header: current.session.header, events: current.session.snapshotEvents(), status: current.status }))
-        if (!config.real && !workers.some(item => item.id === 'nexus-child')) { const state = await ctx.sessionController.inspect('nexus-child'); workers.push({ id: 'nexus-child', header: state.meta, events: state.events, status: 'inactive' }) }
+        if (!config.real && !workers.some(item => item.id === 'nexus-child')) { const state = await inspect('nexus-child'); workers.push({ id: 'nexus-child', header: state.meta, events: state.events, status: 'inactive' }) }
         for (const current of ctx.agents.list()) await ctx.parallel('session/flush', current.session)
         const entry = [...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus')
         await entry.update({ ...entry.options, disabled: true })

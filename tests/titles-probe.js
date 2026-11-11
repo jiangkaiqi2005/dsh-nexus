@@ -1,8 +1,12 @@
 import { writeFile } from 'node:fs/promises'
 import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
 
-export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'sessionTitle', 'llm', 'loader', 'agentDefaultModel']
+export const inject = ['agents', 'sessions', 'sessionController', 'sessionQuery', 'sessionPersistence', 'sessionTitle', 'llm', 'loader', 'agentDefaultModel']
 export function apply(ctx, config) {
+  const inspect = async sessionId => {
+    const observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' })
+    try { return { meta: observation.header, events: [...observation.events] } } finally { observation[Symbol.dispose]() }
+  }
   const sleep = ms => new Promise(accept => setTimeout(accept, ms))
   // What each work agent's model actually received as human text, per session, in request order.
   const received = {}
@@ -105,7 +109,7 @@ export function apply(ctx, config) {
         const listed = (await ctx.sessionController.list({})).items.map(item => ({ sessionId: item.sessionId, title: item.projections?.values?.title ?? null, lastPromptAt: item.projections?.values?.sessionListMetadata?.lastPromptAt ?? null }))
         const workers = []
         for (const id of ['titled-idle', 'titled-busy', 'legacy-worker', ...listed.filter(item => item.sessionId.startsWith('session-')).map(item => item.sessionId)]) {
-          const state = await ctx.sessionController.inspect(id)
+          const state = await inspect(id)
           workers.push({ id, header: state.meta, events: state.events })
         }
         const final = { title: ctx.sessionTitle.get(agent.session) ?? null }

@@ -2,6 +2,7 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { SessionId, SessionLogOffset, interruptedTurnClosers, type Session } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceNotFoundError, type SessionHandle } from '@deepseek-ai/dsh-session-persistence'
+import { modelSelectionProjectionDefinition } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import type {} from '@deepseek-ai/dsh-session-title'
@@ -12,7 +13,7 @@ import { SUMMARY_MODEL } from './compaction.js'
 import { TTS_ENDPOINT, TTS_MODEL, TTS_VOICE } from './speech.js'
 import { ASR_ENDPOINT, ASR_MODEL } from './recognition.js'
 
-export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'sessionTitle', 'llm', 'agentDefaultModel']
+export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'sessionQuery', 'credentials', 'workspaceRegistry', 'agentPresets', 'sessionController', 'tools', 'systemPrompt', 'commands', 'tokenMeter', 'sessionTitle', 'llm', 'agentDefaultModel']
 export const SUPERVISOR_ID = SessionId('nexus-supervisor')
 
 export interface Config extends SupervisorConfig { autoVoice: Volatile<boolean> }
@@ -44,6 +45,9 @@ export async function apply(ctx: Context, config: Config) {
   const startup = (process as StartupProcess)[STARTUP] ??= { enabled: config.autoVoice?.get() ?? false, attempted: false }
   const voice = new VoiceController(ctx, startup)
   return ctx.effect(async function* () {
+    // Shares the loop's unit for this key; the supervisor reads its own durable model choices through it.
+    const modelSelection = await ctx.sessionProjections.register(modelSelectionProjectionDefinition)
+    yield () => modelSelection.dispose()
     let session: Session | undefined
     let handle: SessionHandle
     let storedCount = 0
@@ -69,17 +73,24 @@ export async function apply(ctx: Context, config: Config) {
         inheritedEventCount: handle.inheritedEventCount, eventState: restored.eventState,
       })
     }
-    const agent = new Supervisor(ctx, session, config)
+    const agent = new Supervisor(ctx, session, config, modelSelection.readerFor(session))
     yield agent.scope.rawDispose
-    if (!storedCount) session.append('model/selection', agent.options)
     // Restore seeds do not publish live events; store only their new suffix.
     const suffix = session.snapshotEvents(SessionLogOffset(storedCount))
     if (suffix.length) await handle.append(suffix)
     await handle.flush()
     yield ctx.sessions.enter(session)
+    ctx.sessions.announce(session)
+    // A prepared Session accepts appends only once announced, and the store then routes them to the open writer.
+    if (!storedCount) session.append('model/selection', agent.options)
+    await ctx.sessions.flush(session)
     // The main session is named Nexus unless the user named it: an automatic title (fallback or provider) is replaced.
     // The native rename records a user title, which also keeps first prompts from deriving another fallback.
     if (ctx.sessionTitle.get(session)?.source.kind !== 'user') ctx.sessionTitle.rename(session, 'Nexus')
+    // The native blank-session composer requires durable Workspace membership.
+    const workspace = await ctx.workspaceRegistry.create(session.header.cwd ?? process.cwd(), 'Nexus')
+    await workspace.attachSession(session.id)
+    // Reachable only after the session accepts appends: a prompt admitted earlier is rejected by the store.
     yield ctx.agents.enter(agent, undefined)
     // Reverse teardown: stop/idle → close durable writer → registry → session → scope.
     yield () => handle.close()
@@ -87,10 +98,6 @@ export async function apply(ctx: Context, config: Config) {
     yield () => agent.stop()
     // Observe only after the supervisor can accept inbox work; disposed first on teardown.
     yield new ResultRelay(ctx, agent).start()
-    // The native blank-session composer requires durable Workspace membership.
-    const workspace = await ctx.workspaceRegistry.create(session.header.cwd ?? process.cwd(), 'Nexus')
-    await workspace.attachSession(session.id)
-    ctx.sessions.announce(session)
     await ctx.agents.announce(agent, storedCount ? 'resume' : 'startup')
     // Media clients may claim startup only after the native session and Host are ready.
     yield voice.attach(agent)

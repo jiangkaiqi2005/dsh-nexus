@@ -3,8 +3,12 @@ import { resolve } from 'node:path'
 import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools', 'subagents']
+export const inject = ['agents', 'sessions', 'sessionController', 'sessionQuery', 'sessionPersistence', 'llm', 'loader', 'agentDefaultModel', 'tools', 'subagents']
 export function apply(ctx, config) {
+  const inspect = async sessionId => {
+    const observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' })
+    try { return { meta: observation.header, events: [...observation.events] } } finally { observation[Symbol.dispose]() }
+  }
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
       const task = options.messages.filter(message => message.role === 'user').flatMap(message => message.content).filter(part => part.type === 'text' && /^(run-|hold-|steered-|Existing user context)/.test(part.text)).at(-1)?.text ?? ''
@@ -59,7 +63,7 @@ export function apply(ctx, config) {
           else { stable = 0; last = total }
         }
         const workers = ctx.agents.list().filter(current => current !== agent).map(current => ({ id: current.id, ownedByNexus: ctx.agents.isOwnedBy(current.id, agent), header: current.session.header, events: current.session.snapshotEvents(), status: current.status }))
-        if (!config.real && !workers.some(item => item.id === 'cold-child')) { const state = await ctx.sessionController.inspect('cold-child'); workers.push({ id: state.meta.id, header: state.meta, events: state.events, ownedByNexus: false, status: 'inactive' }) }
+        if (!config.real && !workers.some(item => item.id === 'cold-child')) { const state = await inspect('cold-child'); workers.push({ id: state.meta.id, header: state.meta, events: state.events, ownedByNexus: false, status: 'inactive' }) }
         for (const current of ctx.agents.list()) await ctx.parallel('session/flush', current.session)
         const entry = [...ctx.loader.entries()].find(item => item.options.name === 'dsh-nexus')
         await entry.update({ ...entry.options, disabled: true })

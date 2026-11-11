@@ -4,6 +4,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
+import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
@@ -31,9 +32,12 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
   /** Inspect a target without activating it, refusing the supervisor itself and subagent sessions. */
   const conversation = async (id: string, signal: AbortSignal) => {
     if (id === supervisor.id) throw new Error('Use the main conversation to address Nexus itself')
-    const state = await ctx.sessionController.inspect(SessionId(id), signal)
-    if (state.meta.origin === 'subagent') throw new Error(`Session "${id}" is a subagent session owned by the agent of ${state.meta.parentSession ?? 'its parent'}; Nexus manages conversation sessions only`)
-    return state
+    const observation = await ctx.sessionQuery.observeSession(SessionId(id), { signal, projectionMode: 'none' })
+    try {
+      const meta = observation.header
+      if (meta.origin === 'subagent') throw new Error(`Session "${id}" is a subagent session owned by the agent of ${meta.parentSession ?? 'its parent'}; Nexus manages conversation sessions only`)
+      return { meta, events: observation.events }
+    } finally { observation[Symbol.dispose]() }
   }
   const resolve = async (id: string) => {
     const live = ctx.agents.get(SessionId(id))
@@ -62,7 +66,7 @@ export function registerWorkSessions(ctx: Context, supervisor: Agent, tools: Too
       const id = SessionId(args.sessionId)
       const state = await conversation(id, exec.signal)
       const throughSeq = state.events.length - 1
-      const page = await ctx.sessionController.page({ address: { kind: 'session', sessionId: id }, throughSeq, ...(args.beforeSeq === undefined ? {} : { beforeSeq: args.beforeSeq }), maxMessages: 30 }, exec.signal)
+      const page = await ctx.sessionController.events({ address: { kind: 'session', sessionId: id }, throughSeq, ...(args.beforeSeq === undefined ? {} : { beforeSeq: args.beforeSeq }), maxMessages: 30 }, exec.signal)
       return JSON.parse(JSON.stringify({ sessionId: id, header: state.meta, status: ctx.agents.get(id)?.status ?? 'inactive', throughSeq, ...page })) as JsonValue
     },
   }))

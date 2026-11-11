@@ -1,4 +1,4 @@
-import type { Inbox, InboxTarget, AgentEventDispatch } from '@deepseek-ai/dsh-agent'
+import type { Inbox, InboxState, InboxTarget, AgentEventDispatch } from '@deepseek-ai/dsh-agent'
 import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
@@ -7,10 +7,11 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 /** Uses the Host's standard inbox projection; mutations remain native log facts. */
 export class NativeInbox implements Inbox {
   constructor(private session: Session, private ctx: Context, private events: AgentEventDispatch) {}
-  private state() {
-    const state = this.ctx.sessionProjections.stateOf(this.session, 'inbox')
+  private state(): InboxState {
+    const state = this.ctx.sessionProjections.snapshot(this.session, ['inbox']).values.inbox
     if (!state) throw new Error('Nexus requires the native inbox projection')
-    return state
+    // The native inbox view is its fold state unchanged, so the wire-typed rows are the live messages.
+    return state as unknown as InboxState
   }
   get nextTurn() { return this.state()['next-turn'] }
   get nextStep() { return this.state()['next-step'] }

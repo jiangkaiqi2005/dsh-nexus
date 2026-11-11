@@ -20,10 +20,10 @@ test('plugin and development Host resolve the same SDK at the tested runtime ver
 })
 
 test('native compatibility gate accepts supported 0.2.x and rejects old and next-minor runtimes', () => {
-  for (const version of ['0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.5', '0.2.1', '0.2.5']) {
+  for (const version of ['0.2.2-rc.1', '0.2.2', '0.2.5']) {
     assert.equal(evaluatePluginCompatibility(manifest, {}, version), undefined, version)
   }
-  for (const version of ['0.2.0-rc.2', '0.3.0-rc.1', '0.3.0']) {
+  for (const version of ['0.2.1-rc.2', '0.2.1-rc.5', '0.2.1', '0.2.0-rc.2', '0.3.0-rc.1', '0.3.0']) {
     assert.ok(evaluatePluginCompatibility(manifest, {}, version), version)
   }
 })

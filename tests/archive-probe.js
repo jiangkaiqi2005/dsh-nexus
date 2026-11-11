@@ -2,10 +2,14 @@ import { writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm'
 
-export const inject = ['agents', 'sessionController', 'workspaceRegistry', 'llm', 'agentDefaultModel', 'jobs', 'schedule']
+export const inject = ['agents', 'sessionController', 'sessionQuery', 'workspaceRegistry', 'llm', 'agentDefaultModel', 'jobs', 'schedule']
 
 /** Drive Nexus through the main conversation and observe native archival and owned work. */
 export function apply(ctx, config) {
+  const inspect = async sessionId => {
+    const observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' })
+    try { return { meta: observation.header, events: [...observation.events] } } finally { observation[Symbol.dispose]() }
+  }
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
       const holding = options.messages.some(message => message.role === 'user' && message.content.some(part => part.type === 'text' && part.text === 'hold-until-archive'))
@@ -32,18 +36,19 @@ export function apply(ctx, config) {
           const done = new Promise(accept => child.once('exit', () => { processExited = true; accept({ status: 'killed' }) }))
           return { cancel: () => child.kill(), done }
         } })
-        await ctx.schedule.create(worker.id, { title: 'Archive must stop this reminder', prompt: 'must-not-deliver-after-archive', after_seconds: 3600 })
+        await ctx.schedule.create({ title: 'Archive must stop this reminder', prompt: 'must-not-deliver-after-archive', timing: { kind: 'after', after_seconds: 3600 }, target: { kind: 'session', sessionId: worker.id } }, worker.id)
+        const schedules = async () => (await ctx.schedule.list({})).items.filter(item => item.target.sessionId === worker.id)
         const supervisor = ctx.agents.get('nexus-supervisor')
         const prompt = async text => {
           await ctx.sessionController.prompt({ sessionId: supervisor.id, requestId: text, mode: 'queue', content: [{ type: 'text', text }] }, new AbortController().signal)
           await supervisor.whenIdle()
         }
-        const before = { status: worker.status, jobs: ctx.jobs.list(worker.id), schedules: await ctx.schedule.list({ sessionId: worker.id }) }
+        const before = { status: worker.status, jobs: ctx.jobs.list(worker.id), schedules: await schedules() }
         await prompt('ARCHIVE-RUNNING')
         if (!ctx.workspaceRegistry.archivedSessionIds.includes(worker.id)) throw new Error('Nexus did not archive the running work session')
         await worker.whenIdle()
         await ctx.jobs.wait(jobId, 10000, worker.id)
-        const archived = { ids: [...ctx.workspaceRegistry.archivedSessionIds], status: worker.status, jobs: ctx.jobs.list(worker.id), schedules: await ctx.schedule.list({ sessionId: worker.id }), processExited, state: await ctx.sessionController.inspect(worker.id) }
+        const archived = { ids: [...ctx.workspaceRegistry.archivedSessionIds], status: worker.status, jobs: ctx.jobs.list(worker.id), schedules: await schedules(), processExited, state: await inspect(worker.id) }
         await prompt('ARCHIVE-AGAIN')
         await prompt('ARCHIVE-MAIN')
         await prompt('ARCHIVE-MISSING')
@@ -51,11 +56,11 @@ export function apply(ctx, config) {
         await ctx.workspaceRegistry.unarchiveSession(worker.id)
         await ctx.sessionController.prompt({ sessionId: worker.id, requestId: 'resume', mode: 'queue', content: [{ type: 'text', text: 'continue-after-unarchive' }] }, new AbortController().signal)
         await worker.whenIdle()
-        const restored = { ids: [...ctx.workspaceRegistry.archivedSessionIds], state: await ctx.sessionController.inspect(worker.id) }
+        const restored = { ids: [...ctx.workspaceRegistry.archivedSessionIds], state: await inspect(worker.id) }
         const call = await supervisor.startCall({ audio: () => {}, flush: () => {}, state: () => {}, failed: code => { throw new Error(code) } }, new AbortController().signal)
         call.end()
         await supervisor.whenIdle()
-        await writeFile(config.report, JSON.stringify({ before, archived, afterErrors, restored, supervisor: await ctx.sessionController.inspect(supervisor.id) }))
+        await writeFile(config.report, JSON.stringify({ before, archived, afterErrors, restored, supervisor: await inspect(supervisor.id) }))
       } catch (error) { await writeFile(config.report, JSON.stringify({ error: String(error), stack: error.stack })) }
     }, 1500)
     return () => clearTimeout(timer)

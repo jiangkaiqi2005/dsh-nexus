@@ -1,7 +1,7 @@
 import type { Context, Volatile } from '@deepseek-ai/cordis'
-import { agentEvents, assembleContextFor, type Agent, type AgentCancelCause, type AgentStatus, type CancelOptions, type InboxTarget } from '@deepseek-ai/dsh-agent'
+import { AgentModel, agentEvents, assembleContextFor, type Agent, type AgentCancelCause, type AgentOptions, type AgentStatus, type CancelOptions, type InboxTarget, type Model, type ModelSelectionProjectionState } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { createAssistantMessage, createSystemMessage, createUserMessage, createToolResultMessage, isHarnessError, LlmAttemptId, type LlmCallConfig, type StreamChunk, type UserMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createSystemMessage, createUserMessage, isHarnessError, LlmAttemptId, type LlmCallConfig, type StreamChunk, type UserMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-stream'
 import { canonicalHeader, type Session, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -12,7 +12,7 @@ import { MANUAL_FAILURES, RETAIN_SHARE, USEFUL_SHARE, compactableRange, summaryT
 import { registerWorkSessions } from './work-sessions.js'
 import { renderPrompt, renderContextSnapshot, type SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
-import type { ToolExecutionResult, ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { ToolBatchExecutionError, type ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { isCompactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
@@ -83,8 +83,10 @@ interface Call {
 export class Supervisor implements Agent {
   readonly id
   private mode: 'cascade' | 'realtime'
-  private model?: LlmCallConfig
-  get options(): LlmCallConfig { return this.mode === 'realtime' ? { provider: 'dashscope-realtime', model: MODEL } : this.model ?? this.ctx.agentDefaultModel.currentSelection() }
+  /** The prepared cascade route, held so later steps of the same call keep the model that answered. */
+  private cascadeSelection?: LlmCallConfig
+  get options(): LlmCallConfig { return this.mode === 'realtime' ? { provider: 'dashscope-realtime', model: MODEL } : this.cascadeSelection ?? this.ctx.agentDefaultModel.currentSelection() }
+  readonly model: Model
   readonly scope
   readonly ctx
   readonly inbox
@@ -112,13 +114,20 @@ export class Supervisor implements Agent {
   private readonly hungUp = new WeakSet<RealtimeConnection>()
   status: AgentStatus = 'idle'
 
-  constructor(ctx: Context, readonly session: Session, private config: Config) {
+  constructor(ctx: Context, readonly session: Session, private config: Config, modelSelection: () => ModelSelectionProjectionState) {
     this.mode = config.voiceMode.get()
     this.id = session.id
     this.scope = createScope(ctx, this)
     this.ctx = this.scope.ctx
     this.events = agentEvents(this.ctx, this)
     this.inbox = new NativeInbox(session, this.ctx, this.events)
+    // The recorded-selection fallback stays live: a call changes the route while the agent is running.
+    const route = () => this.options
+    this.model = new AgentModel(modelSelection, session, {
+      get provider() { return route().provider },
+      get model() { return route().model },
+      get reasoningEffort() { return route().reasoningEffort },
+    } satisfies AgentOptions)
     for (const event of session.snapshotEvents()) {
       if (event.type === 'turn/start') this.turn = Math.max(this.turn, event.data.turn)
     }
@@ -320,7 +329,7 @@ export class Supervisor implements Agent {
     if (this.disposed) throw new RealtimeFailure('UNAVAILABLE')
     if (this.call || this.cascadeCall) throw new RealtimeFailure('CALL_BUSY')
     this.mode = this.config.voiceMode.get()
-    this.model = undefined
+    this.cascadeSelection = undefined
     if (this.mode === 'cascade') {
       let speech: SpeechActivity = 'idle', speechCode: string | undefined
       const activity = () => { link.activity?.(recording.phase ?? speech, recording.phase ? undefined : speechCode); call.setRecording(recording.phase === 'recording') }
@@ -449,7 +458,7 @@ export class Supervisor implements Agent {
     const prepared = cascade ? await this.ctx.llm.prepareCall(this.ctx.agentDefaultModel.currentSelection(), signal) : undefined
     const selection = prepared?.config ?? this.options
     if (cascade) {
-      this.model = selection
+      this.cascadeSelection = selection
       const selected = this.session.snapshotEvents().findLast(event => event.type === 'model/selection')
       if (!selected || JSON.stringify(selected.data) !== JSON.stringify(selection)) this.session.append('model/selection', selection)
     }
@@ -569,21 +578,17 @@ export class Supervisor implements Agent {
       throw error
     }
     let concluded = false
-    for (const call of calls) concluded = (await this.execute(call, turn, step, signal)) || concluded
-    return requestedTools && !concluded
-  }
-  private async execute(call: ToolCallBlock, turn: number, step: number, signal: AbortSignal) {
-    this.session.append('tool/call', { turn, step, callId: call.id, name: call.name, arguments: call.arguments })
-    let result: ToolExecutionResult | undefined
-    let args: unknown
-    try { args = JSON.parse(call.arguments) }
-    catch {
-      result = { isError: true, error: { message: 'Tool arguments must be valid JSON.', info: { name: 'ToolArgumentsError', code: 'INVALID_ARGUMENTS' } }, content: [{ type: 'text', text: 'Tool arguments must be valid JSON.' }] }
+    try {
+      // The executor parses arguments and records the tool/call–tool/result pair; Nexus keeps dispatching one call at a time.
+      const batch = await this.ctx.agents.withInitiator(this, () => this.tools.execute({ calls, signal, agent: this, log: { turn, step }, maxParallelToolCalls: 1 }))
+      concluded = batch.concluded
+      for (const message of batch.additionalContexts) this.session.append('user/message', message, { surfaceOp: 'append' })
+    } catch (error) {
+      if (!(error instanceof ToolBatchExecutionError)) throw error
+      for (const message of error.partial.additionalContexts) this.session.append('user/message', message, { surfaceOp: 'append' })
+      throw error.cause
     }
-    result ??= await this.ctx.agents.withInitiator(this, () => this.tools.execute({ callId: call.id, name: call.name, arguments: args, agent: this, signal }))
-    this.session.append('tool/result', { turn, step, message: createToolResultMessage({ callId: call.id, content: result.content, isError: result.isError }), ...(result.isError && result.error.info ? { error: result.error.info } : {}), ...(result.meta === undefined ? {} : { meta: result.meta }) }, { surfaceOp: 'append' })
-    for (const message of result.additionalContexts ?? []) this.session.append('user/message', message, { surfaceOp: 'append' })
-    return result.concludesTurn === true
+    return requestedTools && !concluded
   }
   async stop() {
     this.disposed = true

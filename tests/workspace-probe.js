@@ -2,14 +2,18 @@ import { writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 
-export const inject = ['agents', 'sessions', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'llm', 'agentDefaultModel', 'loader']
+export const inject = ['agents', 'sessions', 'sessionController', 'sessionQuery', 'sessionPersistence', 'workspaceRegistry', 'llm', 'agentDefaultModel', 'loader']
 
 /** Exercise the model tools and inspect their effects through public native services. */
 export function apply(ctx, config) {
+  const inspect = async sessionId => {
+    const observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' })
+    try { return { meta: observation.header, events: [...observation.events] } } finally { observation[Symbol.dispose]() }
+  }
   class WorkerAdapter extends LlmAdapter {
     async *stream(options) {
       const task = options.messages.filter(message => message.role === 'user').flatMap(message => message.content).findLast(part => part.type === 'text' && part.text.startsWith('run-'))?.text
-      const state = await ctx.sessionController.inspect(options.sessionId)
+      const state = await inspect(options.sessionId)
       await writeFile(resolve(state.meta.cwd, 'workspace-task.txt'), task)
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `Executed in target workspace: ${task}` } }
@@ -54,7 +58,7 @@ export function apply(ctx, config) {
         try { await prompt('WORKSPACE-QUERY-FAILURE') } finally { ctx.workspaceRegistry.list = list }
         const workers = []
         for (const current of ctx.agents.list().filter(current => current !== agent)) {
-          const state = await ctx.sessionController.inspect(current.id)
+          const state = await inspect(current.id)
           workers.push({ id: current.id, header: state.meta, events: state.events })
         }
         const final = await snapshot()

@@ -500,7 +500,8 @@ test('during a call a replacement discarded once the agent is idle is retried at
     nexus: '    compactionBudget: 19000\n    summaryModel: nexus-test-summary/configured-sum\n',
     model: { opening: { 1: 'delay' } },
     // The manual compaction runs between turns while the first replacement opens, so no turn ends after it is discarded.
-    steps: [{ call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 6 }, { command: '/compact' }, { until: 'rebuilt' }, { prompt: 'After rebuild.' }, { call: 'end' }],
+    // 0.2.2-rc.1's fixed supervisor request is ~852 tokens larger than rc.5's; six long prompts leave the automatic span under the useful share.
+    steps: [{ call: 'start' }, { prompt: 'Remember the codename KESTREL-9.' }, { long: 7 }, { command: '/compact' }, { until: 'rebuilt' }, { prompt: 'After rebuild.' }, { call: 'end' }],
   })
   const { events, requests, requestConnections, connections, closed, link, commands } = report
   assert.equal(commands[0].result.kind, 'success')
